@@ -3,12 +3,28 @@ import mappy
 import pysam
 import os
 import tempfile
+import intervaltree
+from itertools import groupby
+from tqdm import tqdm
 
 from collections import defaultdict, Counter
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
-from insilicosv.simulate import SVSimulator
+from pysam.libcvcf import VCFRecord
 
+PROP_THRESHOLD = 0.9
+
+def get_start_stop(rec: VCFRecord) -> Tuple[int, int]:
+    """
+    Converts VCF start/stop coordinates to Python style
+    VCF range coordinates are 1-indexed and have inclusive ends
+    :param rec: VCF record with start and end
+    :return: Tuple containing start and stop coordinates
+    """
+    start = rec.start - 1
+    stop = rec.stop
+
+    return start, stop
 
 class AlignScorer(object):
     def __init__(self, ref_sequence, sample_sequence, callset_vcf, output_dir, buffer):
@@ -58,51 +74,121 @@ class AlignScorer(object):
         the list should include the evidence of the SV at the source and the target.
         """
         records = self.variants[svid]
-
         sv_type = records[0].info['SVTYPE']
-
         chrom = records[0].chrom
 
-        start = min([rec.start for rec in records])
-        stop = max([rec.stop for rec in records])
+        queries = []
 
-        start_buffer = min(self.buffer, start)
-        stop_buffer = min(stop + self.buffer, self.ref_fasta.get_reference_length(chrom))
+        orig_sequence = list(self.ref_fasta.fetch(reference=chrom))
+        new_sequence = orig_sequence.copy()
+        changed_mask = [False] * len(new_sequence)
 
-        orig_sequence = self.ref_fasta.fetch(reference=chrom,
-                                             start=start - start_buffer,
-                                             end=stop + stop_buffer)
+        delete_placeholder = ''
+        complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A', '': ''}
 
-        new_sequence = list(orig_sequence)
+        def reverse_complement(seq: List):
+            return [complement[x] for x in reversed(seq)]
 
-        subsequences = []  # multiple subsequences may occur if there is a dispersion
+        # Reorder records to place any insertions at the end, sorted by target location
+        target_records = []
+        in_place_records = []
 
-        # Create the subsequence corresponding to the SV
-        if sv_type in ['INVdel']:
-            # No dispersions. Directly apply insilicoSV operations.
-            # We're implementing this with O(N) operations for simplicity
+        for rec in records:
+            if 'TARGET' in rec.info:
+                target_records.append(rec)
+            else:
+                in_place_records.append(rec)
 
-            delete_placeholder = ''
+        if len(target_records) > 1:
+            target_records = sorted(target_records, key=lambda rec: (rec.info['TARGET'], rec.info.get('INSORD', 0)), reverse=True)
+            # print(f"WARNING: The list for {svid}-{sv_type} contains more than one record with target. Sorting in reverse order by target and INSORD if available, but conflicts are possible")
 
-            for rec in records:
-                offset_start = rec.start - start - start_buffer
-                offset_stop = rec.stop - start - start_buffer
-                if rec.info['OP_TYPE'] == 'CUT':
-                    new_sequence[offset_start:offset_stop] = [delete_placeholder] * (offset_stop - offset_start)
-                if rec.info['OP_TYPE'] == 'INV':
-                    new_sequence[offset_start:offset_stop] = new_sequence[offset_start:offset_stop:-1]
+        records = in_place_records + target_records
 
-            new_sequence = ''.join(new_sequence)
+        for rec in records:
+            # Supported operations:
+            # CUT (aka DEL)
+            # COPY-PASTE (aka dDUP, DUP)
+            # CUT-PASTE (aka nrTRA)
+            # COPYinv_PASTE (aka INV_dDUP)
+            # CUTinv-PASTE (aka INV-nrTRA)
 
-            subsequence = {
-                'sequence': new_sequence,
-                'chrom': chrom,
-                'location': start
+            start, stop = get_start_stop(rec)
+
+            if rec.info.get('TARGET_CHROM', chrom) != chrom:
+                print(f"WARNING: Skipping record: {rec.id}-{sv_type} because interchromosome target. Interchromosome checks not implemented yet.")
+                return []
+
+            target = rec.info.get('TARGET', 0) - 1  # Convert target to 0-index
+
+            if rec.info['OP_TYPE'] == 'CUT' or rec.info['SVTYPE'] == 'DEL':
+                new_sequence[start:stop] = [delete_placeholder] * (stop - start)
+
+                changed_mask[start:stop] = [True] * (stop - start)
+            elif rec.info['OP_TYPE'] == 'INV' or rec.info['SVTYPE'] == 'INV':
+                new_sequence[start:stop] = reverse_complement(orig_sequence[start:stop])
+
+                changed_mask[start:stop] = [True] * (stop - start)
+            elif rec.info['OP_TYPE'] == 'COPY-PASTE' or rec.info['SVTYPE'] in ['DUP', 'dDUP']:
+                clip = orig_sequence[start:stop]
+                new_sequence = new_sequence[:target] + clip + new_sequence[target:]
+
+                changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
+            elif rec.info['OP_TYPE'] in ['CUT-PASTE'] or rec.info['SVTYPE'] == 'nrTRA':
+                clip = orig_sequence[start:stop]
+                new_sequence[start:stop] = [delete_placeholder] * (stop - start)
+                changed_mask[start:stop] = [True] * len(clip)
+
+                new_sequence = new_sequence[:target] + clip + new_sequence[target:]
+                changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
+            elif rec.info['OP_TYPE'] == 'COPYinv-PASTE' or rec.info['SVTYPE'] in ['INV_dDUP']:
+                clip = reverse_complement(orig_sequence[start:stop])
+                new_sequence = new_sequence[:target] + clip + new_sequence[target:]
+
+                changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
+            elif rec.info['OP_TYPE'] == 'CUTinv-PASTE' or rec.info['SVTYPE'] in ['INV_nrTRA']:
+                clip = reverse_complement(orig_sequence[start:stop])
+
+                new_sequence[start:stop] = [delete_placeholder] * (stop - start)
+                new_sequence = new_sequence[:target] + clip + new_sequence[target:]
+
+                changed_mask[start:stop] = [True] * len(clip)
+                changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
+            else:
+                print(f"WARNING: Unknown OP_TYPE: {rec.info['OP_TYPE']}")
+
+        if len(changed_mask) == 0:
+            print(f"WARNING: No changed intervals found for {svid}-{sv_type}")
+            return []
+
+        intervals = []
+
+        # Get contiguous blocks of changed indices
+        i = 0
+        for value, group in groupby(changed_mask):
+            group_len = len(list(group))
+            if value:
+                intervals.append((i, i + group_len))
+            i += group_len
+
+        for start, stop in intervals:
+            adjusted_start = max(0, start - self.buffer)
+            adjusted_stop = min(stop + self.buffer + 1, len(new_sequence))
+            sequence = ''.join(new_sequence[adjusted_start:adjusted_stop])
+            query = {
+                'chrom': rec.chrom,
+                'svtype': sv_type,
+                'svid': svid,
+                'sequence': sequence,
+                'location': adjusted_start,
+                'length': len(sequence),
             }
 
-            subsequences.append(subsequence)
+            queries.append(query)
 
-        return subsequences
+        print(f'Checking {svid}-{sv_type} with {len(queries)} queries')
+
+        return queries
 
     def match_subsequence(self, query):
         """
@@ -116,12 +202,13 @@ class AlignScorer(object):
 
         return chrom_alignments
 
-    def score_all(self, location_tolerance=float('inf'), phred_threshold=50):
+
+    def score_all(self, location_tolerance=float('inf'), error_threshhold=10):
         """
         For each SV, checks whether a subsequence matching its result exists in the sample sequence
         Breaks down accuracy by SV type and total
         :param location_tolerance: maximum base pair location distance to count as a correct match (default infinite)
-        :param phred_threshold: maximum phred score to count as a correct match
+        :param error_threshold: maximum error to count as a correct match
         :return: rate of correct matches (number matches / total SVs), i.e., precision
         """
 
@@ -129,7 +216,12 @@ class AlignScorer(object):
         correct_calls = Counter()
         precision = {}
 
-        for svid in self.variants.keys():
+        def check_match(alignment, query):
+            error = alignment.NM + max(0, len(query) - alignment.blen)
+            print(f"Alignment had {alignment.blen} bases, {alignment.NM} mismatches, query was {len(query)}. Total error: {error}")
+            return error <= error_threshhold
+
+        for svid in tqdm(self.variants.keys(), total=len(self.variants)):
             sv_type = self.variants[svid][0].info['SVTYPE']
             total_calls[sv_type] += 1
 
@@ -141,17 +233,24 @@ class AlignScorer(object):
                 alignments = self.match_subsequence(sequence)
 
                 close_alignments = [a for a in alignments if abs(a.r_st - sequence['location']) <= location_tolerance]
-                matched.append(any([a.mapq > phred_threshold for a in close_alignments]))
+                matched.append(any([check_match(a, sequence['sequence']) for a in close_alignments]))
+                print(f"Query match for {sequence['svid']}-{sequence['svtype']}: {matched[-1]}")
 
-            if all(matched) and len(matched) == len(sequences):
+            if len(sequences) > 0 and all(matched) and len(matched) == len(sequences):
+                # print("Match successful")
                 correct_calls[sv_type] += 1
+            # else:
+                # print("No match found")
+
 
             precision[sv_type] = correct_calls[sv_type] / total_calls[sv_type]
 
 
         precision['ALL'] = sum(correct_calls.values()) / sum(total_calls.values())
+        correct_calls['ALL'] = sum(correct_calls.values())
+        total_calls['ALL'] = sum(total_calls.values())
 
-        return precision
+        return precision, correct_calls, total_calls
 
 def main():
     parser = argparse.ArgumentParser(description='Score VCF SV calls against a reference and sample genome')
@@ -163,12 +262,24 @@ def main():
     args = parser.parse_args()
 
     scorer = AlignScorer(args.reference, args.sample, args.calls, args.output_dir, args.buffer)
-    sequences = scorer.simulate_subsequences('sv0')
-    scorer.match_subsequence(sequences[0])
+    # sequences = scorer.simulate_subsequences('sv0')
+    # scorer.match_subsequence(sequences[0])
 
-    precision = scorer.score_all(phred_threshold=50)
+    precision, correct_calls, total_calls = scorer.score_all(error_threshhold=10)
 
     print(f"Precision: {precision}")
+
+    import pandas as pd
+
+    df = pd.DataFrame({
+        'correct_calls': correct_calls,
+        'total_calls': total_calls,
+        'precision': precision,
+    })
+
+    print(df)
+
+
 
 
 if __name__ == '__main__':
@@ -177,4 +288,9 @@ if __name__ == '__main__':
 '''
 --reference /data/refs/refdata-GRCh38-2.1.0/fasta/genome.fa --sample /data/refs/HG002/hg002v1.1.fasta --calls ./test_calls.vcf
 --reference /data/refs/refdata-GRCh38-2.1.0/fasta/genome.chr21.fa --sample /data/bert/groovi-infra/sim_data/sim.hapA.fa --calls /data/bert/groovi-infra/sim_data/sim.vcf --output_dir output --buffer 50
+--reference ./data/genome.chr21.fa --sample ./sim_data/sim.hapA.fa --calls ./sim_data/sim.vcf --output_dir output --buffer 50
+
+cat ./sim_data/sim.hapA.fa ./sim_data/sim.hapB.fa > ./sim_data/sim.combined.fa
+
+--reference ./data/genome.chr21.fa --sample ./sim_data/sim.combined.fa --calls ./sim_data/sim.vcf --output_dir output --buffer 50
 '''
