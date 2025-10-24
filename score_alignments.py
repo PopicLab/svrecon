@@ -39,9 +39,14 @@ class AlignScorer(object):
         self.variants = None
         self.vcf_header = None
         self.read_vcf(callset_vcf)
+        print(f"Loading reference into aligner")
         self.aligner = mappy.Aligner(fn_idx_in=sample_sequence, preset='map-pb')
         print(f"Loaded aligner with sequences {self.aligner.seq_names}")
+
+        print("Loading sample")
         self.ref_fasta = pysam.FastaFile(ref_sequence)
+        print("Sample loaded")
+
         self.sample_sequence = sample_sequence
         self.working_dir = output_dir
         self.buffer = buffer
@@ -77,17 +82,6 @@ class AlignScorer(object):
         sv_type = records[0].info['SVTYPE']
         chrom = records[0].chrom
 
-        queries = []
-
-        orig_sequence = list(self.ref_fasta.fetch(reference=chrom))
-        new_sequence = orig_sequence.copy()
-        changed_mask = [False] * len(new_sequence)
-
-        delete_placeholder = ''
-        complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A', '': ''}
-
-        def reverse_complement(seq: List):
-            return [complement[x] for x in reversed(seq)]
 
         # Reorder records to place any insertions at the end, sorted by target location
         target_records = []
@@ -105,6 +99,22 @@ class AlignScorer(object):
 
         records = in_place_records + target_records
 
+        offset = max(0, min([rec.start for rec in records] + [rec.info['TARGET'] for rec in target_records]) - self.buffer)
+        sequence_end = max([rec.stop for rec in records] + [rec.info['TARGET'] for rec in target_records]) + self.buffer
+
+        orig_sequence = list(self.ref_fasta.fetch(reference=chrom)[offset:sequence_end])
+        new_sequence = orig_sequence.copy()
+        changed_mask = [False] * len(new_sequence)
+
+        delete_placeholder = ''
+        complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A', '': ''}
+
+        def reverse_complement(seq: List):
+            return [complement[x] for x in reversed(seq)]
+
+
+        queries = []
+
         for rec in records:
             # Supported operations:
             # CUT (aka DEL)
@@ -114,12 +124,14 @@ class AlignScorer(object):
             # CUTinv-PASTE (aka INV-nrTRA)
 
             start, stop = get_start_stop(rec)
+            start -= offset
+            stop -= offset
 
             if rec.info.get('TARGET_CHROM', chrom) != chrom:
                 print(f"WARNING: Skipping record: {rec.id}-{sv_type} because interchromosome target. Interchromosome checks not implemented yet.")
                 return []
 
-            target = rec.info.get('TARGET', 0) - 1  # Convert target to 0-index
+            target = rec.info.get('TARGET', 0) - 1  - offset  # Convert target to 0-index
 
             if rec.info['OP_TYPE'] == 'CUT' or rec.info['SVTYPE'] == 'DEL':
                 new_sequence[start:stop] = [delete_placeholder] * (stop - start)
@@ -186,7 +198,7 @@ class AlignScorer(object):
 
             queries.append(query)
 
-        print(f'Checking {svid}-{sv_type} with {len(queries)} queries')
+        # print(f'Checking {svid}-{sv_type} with {len(queries)} queries')
 
         return queries
 
@@ -218,10 +230,15 @@ class AlignScorer(object):
 
         def check_match(alignment, query):
             error = alignment.NM + max(0, len(query) - alignment.blen)
-            print(f"Alignment had {alignment.blen} bases, {alignment.NM} mismatches, query was {len(query)}. Total error: {error}")
+            # print(f"Alignment had {alignment.blen} bases, {alignment.NM} mismatches, query was {len(query)}. Total error: {error}")
             return error <= error_threshhold
 
-        for svid in tqdm(self.variants.keys(), total=len(self.variants)):
+        overall_count = 0
+        overall_correct = 0
+
+        pbar = tqdm(self.variants.keys(), total=len(self.variants), desc=f'Scoring SVs')
+
+        for svid in pbar:
             sv_type = self.variants[svid][0].info['SVTYPE']
             total_calls[sv_type] += 1
 
@@ -234,14 +251,18 @@ class AlignScorer(object):
 
                 close_alignments = [a for a in alignments if abs(a.r_st - sequence['location']) <= location_tolerance]
                 matched.append(any([check_match(a, sequence['sequence']) for a in close_alignments]))
-                print(f"Query match for {sequence['svid']}-{sequence['svtype']}: {matched[-1]}")
+                # print(f"Query match for {sequence['svid']}-{sequence['svtype']}: {matched[-1]}")
 
             if len(sequences) > 0 and all(matched) and len(matched) == len(sequences):
                 # print("Match successful")
                 correct_calls[sv_type] += 1
+                overall_correct += 1
             # else:
-                # print("No match found")
+            #     print("Match not found")
 
+            overall_count += 1
+
+            pbar.set_description(f'Scoring SVs. Current precision {overall_correct / overall_count:.2f} ({overall_correct} / {overall_count})')
 
             precision[sv_type] = correct_calls[sv_type] / total_calls[sv_type]
 
@@ -293,4 +314,9 @@ if __name__ == '__main__':
 cat ./sim_data/sim.hapA.fa ./sim_data/sim.hapB.fa > ./sim_data/sim.combined.fa
 
 --reference ./data/genome.chr21.fa --sample ./sim_data/sim.combined.fa --calls ./sim_data/sim.vcf --output_dir output --buffer 50
+
+real data settings
+--reference /Users/huangber/remote/data/refs/refdata-GRCh38-2.1.0/fasta/genome.fa --sample /Users/huangber/remote/data/refs/HG002/hg002v1.1.fasta --calls ../groovi/output.vcf --output_dir output --buffer 50
+--reference ./data/genome.fa --sample ./data/hg002v1.1.fasta --calls ../groovi/output.vcf --output_dir output --buffer 50
+--reference /data/refs/refdata-GRCh38-2.1.0/fasta/genome.fa --sample /data/refs/HG002/hg002v1.1.fasta --calls ../groovi/output.vcf --output_dir output --buffer 50
 '''
