@@ -3,7 +3,7 @@ import mappy
 import pysam
 import os
 import tempfile
-import intervaltree
+from intervaltree import IntervalTree
 from itertools import groupby
 from tqdm import tqdm
 
@@ -27,7 +27,7 @@ def get_start_stop(rec: VCFRecord) -> Tuple[int, int]:
     return start, stop
 
 class AlignScorer(object):
-    def __init__(self, ref_sequence, sample_sequence, callset_vcf, output_dir, buffer):
+    def __init__(self, ref_sequence, sample_sequence, callset_vcf, output_dir, buffer, gap_file):
         """
 
         :param ref_sequence: Sequence file for reference genome
@@ -39,6 +39,12 @@ class AlignScorer(object):
         self.variants = None
         self.vcf_header = None
         self.read_vcf(callset_vcf)
+
+        self.blacklist = defaultdict(IntervalTree)
+
+        if gap_file:
+            self.load_blacklist(gap_file)
+
         print(f"Loading reference into aligner")
         self.aligner = mappy.Aligner(fn_idx_in=sample_sequence, preset='map-pb')
         print(f"Loaded aligner with sequences {self.aligner.seq_names}")
@@ -50,6 +56,25 @@ class AlignScorer(object):
         self.sample_sequence = sample_sequence
         self.working_dir = output_dir
         self.buffer = buffer
+
+    def load_blacklist(self, gap_file):
+        with open(gap_file, 'r') as f:
+            for line in f:
+                row = line.strip().split()
+
+                chrom = row[1]
+                start, stop = int(row[2]), int(row[3])
+                region_type = row[7]
+
+                print(f"{chrom}\t{start}\t{stop}\t{region_type}")
+
+                if region_type in ['telomere', 'centromere']:
+                    self.blacklist[chrom][start:stop] = region_type
+
+        print("Loaded blacklist")
+
+        # TODO: for now, leaving this unused. I will reimplement this in the stitching process. Eventually should include here independently as well.
+
 
     def read_vcf(self, vcf_path: str):
         """
@@ -124,6 +149,7 @@ class AlignScorer(object):
             # CUTinv-PASTE (aka INV-nrTRA)
 
             start, stop = get_start_stop(rec)
+            target = rec.info.get('TARGET', stop + 1) - offset  # Convert target to 0-index
             start -= offset
             stop -= offset
 
@@ -131,7 +157,6 @@ class AlignScorer(object):
                 print(f"WARNING: Skipping record: {rec.id}-{sv_type} because interchromosome target. Interchromosome checks not implemented yet.")
                 return []
 
-            target = rec.info.get('TARGET', 0) - 1  - offset  # Convert target to 0-index
 
             if rec.info['OP_TYPE'] == 'CUT' or rec.info['SVTYPE'] == 'DEL':
                 new_sequence[start:stop] = [delete_placeholder] * (stop - start)
@@ -175,7 +200,7 @@ class AlignScorer(object):
 
         intervals = []
 
-        # Get contiguous blocks of changed indices
+        # Get contiguous blocks of changed indices in the subsequence
         i = 0
         for value, group in groupby(changed_mask):
             group_len = len(list(group))
@@ -192,7 +217,7 @@ class AlignScorer(object):
                 'svtype': sv_type,
                 'svid': svid,
                 'sequence': sequence,
-                'location': adjusted_start,
+                'location': adjusted_start + offset,
                 'length': len(sequence),
             }
 
@@ -280,9 +305,10 @@ def main():
     parser.add_argument('--calls', help='VCF containing called SVs', dest='calls')
     parser.add_argument('--output_dir', help='Output directory', dest='output_dir')
     parser.add_argument('--buffer', help='Subsequence context buffer', type=int, dest='buffer', default=500)
+    parser.add_argument('--gap_file', help='Tab-delimited file containing centromere and telomere regions', default=None)
     args = parser.parse_args()
 
-    scorer = AlignScorer(args.reference, args.sample, args.calls, args.output_dir, args.buffer)
+    scorer = AlignScorer(args.reference, args.sample, args.calls, args.output_dir, args.buffer, args.gap_file)
     # sequences = scorer.simulate_subsequences('sv0')
     # scorer.match_subsequence(sequences[0])
 
@@ -307,16 +333,19 @@ if __name__ == '__main__':
     main()
 
 '''
---reference /data/refs/refdata-GRCh38-2.1.0/fasta/genome.fa --sample /data/refs/HG002/hg002v1.1.fasta --calls ./test_calls.vcf
---reference /data/refs/refdata-GRCh38-2.1.0/fasta/genome.chr21.fa --sample /data/bert/groovi-infra/sim_data/sim.hapA.fa --calls /data/bert/groovi-infra/sim_data/sim.vcf --output_dir output --buffer 50
---reference ./data/genome.chr21.fa --sample ./sim_data/sim.hapA.fa --calls ./sim_data/sim.vcf --output_dir output --buffer 50
-
 cat ./sim_data/sim.hapA.fa ./sim_data/sim.hapB.fa > ./sim_data/sim.combined.fa
 
---reference ./data/genome.chr21.fa --sample ./sim_data/sim.combined.fa --calls ./sim_data/sim.vcf --output_dir output --buffer 50
+--reference ./data/genome.chr21.fa --sample ./sim_data/sim.combined.fa --calls ./sim_data/sim.vcf --output_dir output --buffer 500
 
 real data settings
---reference /Users/huangber/remote/data/refs/refdata-GRCh38-2.1.0/fasta/genome.fa --sample /Users/huangber/remote/data/refs/HG002/hg002v1.1.fasta --calls ../groovi/output.vcf --output_dir output --buffer 50
---reference ./data/genome.fa --sample ./data/hg002v1.1.fasta --calls ../groovi/output.vcf --output_dir output --buffer 50
---reference /data/refs/refdata-GRCh38-2.1.0/fasta/genome.fa --sample /data/refs/HG002/hg002v1.1.fasta --calls ../groovi/output.vcf --output_dir output --buffer 50
+--reference /Users/huangber/remote/data/refs/refdata-GRCh38-2.1.0/fasta/genome.fa --sample /Users/huangber/remote/data/refs/HG002/hg002v1.1.fasta --calls ../groovi/output.vcf --output_dir output --buffer 500
+--reference ./data/genome.fa --sample ./data/hg002v1.1.fasta --calls ../groovi/output.vcf --output_dir output --buffer 500
+--reference /data/refs/refdata-GRCh38-2.1.0/fasta/genome.fa --sample /data/refs/HG002/hg002v1.1.fasta --calls ../groovi/output.vcf --output_dir output --buffer 500
 '''
+
+# TODO:
+#  - turn on filtering,
+#  - set up whitelist/blacklist for centromeres/telomeres,
+#  - check reference for pseudo-precision
+#  - make sure merged classes are properly handled
+#  -
