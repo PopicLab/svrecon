@@ -12,7 +12,9 @@ from typing import Dict, List, Tuple
 
 from pysam.libcvcf import VCFRecord
 
-PROP_THRESHOLD = 0.9
+import logging
+
+logger = logging.getLogger(__name__)
 
 def get_start_stop(rec: VCFRecord) -> Tuple[int, int]:
     """
@@ -241,7 +243,7 @@ class AlignScorer(object):
         return chrom_alignments
 
 
-    def score_all(self, location_tolerance=float('inf'), error_threshhold=0.1):
+    def score_all(self, location_tolerance=float('inf'), error_threshhold=0.2):
         """
         For each SV, checks whether a subsequence matching its result exists in the sample sequence
         Breaks down accuracy by SV type and total
@@ -267,38 +269,38 @@ class AlignScorer(object):
 
         pbar = tqdm(self.variants.keys(), total=len(self.variants), desc=f'Scoring SVs')
 
-        with open('log.txt', 'w') as log:
-            for svid in pbar:
-                sv_type = self.variants[svid][0].info['SVTYPE']
-                total_calls[sv_type] += 1
+        for svid in pbar:
+            sv_type = self.variants[svid][0].info['SVTYPE']
+            total_calls[sv_type] += 1
 
-                sequences = self.simulate_subsequences(svid)
-                matched = []
+            sequences = self.simulate_subsequences(svid)
+            matched = []
 
-                # check that all subsequences match
-                for sequence in sequences:
-                    alignments = self.match_subsequence(sequence)
+            # check that all subsequences match
+            for sequence in sequences:
+                alignments = self.match_subsequence(sequence)
 
-                    close_alignments = [a for a in alignments if abs(a.r_st - sequence['location']) <= location_tolerance]
-                    matched.append(any([check_match(a, sequence['sequence']) for a in close_alignments]))
-                    # print(f"Query match for {sequence['svid']}-{sequence['svtype']}: {matched[-1]}")
+                close_alignments = [a for a in alignments if abs(a.r_st - sequence['location']) <= location_tolerance]
+                matched.append(any([check_match(a, sequence['sequence']) for a in close_alignments]))
+                # print(f"Query match for {sequence['svid']}-{sequence['svtype']}: {matched[-1]}")
 
-                coords = sequences[0]['location'], sequences[0]['location'] + sequences[0]['length']
+            coords = sequences[0]['location'], sequences[0]['location'] + sequences[0]['length']
 
-                if len(sequences) > 0 and all(matched) and len(matched) == len(sequences):
-                    # print("Match successful")
-                    correct_calls[sv_type] += 1
-                    overall_correct += 1
-                    log.write(f'{svid}\t{sv_type}\t{sequences[0]["chrom"]}:{coords[0]}-{coords[1]}\thit\n')
-                else:
-                    # print("Match not found")
-                    log.write(f'{svid}\t{sv_type}\t{sequences[0]["chrom"]}:{coords[0]}-{coords[1]}\tmiss\n')
+            if len(sequences) > 0 and all(matched) and len(matched) == len(sequences):
+                # print("Match successful")
+                correct_calls[sv_type] += 1
+                overall_correct += 1
+                hit_miss = 'hit'
+            else:
+                hit_miss = 'miss'
+                # print("Match not found")
+            logger.info(f'{svid}\t{sv_type}\t{sequences[0]["chrom"]}:{coords[0]}-{coords[1]}\t{hit_miss}\n')
 
-                overall_count += 1
+            overall_count += 1
 
-                pbar.set_description(f'Scoring SVs. Current precision {overall_correct / overall_count:.2f} ({overall_correct} / {overall_count})')
+            pbar.set_description(f'Scoring SVs. Current precision {overall_correct / overall_count:.2f} ({overall_correct} / {overall_count})')
 
-                precision[sv_type] = correct_calls[sv_type] / total_calls[sv_type]
+            precision[sv_type] = correct_calls[sv_type] / total_calls[sv_type]
 
 
         precision['ALL'] = sum(correct_calls.values()) / sum(total_calls.values())
@@ -308,6 +310,8 @@ class AlignScorer(object):
         return precision, correct_calls, total_calls
 
 def main():
+    logging.basicConfig(filename='log.txt', level=logging.INFO, filemode='w')
+
     parser = argparse.ArgumentParser(description='Score VCF SV calls against a reference and sample genome')
     parser.add_argument('--reference', help='Reference genome .fa file', dest='reference')
     parser.add_argument('--sample', help='Sample genome .fa file', dest='sample')
@@ -350,6 +354,7 @@ real data settings
 --reference /Users/huangber/remote/data/refs/refdata-GRCh38-2.1.0/fasta/genome.fa --sample /Users/huangber/remote/data/refs/HG002/hg002v1.1.fasta --calls ../groovi/output.vcf --output_dir output --buffer 500
 --reference ./data/hg19.genome.fa --sample ./data/hg002v1.1.fasta --calls ../groovi/data/output.vcf --output_dir output --buffer 500
 --reference /data/refs/refdata-GRCh38-2.1.0/fasta/genome.fa --sample /data/refs/HG002/hg002v1.1.fasta --calls ../groovi/output.vcf --output_dir output --buffer 500
+--reference ./data/hg19.genome.fa --sample ./data/hg002.mmi --calls ../groovi/data/output.vcf --output_dir output --buffer 1000
 '''
 
 # TODO:
