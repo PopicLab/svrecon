@@ -132,7 +132,8 @@ class AlignScorer(object):
         changed_mask = [False] * len(new_sequence)
 
         delete_placeholder = ''
-        complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A', '': ''}
+        complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A', '': '',
+                      'a': 't', 'c': 'g', 'g': 'c', 't': 'a'}  # preserve soft masking
 
         def reverse_complement(seq: List):
             return [complement[x] for x in reversed(seq)]
@@ -240,12 +241,12 @@ class AlignScorer(object):
         return chrom_alignments
 
 
-    def score_all(self, location_tolerance=float('inf'), error_threshhold=10):
+    def score_all(self, location_tolerance=float('inf'), error_threshhold=0.1):
         """
         For each SV, checks whether a subsequence matching its result exists in the sample sequence
         Breaks down accuracy by SV type and total
         :param location_tolerance: maximum base pair location distance to count as a correct match (default infinite)
-        :param error_threshold: maximum error to count as a correct match
+        :param error_threshold: maximum fraction of string mismatch
         :return: rate of correct matches (number matches / total SVs), i.e., precision
         """
 
@@ -256,6 +257,9 @@ class AlignScorer(object):
         def check_match(alignment, query):
             error = alignment.NM + max(0, len(query) - alignment.blen)
             # print(f"Alignment had {alignment.blen} bases, {alignment.NM} mismatches, query was {len(query)}. Total error: {error}")
+
+            adjusted_error = round(len(query) * error_threshhold)
+
             return error <= error_threshhold
 
         overall_count = 0
@@ -263,33 +267,38 @@ class AlignScorer(object):
 
         pbar = tqdm(self.variants.keys(), total=len(self.variants), desc=f'Scoring SVs')
 
-        for svid in pbar:
-            sv_type = self.variants[svid][0].info['SVTYPE']
-            total_calls[sv_type] += 1
+        with open('log.txt', 'w') as log:
+            for svid in pbar:
+                sv_type = self.variants[svid][0].info['SVTYPE']
+                total_calls[sv_type] += 1
 
-            sequences = self.simulate_subsequences(svid)
-            matched = []
+                sequences = self.simulate_subsequences(svid)
+                matched = []
 
-            # check that all subsequences match
-            for sequence in sequences:
-                alignments = self.match_subsequence(sequence)
+                # check that all subsequences match
+                for sequence in sequences:
+                    alignments = self.match_subsequence(sequence)
 
-                close_alignments = [a for a in alignments if abs(a.r_st - sequence['location']) <= location_tolerance]
-                matched.append(any([check_match(a, sequence['sequence']) for a in close_alignments]))
-                # print(f"Query match for {sequence['svid']}-{sequence['svtype']}: {matched[-1]}")
+                    close_alignments = [a for a in alignments if abs(a.r_st - sequence['location']) <= location_tolerance]
+                    matched.append(any([check_match(a, sequence['sequence']) for a in close_alignments]))
+                    # print(f"Query match for {sequence['svid']}-{sequence['svtype']}: {matched[-1]}")
 
-            if len(sequences) > 0 and all(matched) and len(matched) == len(sequences):
-                # print("Match successful")
-                correct_calls[sv_type] += 1
-                overall_correct += 1
-            # else:
-            #     print("Match not found")
+                coords = sequences[0]['location'], sequences[0]['location'] + sequences[0]['length']
 
-            overall_count += 1
+                if len(sequences) > 0 and all(matched) and len(matched) == len(sequences):
+                    # print("Match successful")
+                    correct_calls[sv_type] += 1
+                    overall_correct += 1
+                    log.write(f'{svid}\t{sv_type}\t{sequences[0]["chrom"]}:{coords[0]}-{coords[1]}\thit\n')
+                else:
+                    # print("Match not found")
+                    log.write(f'{svid}\t{sv_type}\t{sequences[0]["chrom"]}:{coords[0]}-{coords[1]}\tmiss\n')
 
-            pbar.set_description(f'Scoring SVs. Current precision {overall_correct / overall_count:.2f} ({overall_correct} / {overall_count})')
+                overall_count += 1
 
-            precision[sv_type] = correct_calls[sv_type] / total_calls[sv_type]
+                pbar.set_description(f'Scoring SVs. Current precision {overall_correct / overall_count:.2f} ({overall_correct} / {overall_count})')
+
+                precision[sv_type] = correct_calls[sv_type] / total_calls[sv_type]
 
 
         precision['ALL'] = sum(correct_calls.values()) / sum(total_calls.values())
@@ -339,7 +348,7 @@ cat ./sim_data/sim.hapA.fa ./sim_data/sim.hapB.fa > ./sim_data/sim.combined.fa
 
 real data settings
 --reference /Users/huangber/remote/data/refs/refdata-GRCh38-2.1.0/fasta/genome.fa --sample /Users/huangber/remote/data/refs/HG002/hg002v1.1.fasta --calls ../groovi/output.vcf --output_dir output --buffer 500
---reference ./data/genome.fa --sample ./data/hg002v1.1.fasta --calls ../groovi/output.vcf --output_dir output --buffer 500
+--reference ./data/hg19.genome.fa --sample ./data/hg002v1.1.fasta --calls ../groovi/data/output.vcf --output_dir output --buffer 500
 --reference /data/refs/refdata-GRCh38-2.1.0/fasta/genome.fa --sample /data/refs/HG002/hg002v1.1.fasta --calls ../groovi/output.vcf --output_dir output --buffer 500
 '''
 
