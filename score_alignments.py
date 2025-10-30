@@ -243,7 +243,7 @@ class AlignScorer(object):
         return chrom_alignments
 
 
-    def score_all(self, location_tolerance=float('inf'), error_threshhold=0.2):
+    def score_all(self, location_tolerance=float('inf'), error_threshhold=0.1):
         """
         For each SV, checks whether a subsequence matching its result exists in the sample sequence
         Breaks down accuracy by SV type and total
@@ -260,12 +260,18 @@ class AlignScorer(object):
             error = alignment.NM + max(0, len(query) - alignment.blen)
             # print(f"Alignment had {alignment.blen} bases, {alignment.NM} mismatches, query was {len(query)}. Total error: {error}")
 
-            adjusted_error = round(len(query) * error_threshhold)
+            adjusted_threshold = round(len(query) * error_threshhold)
 
-            return error <= error_threshhold
+            return error <= adjusted_threshold
 
         overall_count = 0
         overall_correct = 0
+
+        # # Filter for debugging
+        # debug_examples = [
+        #     'sv8',
+        # ]
+        # self.variants = {key:self.variants[key] for key in debug_examples}
 
         pbar = tqdm(self.variants.keys(), total=len(self.variants), desc=f'Scoring SVs')
 
@@ -325,7 +331,7 @@ def main():
     # sequences = scorer.simulate_subsequences('sv0')
     # scorer.match_subsequence(sequences[0])
 
-    precision, correct_calls, total_calls = scorer.score_all(error_threshhold=10)
+    precision, correct_calls, total_calls = scorer.score_all()
 
     print(f"Precision: {precision}")
 
