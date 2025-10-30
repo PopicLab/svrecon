@@ -45,7 +45,7 @@ class AlignScorer(object):
         self.blacklist = defaultdict(IntervalTree)
 
         if gap_file:
-            self.load_blacklist(gap_file)
+            self.load_exclude_list(gap_file)
 
         print(f"Loading reference into aligner")
         self.aligner = mappy.Aligner(fn_idx_in=sample_sequence, preset='map-pb')
@@ -59,7 +59,7 @@ class AlignScorer(object):
         self.working_dir = output_dir
         self.buffer = buffer
 
-    def load_blacklist(self, gap_file):
+    def load_exclude_list(self, gap_file):
         with open(gap_file, 'r') as f:
             for line in f:
                 row = line.strip().split()
@@ -73,7 +73,7 @@ class AlignScorer(object):
                 if region_type in ['telomere', 'centromere']:
                     self.blacklist[chrom][start:stop] = region_type
 
-        print("Loaded blacklist")
+        print("Loaded exclude list")
 
         # TODO: for now, leaving this unused. I will reimplement this in the stitching process. Eventually should include here independently as well.
 
@@ -160,7 +160,6 @@ class AlignScorer(object):
                 print(f"WARNING: Skipping record: {rec.id}-{sv_type} because interchromosome target. Interchromosome checks not implemented yet.")
                 return []
 
-
             if rec.info['OP_TYPE'] == 'CUT' or rec.info['SVTYPE'] == 'DEL':
                 new_sequence[start:stop] = [delete_placeholder] * (stop - start)
 
@@ -203,13 +202,23 @@ class AlignScorer(object):
 
         intervals = []
 
+        MERGE_TOLERANCE = 2  # merge intervals that are within this many base pairs (usually alignment or boundary case error)
+
         # Get contiguous blocks of changed indices in the subsequence
-        i = 0
+        current_index = 0
         for value, group in groupby(changed_mask):
             group_len = len(list(group))
             if value:
-                intervals.append((i, i + group_len))
-            i += group_len
+                interval_start = current_index
+                prev_interval = intervals[-1] if intervals else None
+
+                if prev_interval and current_index - prev_interval[1] <= MERGE_TOLERANCE:
+                    prev_interval = intervals.pop()
+                    interval_start = prev_interval[0]
+
+                intervals.append((interval_start, current_index + group_len))
+            current_index += group_len
+
 
         for start, stop in intervals:
             adjusted_start = max(0, start - self.buffer)
@@ -274,7 +283,7 @@ class AlignScorer(object):
 
             error_rate = nm_total / len_norm if len_norm > 0 else 1.0
 
-            return error_rate <= error_threshhold
+            return error_rate
 
         overall_count = 0
         overall_correct = 0
@@ -282,6 +291,7 @@ class AlignScorer(object):
         # # Filter for debugging
         # debug_examples = [
         #     'sv8',
+        #     'sv384',
         # ]
         # self.variants = {key:self.variants[key] for key in debug_examples}
 
@@ -290,21 +300,25 @@ class AlignScorer(object):
         for svid in pbar:
             sv_type = self.variants[svid][0].info['SVTYPE']
             total_calls[sv_type] += 1
+            correct_calls[sv_type] += 0  # hack to ensure correct_calls[sv_type] is initialized
 
             sequences = self.simulate_subsequences(svid)
-            matched = []
+            match_scores = []
 
             # check that all subsequences match
             for sequence in sequences:
                 alignments = self.match_subsequence(sequence)
 
                 close_alignments = [a for a in alignments if abs(a.r_st - sequence['location']) <= location_tolerance]
-                matched.append(any([check_match(a, sequence['sequence']) for a in close_alignments]))
-                # print(f"Query match for {sequence['svid']}-{sequence['svtype']}: {matched[-1]}")
+
+                if len(close_alignments) > 0:
+                    match_scores.append(min([check_match(a, sequence['sequence']) for a in close_alignments]))
+                else:
+                    match_scores.append(0)
 
             coords = sequences[0]['location'], sequences[0]['location'] + sequences[0]['length']
 
-            if len(sequences) > 0 and all(matched) and len(matched) == len(sequences):
+            if len(sequences) > 0 and all([score <= error_threshhold for score in match_scores]):
                 # print("Match successful")
                 correct_calls[sv_type] += 1
                 overall_correct += 1
@@ -312,7 +326,7 @@ class AlignScorer(object):
             else:
                 hit_miss = 'miss'
                 # print("Match not found")
-            logger.info(f'{svid}\t{sv_type}\t{sequences[0]["chrom"]}:{coords[0]}-{coords[1]}\t{hit_miss}\n')
+            logger.info(f'{svid}\t{sv_type}\t{sequences[0]["chrom"]}:{coords[0]}-{coords[1]}\t{hit_miss}\t{match_scores}\n')
 
             overall_count += 1
 
