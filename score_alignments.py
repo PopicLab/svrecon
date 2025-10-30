@@ -257,12 +257,24 @@ class AlignScorer(object):
         precision = {}
 
         def check_match(alignment, query):
-            error = alignment.NM + max(0, len(query) - alignment.blen)
-            # print(f"Alignment had {alignment.blen} bases, {alignment.NM} mismatches, query was {len(query)}. Total error: {error}")
+            """
+            Calculate the independent error rate of a mappy alignment with the query sequence (ignoring redundancy penalties)
+            :param alignment: mappy Alignment object
+            :param query: string containing query sequence
+            :return: Boolean indicating whether error rate is less than error_threshold
+            """
+            aligned_query_segment_length = alignment.q_en - alignment.q_st
+            len_unaligned = len(query) - aligned_query_segment_length
 
-            adjusted_threshold = round(len(query) * error_threshhold)
+            # Numerator: Internal errors (NM) + Penalty for unaligned ends
+            nm_total = alignment.NM + len_unaligned
 
-            return error <= adjusted_threshold
+            # Denominator: Aligned block length (blen) + Length of unaligned ends
+            len_norm = alignment.blen + len_unaligned
+
+            error_rate = nm_total / len_norm if len_norm > 0 else 1.0
+
+            return error_rate <= error_threshhold
 
         overall_count = 0
         overall_correct = 0
