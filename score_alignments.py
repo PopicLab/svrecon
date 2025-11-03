@@ -6,6 +6,7 @@ import tempfile
 from intervaltree import IntervalTree
 from itertools import groupby
 from tqdm import tqdm
+import datetime
 
 from collections import defaultdict, Counter
 from typing import Dict, List, Tuple
@@ -135,7 +136,8 @@ class AlignScorer(object):
 
         delete_placeholder = ''
         complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A', '': '',
-                      'a': 't', 'c': 'g', 'g': 'c', 't': 'a'}  # preserve soft masking
+                      'a': 't', 'c': 'g', 'g': 'c', 't': 'a',   # preserve soft masking
+                      'N': 'N', 'n': 'n'}
 
         def reverse_complement(seq: List):
             return [complement[x] for x in reversed(seq)]
@@ -252,7 +254,7 @@ class AlignScorer(object):
         return chrom_alignments
 
 
-    def score_all(self, location_tolerance=float('inf'), error_threshhold=0.1):
+    def score_all(self, location_tolerance=float('inf'), error_threshold=0.1):
         """
         For each SV, checks whether a subsequence matching its result exists in the sample sequence
         Breaks down accuracy by SV type and total
@@ -318,7 +320,7 @@ class AlignScorer(object):
 
             coords = sequences[0]['location'], sequences[0]['location'] + sequences[0]['length']
 
-            if len(sequences) > 0 and all([score <= error_threshhold for score in match_scores]):
+            if len(sequences) > 0 and all([score <= error_threshold for score in match_scores]):
                 # print("Match successful")
                 correct_calls[sv_type] += 1
                 overall_correct += 1
@@ -342,7 +344,10 @@ class AlignScorer(object):
         return precision, correct_calls, total_calls
 
 def main():
-    logging.basicConfig(filename='log.txt', level=logging.INFO, filemode='w')
+    timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H%M%S')
+    log_filename = os.path.join("./logs", f'stitching_{timestamp}.log')
+    logging.basicConfig(filename=log_filename, level=logging.INFO, filemode='w')
+
 
     parser = argparse.ArgumentParser(description='Score VCF SV calls against a reference and sample genome')
     parser.add_argument('--reference', help='Reference genome .fa file', dest='reference')
@@ -353,13 +358,13 @@ def main():
     parser.add_argument('--gap_file', help='Tab-delimited file containing centromere and telomere regions', default=None)
     args = parser.parse_args()
 
+    logger.info(f'Config: {vars(args)}')
+
     scorer = AlignScorer(args.reference, args.sample, args.calls, args.output_dir, args.buffer, args.gap_file)
     # sequences = scorer.simulate_subsequences('sv0')
     # scorer.match_subsequence(sequences[0])
 
     precision, correct_calls, total_calls = scorer.score_all()
-
-    print(f"Precision: {precision}")
 
     import pandas as pd
 
@@ -370,8 +375,7 @@ def main():
     })
 
     print(df)
-
-
+    logger.info(f'Score table: {df}')
 
 
 if __name__ == '__main__':
@@ -381,6 +385,10 @@ if __name__ == '__main__':
 cat ./sim_data/sim.hapA.fa ./sim_data/sim.hapB.fa > ./sim_data/sim.combined.fa
 
 --reference ./data/genome.chr21.fa --sample ./sim_data/sim.combined.fa --calls ./sim_data/sim.vcf --output_dir output --buffer 500
+
+# sim benchmark tests
+--reference ./data/genome.fa.chr1.fa --sample ./sim_data/long_sim.fa --calls ./sim_data/long_sim.vcf --output_dir output --buffer 500
+
 
 real data settings
 --reference /Users/huangber/remote/data/refs/refdata-GRCh38-2.1.0/fasta/genome.fa --sample /Users/huangber/remote/data/refs/HG002/hg002v1.1.fasta --calls ../groovi/output.vcf --output_dir output --buffer 500
