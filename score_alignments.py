@@ -249,7 +249,12 @@ class AlignScorer(object):
         """
         sequence = query['sequence']
         alignments = list(self.aligner.map(sequence))
+
+        logger.debug(f'Searching for {query["svid"]}-{query["svtype"]} alignments found {len(alignments)} alignment candidate matches')
+
         chrom_alignments = [a for a in alignments if a.ctg.startswith(query['chrom'])]
+
+        logger.debug(f'{len(chrom_alignments)} alignments found in matching chromosomes starting at {query["chrom"]}')
 
         return chrom_alignments
 
@@ -296,6 +301,7 @@ class AlignScorer(object):
         #     'sv384',
         # ]
         # self.variants = {key:self.variants[key] for key in debug_examples}
+        # self.variants = {key:self.variants[key] for key in self.variants if self.variants[key][0].info['SVTYPE'] in ['dupINVdup']}
 
         pbar = tqdm(self.variants.keys(), total=len(self.variants), desc=f'Scoring SVs')
 
@@ -316,7 +322,7 @@ class AlignScorer(object):
                 if len(close_alignments) > 0:
                     match_scores.append(min([check_match(a, sequence['sequence']) for a in close_alignments]))
                 else:
-                    match_scores.append(0)
+                    match_scores.append(1)  # no candidate alignments found, marking this as a miss by adding a match error of 1.0 (maximum error)
 
             coords = sequences[0]['location'], sequences[0]['location'] + sequences[0]['length']
 
@@ -346,8 +352,7 @@ class AlignScorer(object):
 def main():
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H%M%S')
     log_filename = os.path.join("./logs", f'stitching_{timestamp}.log')
-    logging.basicConfig(filename=log_filename, level=logging.INFO, filemode='w')
-
+    logging.basicConfig(filename=log_filename, level=logging.DEBUG, filemode='w')
 
     parser = argparse.ArgumentParser(description='Score VCF SV calls against a reference and sample genome')
     parser.add_argument('--reference', help='Reference genome .fa file', dest='reference')
@@ -396,10 +401,3 @@ real data settings
 --reference /data/refs/refdata-GRCh38-2.1.0/fasta/genome.fa --sample /data/refs/HG002/hg002v1.1.fasta --calls ../groovi/output.vcf --output_dir output --buffer 500
 --reference ./data/hg19.genome.fa --sample ./data/hg002.mmi --calls ../groovi/data/output.vcf --output_dir output --buffer 1000
 '''
-
-# TODO:
-#  - turn on filtering,
-#  - set up whitelist/blacklist for centromeres/telomeres,
-#  - check reference for pseudo-precision
-#  - make sure merged classes are properly handled
-#  -
