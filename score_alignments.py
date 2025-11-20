@@ -93,12 +93,18 @@ def simulate_subsequences(records: List[VCFRecord], buffer: int) -> List[Dict]:
 
     records = in_place_records + target_records
 
-    offset = max(0, min([rec.start for rec in records] + [rec.info['TARGET'] for rec in target_records]) - buffer)
-    sequence_end = max([rec.stop for rec in records] + [rec.info['TARGET'] for rec in target_records]) + buffer
+    offset = max(0, min([rec.start for rec in records]) - buffer)
+    sequence_end = max([rec.stop for rec in records]) + buffer
+
+    target_offset = max(0, min([rec.info['TARGET'] for rec in target_records]) - buffer) if target_records else 0
+    target_sequence_end = max([rec.info['TARGET'] for rec in target_records]) + buffer if target_records else 0
 
     orig_sequence = list(global_ref[chrom][offset:sequence_end].decode('ascii'))
     new_sequence = orig_sequence.copy()
     changed_mask = [False] * len(new_sequence)
+
+    new_target_sequence = list(global_ref[chrom][target_offset:target_sequence_end].decode('ascii'))
+    target_changed_mask = [False] * len(new_target_sequence)
 
     delete_placeholder = ''
     complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A', '': '',
@@ -119,7 +125,7 @@ def simulate_subsequences(records: List[VCFRecord], buffer: int) -> List[Dict]:
         # CUTinv-PASTE (aka INV-nrTRA)
 
         start, stop = get_start_stop(rec)
-        target = rec.info.get('TARGET', stop + 1) - offset  # Convert target to 0-index
+        target = rec.info.get('TARGET', stop + 1) - target_offset  # Convert target to 0-index and offset
         start -= offset
         stop -= offset
 
@@ -137,29 +143,29 @@ def simulate_subsequences(records: List[VCFRecord], buffer: int) -> List[Dict]:
             changed_mask[start:stop] = [True] * (stop - start)
         elif rec.info['OP_TYPE'] == 'COPY-PASTE' or rec.info['SVTYPE'] in ['DUP', 'dDUP']:
             clip = orig_sequence[start:stop]
-            new_sequence = new_sequence[:target] + clip + new_sequence[target:]
+            new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
 
-            changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
+            target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
         elif rec.info['OP_TYPE'] in ['CUT-PASTE'] or rec.info['SVTYPE'] == 'nrTRA':
             clip = orig_sequence[start:stop]
             new_sequence[start:stop] = [delete_placeholder] * (stop - start)
             changed_mask[start:stop] = [True] * len(clip)
 
-            new_sequence = new_sequence[:target] + clip + new_sequence[target:]
-            changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
+            new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
+            target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
         elif rec.info['OP_TYPE'] == 'COPYinv-PASTE' or rec.info['SVTYPE'] in ['INV_dDUP']:
             clip = reverse_complement(orig_sequence[start:stop])
-            new_sequence = new_sequence[:target] + clip + new_sequence[target:]
+            new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
 
-            changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
+            target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
         elif rec.info['OP_TYPE'] == 'CUTinv-PASTE' or rec.info['SVTYPE'] in ['INV_nrTRA']:
             clip = reverse_complement(orig_sequence[start:stop])
 
             new_sequence[start:stop] = [delete_placeholder] * (stop - start)
-            new_sequence = new_sequence[:target] + clip + new_sequence[target:]
-
             changed_mask[start:stop] = [True] * len(clip)
-            changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
+
+            new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
+            target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
         else:
             print(f"WARNING: Unknown OP_TYPE: {rec.info['OP_TYPE']}")
 
@@ -167,9 +173,20 @@ def simulate_subsequences(records: List[VCFRecord], buffer: int) -> List[Dict]:
         print(f"WARNING: No changed intervals found for {svid}-{sv_type}")
         return []
 
+    MERGE_TOLERANCE = 2  # merge intervals that are within this many base pairs (usually alignment or boundary case error)
+
+    queries.extend(get_changed_subsequences(new_sequence, changed_mask, MERGE_TOLERANCE, offset, buffer, svid, chrom, sv_type))
+    queries.extend(get_changed_subsequences(new_target_sequence, target_changed_mask, MERGE_TOLERANCE, target_offset, buffer, svid, chrom, sv_type))
+
+    # print(f'Checking {svid}-{sv_type} with {len(queries)} queries')
+
+    return queries
+
+
+def get_changed_subsequences(new_sequence, changed_mask, tolerance, offset, buffer, svid, chrom, sv_type):
     intervals = []
 
-    MERGE_TOLERANCE = 2  # merge intervals that are within this many base pairs (usually alignment or boundary case error)
+    queries = []
 
     # Get contiguous blocks of changed indices in the subsequence
     current_index = 0
@@ -179,7 +196,7 @@ def simulate_subsequences(records: List[VCFRecord], buffer: int) -> List[Dict]:
             interval_start = current_index
             prev_interval = intervals[-1] if intervals else None
 
-            if prev_interval and current_index - prev_interval[1] <= MERGE_TOLERANCE:
+            if prev_interval and current_index - prev_interval[1] <= tolerance:
                 prev_interval = intervals.pop()
                 interval_start = prev_interval[0]
 
@@ -192,19 +209,18 @@ def simulate_subsequences(records: List[VCFRecord], buffer: int) -> List[Dict]:
         adjusted_stop = min(stop + buffer + 1, len(new_sequence))
         sequence = ''.join(new_sequence[adjusted_start:adjusted_stop])
         query = {
-            'chrom': rec.chrom,
+            'chrom': chrom,
             'svtype': sv_type,
             'svid': svid,
             'sequence': sequence,
             'location': adjusted_start + offset,
             'length': len(sequence),
         }
-
         queries.append(query)
 
-    # print(f'Checking {svid}-{sv_type} with {len(queries)} queries')
-
     return queries
+
+
 
 
 def score_sv(records: List[VCFRecord], buffer: int, location_tolerance: int, error_threshold=0.1):
@@ -432,7 +448,7 @@ def main():
     print(f"Reference pre-loaded with {len(global_ref)} chromosomes.")
 
     print("Loading index into aligner")
-    global_aligner = mappy.Aligner(args.sample, preset='map-pb')
+    global_aligner = mappy.Aligner(args.sample, preset='map-pb', n_threads=16)
     print("Aligner ready")
 
     # # Filter for debugging
