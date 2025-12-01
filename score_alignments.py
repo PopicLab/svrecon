@@ -408,7 +408,7 @@ class AlignScorer(object):
 
 def main():
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H%M%S')
-    log_filename = os.path.join("./logs", f'stitching_{timestamp}.log')
+    log_filename = os.path.join("./logs", f'reconstruction_{timestamp}.log')
     logging.basicConfig(filename=log_filename, level=logging.DEBUG, filemode='w')
 
     parser = argparse.ArgumentParser(description='Score VCF SV calls against a reference and sample genome')
