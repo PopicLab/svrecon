@@ -82,6 +82,10 @@ def simulate_subsequences(records: List[VCFRecord], buffer: int) -> List[Dict]:
     in_place_records = []
 
     for rec in records:
+        # Patch to fill in DUP targets
+        if rec.info['SVTYPE'] == 'DUP':
+            rec.info['TARGET'] = rec.stop
+
         if 'TARGET' in rec.info:
             target_records.append(rec)
         else:
@@ -184,7 +188,7 @@ def simulate_subsequences(records: List[VCFRecord], buffer: int) -> List[Dict]:
 
 
 def get_changed_subsequences(new_sequence, changed_mask, tolerance, offset, buffer, svid, chrom, sv_type):
-    intervals = []
+    changed_intervals = []
 
     queries = []
 
@@ -194,17 +198,17 @@ def get_changed_subsequences(new_sequence, changed_mask, tolerance, offset, buff
         group_len = len(list(group))
         if value:
             interval_start = current_index
-            prev_interval = intervals[-1] if intervals else None
+            prev_interval = changed_intervals[-1] if changed_intervals else None
 
             if prev_interval and current_index - prev_interval[1] <= tolerance:
-                prev_interval = intervals.pop()
+                prev_interval = changed_intervals.pop()
                 interval_start = prev_interval[0]
 
-            intervals.append((interval_start, current_index + group_len))
+            changed_intervals.append((interval_start, current_index + group_len))
         current_index += group_len
 
 
-    for start, stop in intervals:
+    for start, stop in changed_intervals:
         adjusted_start = max(0, start - buffer)
         adjusted_stop = min(stop + buffer + 1, len(new_sequence))
         sequence = ''.join(new_sequence[adjusted_start:adjusted_stop])
@@ -294,15 +298,29 @@ class AlignScorer(object):
         self.vcf_header = None
         self.read_vcf(callset_vcf)
 
-        self.blacklist = defaultdict(IntervalTree)
-
         if gap_file:
-            self.load_exclude_list(gap_file)
+            self.exclude_list = self.load_exclude_list(gap_file)
+
+            filtered_variants = []
+            for svid, records in self.variants.items():
+                allowed = True
+                for rec in records:
+                    target_chrom = rec.info['TARGET_CHROM'] if 'TARGET_CHROM' in rec.info else None
+                    if self.exclude_list[rec.chrom].overlap(rec.start, rec.stop) or \
+                        target_chrom and self.exclude_list[target_chrom].overlap(rec.info['TARGET'], rec.info['TARGET'] + 1):
+                        # record is in the excluded regions
+                        allowed = False
+                        break
+                if allowed:
+                    filtered_variants.append((svid, records))
+
+            self.variants = {key: value for (key, value) in filtered_variants}
 
         self.working_dir = output_dir
         self.buffer = buffer
 
     def load_exclude_list(self, gap_file):
+        exclude_list = defaultdict(IntervalTree)
         with open(gap_file, 'r') as f:
             for line in f:
                 row = line.strip().split()
@@ -313,12 +331,11 @@ class AlignScorer(object):
 
                 print(f"{chrom}\t{start}\t{stop}\t{region_type}")
 
-                if region_type in ['telomere', 'centromere']:
-                    self.blacklist[chrom][start:stop] = region_type
+                # if region_type in ['telomere', 'centromere']:
+                # Include all regions in this gap file
+                exclude_list[chrom][start:stop] = region_type
 
-        print("Loaded exclude list")
-
-        # TODO: for now, leaving this unused. I will reimplement this in the stitching process. Eventually should include here independently as well.
+        return exclude_list
 
 
     def read_vcf(self, vcf_path: str):
@@ -375,7 +392,6 @@ class AlignScorer(object):
                 try:
                     result = future.result()
 
-
                     sv_type = result['sv_type']
                     svid = result['svid']
                     sequences = result['sequences']
@@ -390,6 +406,8 @@ class AlignScorer(object):
                     if result['is_correct']:
                         correct_calls[sv_type] += 1
                         overall_correct += 1
+                    else:
+                        correct_calls[sv_type] += 0
 
                     # Update display
                     pbar.set_description(
