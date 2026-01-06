@@ -12,17 +12,19 @@ from tqdm import tqdm
 import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import yaml
+from pathlib import Path
 
 from collections import defaultdict, Counter
 from typing import Dict, List, Tuple
 
-from pysam.libcvcf import VCFRecord
+from pysam import VariantRecord
 
 import logging
 
 logger = logging.getLogger(__name__)
 
-def get_start_stop(rec: VCFRecord) -> Tuple[int, int]:
+def get_start_stop(rec: VariantRecord) -> Tuple[int, int]:
     """
     Converts VCF start/stop coordinates to Python style
     VCF range coordinates are 1-indexed and have inclusive ends
@@ -60,7 +62,7 @@ def check_match(alignment, query):
 
     return error_rate
 
-def simulate_subsequences(records: List[VCFRecord], buffer: int) -> List[Dict]:
+def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dict]:
     """
     Execute operations defined by called SV on the reference genome
     :param: records: list of VCF records describing operations
@@ -103,12 +105,17 @@ def simulate_subsequences(records: List[VCFRecord], buffer: int) -> List[Dict]:
     target_offset = max(0, min([rec.info['TARGET'] for rec in target_records]) - buffer) if target_records else 0
     target_sequence_end = max([rec.info['TARGET'] for rec in target_records]) + buffer if target_records else 0
 
+    merged_target_sequence = offset <= target_offset + buffer and target_sequence_end - buffer <= sequence_end
+    if merged_target_sequence:
+        target_offset = offset
+
     orig_sequence = list(global_ref[chrom][offset:sequence_end].decode('ascii'))
     new_sequence = orig_sequence.copy()
     changed_mask = [False] * len(new_sequence)
 
-    new_target_sequence = list(global_ref[chrom][target_offset:target_sequence_end].decode('ascii'))
-    target_changed_mask = [False] * len(new_target_sequence)
+    if not merged_target_sequence:
+        new_target_sequence = list(global_ref[chrom][target_offset:target_sequence_end].decode('ascii'))
+        target_changed_mask = [False] * len(new_target_sequence)
 
     delete_placeholder = ''
     complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A', '': '',
@@ -147,29 +154,45 @@ def simulate_subsequences(records: List[VCFRecord], buffer: int) -> List[Dict]:
             changed_mask[start:stop] = [True] * (stop - start)
         elif rec.info['OP_TYPE'] == 'COPY-PASTE' or rec.info['SVTYPE'] in ['DUP', 'dDUP']:
             clip = orig_sequence[start:stop]
-            new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
+            if merged_target_sequence:
+                new_sequence = new_sequence[:target] + clip + new_sequence[target:]
+                changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
+            else:
+                new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
+                target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
 
-            target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
         elif rec.info['OP_TYPE'] in ['CUT-PASTE'] or rec.info['SVTYPE'] == 'nrTRA':
             clip = orig_sequence[start:stop]
             new_sequence[start:stop] = [delete_placeholder] * (stop - start)
             changed_mask[start:stop] = [True] * len(clip)
 
-            new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
-            target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
+            if merged_target_sequence:
+                new_sequence = new_sequence[:target] + clip + new_sequence[target:]
+                changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
+            else:
+                new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
+                target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
         elif rec.info['OP_TYPE'] == 'COPYinv-PASTE' or rec.info['SVTYPE'] in ['INV_dDUP']:
             clip = reverse_complement(orig_sequence[start:stop])
-            new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
 
-            target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
+            if merged_target_sequence:
+                new_sequence = new_sequence[:target] + clip + new_sequence[target:]
+                changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
+            else:
+                new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
+                target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
         elif rec.info['OP_TYPE'] == 'CUTinv-PASTE' or rec.info['SVTYPE'] in ['INV_nrTRA']:
             clip = reverse_complement(orig_sequence[start:stop])
 
             new_sequence[start:stop] = [delete_placeholder] * (stop - start)
             changed_mask[start:stop] = [True] * len(clip)
 
-            new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
-            target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
+            if merged_target_sequence:
+                new_sequence = new_sequence[:target] + clip + new_sequence[target:]
+                changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
+            else:
+                new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
+                target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
         else:
             print(f"WARNING: Unknown OP_TYPE: {rec.info['OP_TYPE']}")
 
@@ -177,10 +200,11 @@ def simulate_subsequences(records: List[VCFRecord], buffer: int) -> List[Dict]:
         print(f"WARNING: No changed intervals found for {svid}-{sv_type}")
         return []
 
-    MERGE_TOLERANCE = 2  # merge intervals that are within this many base pairs (usually alignment or boundary case error)
+    MERGE_TOLERANCE = 5  # merge intervals that are within this many base pairs (usually alignment or boundary case error)
 
     queries.extend(get_changed_subsequences(new_sequence, changed_mask, MERGE_TOLERANCE, offset, buffer, svid, chrom, sv_type))
-    queries.extend(get_changed_subsequences(new_target_sequence, target_changed_mask, MERGE_TOLERANCE, target_offset, buffer, svid, chrom, sv_type))
+    if not merged_target_sequence:
+        queries.extend(get_changed_subsequences(new_target_sequence, target_changed_mask, MERGE_TOLERANCE, target_offset, buffer, svid, chrom, sv_type))
 
     # print(f'Checking {svid}-{sv_type} with {len(queries)} queries')
 
@@ -227,7 +251,7 @@ def get_changed_subsequences(new_sequence, changed_mask, tolerance, offset, buff
 
 
 
-def score_sv(records: List[VCFRecord], buffer: int, location_tolerance: int, error_threshold=0.1):
+def score_sv(records: List[VariantRecord], buffer: int, location_tolerance: int, error_threshold=0.1):
     """
 
     :param records:
@@ -436,9 +460,47 @@ def main():
     parser.add_argument('--output_dir', help='Output directory', dest='output_dir')
     parser.add_argument('--buffer', help='Subsequence context buffer', type=int, dest='buffer', default=500)
     parser.add_argument('--gap_file', help='Tab-delimited file containing centromere and telomere regions', default=None)
+    parser.add_argument('--config', help='Groovi call config used to infer other params', dest='config')
     args = parser.parse_args()
 
     logger.info(f'Config: {vars(args)}')
+
+    if args.config:
+        logger.info(f'Inferring params from {args.config}')
+        with open(args.config, 'r') as file:
+            config_data = yaml.safe_load(file)
+
+            # Find groovi output
+            experiment_dir = str(Path(args.config).parent.resolve())
+            results_dir = os.path.join(experiment_dir, "results")
+            args.calls = os.path.join(results_dir, 'groovi.vcf')
+
+            # Attempt to find InsilicoSV sample genome
+            # Assumes a common path organization of mounted drives.
+            exp_path = Path(experiment_dir)
+            prefix = data_dir = next(p for p in exp_path.parents if p.name == 'data').parent
+            bam_path = Path(config_data['bam'])
+            data_index = bam_path.parts.index('data')
+            bam_path = Path(*bam_path.parts[data_index:])
+
+            bam = prefix / bam_path
+
+            args.bam = bam
+
+            sample = bam.parent.parent / 'VCF/sim.fa'
+
+            if sample.exists():
+                args.sample = str(sample)
+
+            # Grab reference from config
+            fa_path = Path(config_data['fa'])
+            data_index = fa_path.parts.index('data')
+            fa_path = Path(*fa_path.parts[data_index:])
+
+            args.reference = str(prefix / fa_path)
+
+            logger.info(f'Config: {vars(args)}')
+
 
     global global_ref
     global global_aligner
