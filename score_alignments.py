@@ -448,6 +448,26 @@ class AlignScorer(object):
 
         return precision, correct_calls, total_calls
 
+def export_igv_session(calls, bam, classified, timestamp):
+    # For now, hard coded to hg19 as reference
+    import xml.etree.ElementTree as ET
+
+    output_filename = f"./igv_sessions/session_{timestamp}.xml"
+
+    # 2. Build XML
+    session = ET.Element("Session", genome="hg19", version="8")
+    resources = ET.SubElement(session, "Resources")
+
+    ET.SubElement(resources, "Resource", path=calls, type="vcf")
+    ET.SubElement(resources, "Resource", path=classified, type="vcf")
+    ET.SubElement(resources, "Resource", path=bam, type="bam")
+
+    # 3. Write to file with standard header
+    tree = ET.ElementTree(session)
+    tree.write(output_filename, encoding="utf-8", xml_declaration=True)
+
+    print(f"File saved to {output_filename}")
+
 def main():
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H%M%S')
     log_filename = os.path.join("./logs", f'reconstruction_{timestamp}.log')
@@ -473,7 +493,8 @@ def main():
             # Find groovi output
             experiment_dir = str(Path(args.config).parent.resolve())
             results_dir = os.path.join(experiment_dir, "results")
-            args.calls = os.path.join(results_dir, 'groovi.vcf')
+            if args.calls is None:
+                args.calls = os.path.join(results_dir, 'groovi.vcf')
 
             # Attempt to find InsilicoSV sample genome
             # Assumes a common path organization of mounted drives.
@@ -485,11 +506,12 @@ def main():
 
             bam = prefix / bam_path
 
-            args.bam = bam
+            args.bam = str(bam)
+
 
             sample = bam.parent.parent / 'VCF/sim.fa'
 
-            if sample.exists():
+            if sample.exists() and args.sample is None:
                 args.sample = str(sample)
 
             # Grab reference from config
@@ -497,7 +519,10 @@ def main():
             data_index = fa_path.parts.index('data')
             fa_path = Path(*fa_path.parts[data_index:])
 
-            args.reference = str(prefix / fa_path)
+            args.classified = os.path.join(experiment_dir, "results/groovi_bkps_classified.vcf")
+
+            if args.reference is None:
+                args.reference = str(prefix / fa_path)
 
             logger.info(f'Config: {vars(args)}')
 
@@ -551,6 +576,8 @@ def main():
 
     print(df)
     logger.info(f'Score table: {df}')
+
+    export_igv_session(args.calls, args.bam, args.classified, timestamp)
 
 
 if __name__ == '__main__':
