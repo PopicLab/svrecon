@@ -462,6 +462,9 @@ def export_igv_session(calls, bam, classified, timestamp):
     ET.SubElement(resources, "Resource", path=classified, type="vcf")
     ET.SubElement(resources, "Resource", path=bam, type="bam")
 
+    # Create the directory structure based on the filename
+    os.makedirs(os.path.dirname(output_filename), exist_ok=True)
+
     # 3. Write to file with standard header
     tree = ET.ElementTree(session)
     tree.write(output_filename, encoding="utf-8", xml_declaration=True)
@@ -481,6 +484,8 @@ def main():
     parser.add_argument('--buffer', help='Subsequence context buffer', type=int, dest='buffer', default=500)
     parser.add_argument('--gap_file', help='Tab-delimited file containing centromere and telomere regions', default=None)
     parser.add_argument('--config', help='Groovi call config used to infer other params', dest='config')
+    parser.add_argument('--bam', help='BAM file for generating IGV config', dest='bam')
+    parser.add_argument('--classified', help='VCF file of classified breakpoints for IGV config', dest='classified')
     args = parser.parse_args()
 
     logger.info(f'Config: {vars(args)}')
