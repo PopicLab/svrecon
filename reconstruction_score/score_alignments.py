@@ -1,28 +1,23 @@
 import argparse
+import datetime
+import logging
+import os
+import traceback
+from collections import defaultdict, Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from itertools import groupby
+from pathlib import Path
+from typing import Dict, List, Tuple, Union
+
 import mappy
 import pysam
-import os
-import tempfile
-from intervaltree import IntervalTree
-from itertools import groupby
-
-import traceback
-from pysam.libcfaidx import FastaFile
-from tqdm import tqdm
-import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
 import yaml
-from pathlib import Path
-
-from collections import defaultdict, Counter
-from typing import Dict, List, Tuple
-
+from intervaltree import IntervalTree
 from pysam import VariantRecord
-
-import logging
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
+
 
 def get_start_stop(rec: VariantRecord) -> Tuple[int, int]:
     """
@@ -61,6 +56,7 @@ def check_match(alignment, query):
     error_rate = nm_total / len_norm if len_norm > 0 else 1.0
 
     return error_rate
+
 
 def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dict]:
     """
@@ -212,6 +208,18 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dic
 
 
 def get_changed_subsequences(new_sequence, changed_mask, tolerance, offset, buffer, svid, chrom, sv_type):
+    """
+
+    :param new_sequence:
+    :param changed_mask:
+    :param tolerance:
+    :param offset:
+    :param buffer:
+    :param svid:
+    :param chrom:
+    :param sv_type:
+    :return:
+    """
     changed_intervals = []
 
     queries = []
@@ -231,7 +239,6 @@ def get_changed_subsequences(new_sequence, changed_mask, tolerance, offset, buff
             changed_intervals.append((interval_start, current_index + group_len))
         current_index += group_len
 
-
     for start, stop in changed_intervals:
         adjusted_start = max(0, start - buffer)
         adjusted_stop = min(stop + buffer + 1, len(new_sequence))
@@ -249,15 +256,14 @@ def get_changed_subsequences(new_sequence, changed_mask, tolerance, offset, buff
     return queries
 
 
-
-
-def score_sv(records: List[VariantRecord], buffer: int, location_tolerance: int, error_threshold=0.1):
+def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_tolerance: int, error_threshold=0.1):
     """
+    For a single SV record, simulate the sequence and search for it in the sample genome
 
-    :param records:
-    :param buffer:
-    :param location_tolerance:
-    :param error_threshold:
+    :param records: List of VariantRecord objects describing the operations comprising this SV
+    :param buffer: The size in bps of context to match before and after the SV
+    :param location_tolerance: Allowance in bps for the SV to be matched at a different location
+    :param error_threshold: The proportion of bps that can mismatch between the simulated sequence and the sample
     :return:
     """
     try:
@@ -312,10 +318,9 @@ def score_sv(records: List[VariantRecord], buffer: int, location_tolerance: int,
 
 
 class AlignScorer(object):
-    def __init__(self, callset_vcf, output_dir, buffer, gap_file):
+    def __init__(self, callset_vcf, buffer, gap_file):
         """
         :param callset_vcf: File containing SV callset
-        :param output_dir: Output directory for auxiliary files
         :param buffer: Context buffer length
         """
         self.variants = None
@@ -340,7 +345,6 @@ class AlignScorer(object):
 
             self.variants = {key: value for (key, value) in filtered_variants}
 
-        self.working_dir = output_dir
         self.buffer = buffer
 
     def load_exclude_list(self, gap_file):
@@ -361,7 +365,6 @@ class AlignScorer(object):
 
         return exclude_list
 
-
     def read_vcf(self, vcf_path: str):
         """
         Read callset .vcf and group SVs by SVID info field
@@ -379,7 +382,6 @@ class AlignScorer(object):
 
         self.variants = grouped_variants
         self.vcf_header = vcf_in.header
-
 
     def score_all(self, location_tolerance=float('inf'), error_threshold=0.1, n_threads=16):
         """
@@ -448,6 +450,7 @@ class AlignScorer(object):
 
         return precision, correct_calls, total_calls
 
+
 def export_igv_session(calls, bam, classified, timestamp):
     # For now, hard coded to hg19 as reference
     import xml.etree.ElementTree as ET
@@ -458,9 +461,12 @@ def export_igv_session(calls, bam, classified, timestamp):
     session = ET.Element("Session", genome="hg19", version="8")
     resources = ET.SubElement(session, "Resources")
 
-    ET.SubElement(resources, "Resource", path=calls, type="vcf")
-    ET.SubElement(resources, "Resource", path=classified, type="vcf")
-    ET.SubElement(resources, "Resource", path=bam, type="bam")
+    if calls:
+        ET.SubElement(resources, "Resource", path=calls, type="vcf")
+    if classified:
+        ET.SubElement(resources, "Resource", path=classified, type="vcf")
+    if bam:
+        ET.SubElement(resources, "Resource", path=bam, type="bam")
 
     # Create the directory structure based on the filename
     os.makedirs(os.path.dirname(output_filename), exist_ok=True)
@@ -471,6 +477,7 @@ def export_igv_session(calls, bam, classified, timestamp):
 
     print(f"File saved to {output_filename}")
 
+
 def main():
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H%M%S')
     log_filename = os.path.join("./logs", f'reconstruction_{timestamp}.log')
@@ -480,12 +487,11 @@ def main():
     parser.add_argument('--reference', help='Reference genome .fa file', dest='reference')
     parser.add_argument('--sample', help='Sample genome .fa file', dest='sample')
     parser.add_argument('--calls', help='VCF containing called SVs', dest='calls')
-    parser.add_argument('--output_dir', help='Output directory', dest='output_dir')
     parser.add_argument('--buffer', help='Subsequence context buffer', type=int, dest='buffer', default=500)
-    parser.add_argument('--gap_file', help='Tab-delimited file containing centromere and telomere regions', default=None)
+    parser.add_argument('--gap_file', help='Tab-delimited file containing regions to omit (e.g., centromere and telomere)', default=None)
     parser.add_argument('--config', help='Groovi call config used to infer other params', dest='config')
     parser.add_argument('--bam', help='BAM file for generating IGV config', dest='bam')
-    parser.add_argument('--classified', help='VCF file of classified breakpoints for IGV config', dest='classified')
+    parser.add_argument('--classified', help='VCF file of groovi-style classified breakpoints for IGV config', dest='classified')
     args = parser.parse_args()
 
     logger.info(f'Config: {vars(args)}')
@@ -536,7 +542,7 @@ def main():
     global global_aligner
 
     print('Initializing scorer and loading callset')
-    scorer = AlignScorer(args.calls, args.output_dir, args.buffer, args.gap_file)
+    scorer = AlignScorer(args.calls, args.buffer, args.gap_file)
 
     print('Finding relevant chromosomes')
     chroms = set()
@@ -561,14 +567,6 @@ def main():
     global_aligner = mappy.Aligner(args.sample, preset='map-pb', n_threads=16)
     print("Aligner ready")
 
-    # # Filter for debugging
-    # debug_examples = [
-    #     'sv8',
-    #     'sv384',
-    # ]
-    # scorer.variants = {key:scorer.variants[key] for key in debug_examples}
-    # scorer.variants = {key:scorer.variants[key] for key in scorer.variants if scorer.variants[key][0].info['SVTYPE'] in ['dupINVdup']}
-
     precision, correct_calls, total_calls = scorer.score_all()
 
     import pandas as pd
@@ -587,19 +585,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-'''
-cat ./sim_data/sim.hapA.fa ./sim_data/sim.hapB.fa > ./sim_data/sim.combined.fa
-
---reference ./data/genome.chr21.fa --sample ./sim_data/sim.combined.fa --calls ./sim_data/sim.vcf --output_dir output --buffer 500
-
-# sim benchmark tests
---reference ./data/genome.fa.chr1.fa --sample ./sim_data/long_sim.fa --calls ./sim_data/long_sim.vcf --output_dir output --buffer 500
-
-
-real data settings
---reference /Users/huangber/remote/data/refs/refdata-GRCh38-2.1.0/fasta/genome.fa --sample /Users/huangber/remote/data/refs/HG002/hg002v1.1.fasta --calls ../groovi/output.vcf --output_dir output --buffer 500
---reference ./data/hg19.genome.fa --sample ./data/hg002v1.1.fasta --calls ../groovi/data/output.vcf --output_dir output --buffer 500
---reference /data/refs/refdata-GRCh38-2.1.0/fasta/genome.fa --sample /data/refs/HG002/hg002v1.1.fasta --calls ../groovi/output.vcf --output_dir output --buffer 500
---reference ./data/hg19.genome.fa --sample ./data/hg002.mmi --calls ../groovi/data/output.vcf --output_dir output --buffer 1000
-'''
