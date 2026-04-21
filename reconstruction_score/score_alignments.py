@@ -287,7 +287,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
             else:
                 match_scores.append(1)  # no candidate alignments found, marking this as a miss by adding a match error of 1.0 (maximum error)
 
-        coords = sequences[0]['location'], sequences[0]['location'] + sequences[0]['length']
+        coords = records[0].pos, records[0].stop
 
         result = {}
 
@@ -451,7 +451,7 @@ class AlignScorer(object):
         return precision, correct_calls, total_calls
 
 
-def export_igv_session(calls, bam, classified, timestamp):
+def export_igv_session(calls, bam, classified, timestamp, igv_prefix):
     # For now, hard coded to hg19 as reference
     import xml.etree.ElementTree as ET
 
@@ -462,11 +462,14 @@ def export_igv_session(calls, bam, classified, timestamp):
     resources = ET.SubElement(session, "Resources")
 
     if calls:
-        ET.SubElement(resources, "Resource", path=calls, type="vcf")
+        ET.SubElement(resources, "Resource", path=igv_prefix + calls, type="vcf")
     if classified:
-        ET.SubElement(resources, "Resource", path=classified, type="vcf")
+        ET.SubElement(resources, "Resource", path=igv_prefix + classified, type="vcf")
     if bam:
-        ET.SubElement(resources, "Resource", path=bam, type="bam")
+        bam_resource = ET.SubElement(resources, "Resource", path=igv_prefix + bam, type="bam")
+        ET.SubElement(bam_resource, "RenderOptions", colorOption="READ_STRAND", duplicatesOption="FILTER",
+                      groupByOption="LINKED", hideSmallIndels="true", linkByTag="READNAME", linkedReads="true",
+                      smallIndelThreshold="2")
 
     # Create the directory structure based on the filename
     os.makedirs(os.path.dirname(output_filename), exist_ok=True)
@@ -492,6 +495,7 @@ def main():
     parser.add_argument('--config', help='Groovi call config used to infer other params', dest='config')
     parser.add_argument('--bam', help='BAM file for generating IGV config', dest='bam')
     parser.add_argument('--classified', help='VCF file of groovi-style classified breakpoints for IGV config', dest='classified')
+    parser.add_argument('--igv_prefix', help='Prefix for igv session paths', default='', dest='igv_prefix')
     args = parser.parse_args()
 
     logger.info(f'Config: {vars(args)}')
@@ -512,13 +516,14 @@ def main():
             exp_path = Path(experiment_dir)
             prefix = data_dir = next(p for p in exp_path.parents if p.name == 'data').parent
             bam_path = Path(config_data['bam'])
-            data_index = bam_path.parts.index('data')
-            bam_path = Path(*bam_path.parts[data_index:])
+            if not bam_path:
+                data_index = bam_path.parts.index('data')
+                bam_path = Path(*bam_path.parts[data_index:])
 
             bam = prefix / bam_path
 
-            args.bam = str(bam)
-
+            if not args.bam:
+                args.bam = str(bam)
 
             sample = bam.parent.parent / 'VCF/sim.fa'
 
@@ -580,7 +585,7 @@ def main():
     print(df)
     logger.info(f'Score table: {df}')
 
-    export_igv_session(args.calls, args.bam, args.classified, timestamp)
+    export_igv_session(args.calls, args.bam, args.classified, timestamp, args.igv_prefix)
 
 
 if __name__ == '__main__':
