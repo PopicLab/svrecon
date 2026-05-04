@@ -33,8 +33,6 @@ def get_cached_aligner(fasta_path: str, threads: int = 16, preset: str = 'map-pb
         base_name + ".mmi"
     ]
 
-    global_aligner = get_cached_aligner(fasta_path=args.sample, threads=args.threads, preset='map-pb')
-
     # Proceed with the temp directory cache if no local .mmi exists
     cache_dir = os.path.join(tempfile.gettempdir(), 'mappy_cache')
     os.makedirs(cache_dir, exist_ok=True)
@@ -655,7 +653,7 @@ def main():
     logger.info(f"Reference pre-loaded with {len(global_ref)} chromosomes.")
 
     logger.info("Loading index into aligner")
-    global_aligner = mappy.Aligner(args.sample, preset='map-pb', n_threads=16)
+    global_aligner = get_cached_aligner(args.sample, preset='map-pb', threads=16)
     logger.info("Aligner ready")
 
     precision, correct_calls, total_calls = scorer.score_all()

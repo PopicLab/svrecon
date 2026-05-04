@@ -42,19 +42,19 @@ def extract_junction_sequence(rec: pysam.VariantRecord, buffer: int) -> dict:
     chrom2 = info['CHR2']
 
     # Pysam may parse INFO fields as tuples depending on the VCF header
-    orientation = info.get('ORIENTATION', '')
+    orientation = info['ORIENTATION']
     if isinstance(orientation, tuple):
         orientation = orientation[0]
-    if orientation.startswith('k'):
+    if isinstance(orientation, str) and orientation.startswith('k'):
         orientation = orientation[1:]
 
-    source = info.get('SOURCE', '')
+    source = info['SOURCE']
     if isinstance(source, tuple):
         source = source[0]
-    if source.startswith('k'):
+    if isinstance(source, str) and source.startswith('k'):
         source = source[1:]
 
-    if orientation == source == '':
+    if orientation is None and source is None:
         orientation = info.get('BKP_TYPE', '')
         source = info.get('BKP_TYPE', '')
 
