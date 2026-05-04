@@ -1,5 +1,28 @@
 # Reconstruction Scorer
 
+## Instructions for running:
+
+Run with the following parameters.
+- `--reference`: Path to .fa file containing the reference genome
+- `--sample`: Path to .fa file containing the sample genome (on which SVs have been called)
+- `--calls`: Path to .vcf file containing called SVs in InsilicoSV format
+- `--buffer`:  Subsequence context buffer size, number of bps before and after reconstructed SV to compare
+- `--gap_file`: (Optional) Tab-delimited file containing regions to omit (e.g., centromere and telomere)
+
+Optionally include the following parameters to generate IGV session xmls to visualize the predictions
+- `--config`: (Optional) Groovi call config used to infer other params (will attempt to infer `bam`, `classified`, `reference`, `sample`, and `calls`, so those can be omitted if they are in the config file). See notes.
+- `--bam`: (Optional) BAM file for generating IGV config
+- `--classified`: (Optional) VCF file of groovi-style classified breakpoints for IGV config
+
+Path resolution when inferring from a config file is somewhat sensitive to how we organize files internally, so it may not work in other environments. It's just a shortcut for manually inputting each parameter, so it should be possible to work around.
+
+## Example calls 
+- `python score_alignments.py --reference ./data/genome.chr21.fa --sample ./sim_data/sim.combined.fa --calls ./sim_data/sim.vcf --buffer 500`
+- `python score_alignments.py --reference /data/refs/refdata-hg19-2.1.0/fasta/genome.fa --sample /data/refs/HG002/hg002v1.1.fasta --calls /data/bert/groovi/vcf_export_debug/results/groovi.vcf --gap_file /data/bert/datasets/hg19.gap.txt`
+
+
+
+
 **Reconstruction evaluation procedure**
 
 Given a set of called (and stitched) SVs on a genome, we take the fully assembled genomes and measure 
@@ -19,24 +42,12 @@ positions and targets of the included operations, and implement the resulting su
     - The SV being measured is near other SV. This happens often with nearby deletions. The buffer regions before and after the SV in question would be wrong if they do not also consider the changes caused by nearby SVs. This only occurs with very close SVs, but they do happen.
 - For dispersions, we search for the resulting subsequence at the source and target of the dispersion (if there is also a change at the source).
 
-## Instructions for running:
+**Notes**
 
-Run with the following parameters.
-- `--reference`: Path to .fa file containing the reference genome
-- `--sample`: Path to .fa file containing the sample genome (on which SVs have been called)
-- `--calls`: Path to .vcf file containing called SVs in InsilicoSV format
-- `--buffer`:  Subsequence context buffer size, number of bps before and after reconstructed SV to compare
-- `--gap_file`: (Optional) Tab-delimited file containing regions to omit (e.g., centromere and telomere)
-
-Optionally include the following parameters to generate IGV session xmls to visualize the predictions
-- `--config`: (Optional) Groovi call config used to infer other params (will attempt to infer `bam`, `classified`, `reference`, `sample`, and `calls`, so those can be omitted if they are in the config file)
-- `--bam`: (Optional) BAM file for generating IGV config
-- `--classified`: (Optional) VCF file of groovi-style classified breakpoints for IGV config
-
-Path resolution when inferring from a config file is somewhat sensitive to how we organize files internally, so it may not work in other environments. It's just a shortcut for manually inputting each parameter, so it should be possible to work around.
-
-## Example calls 
-- `python score_alignments.py --reference ./data/genome.chr21.fa --sample ./sim_data/sim.combined.fa --calls ./sim_data/sim.vcf --buffer 500`
-- `python score_alignments.py --reference /data/refs/refdata-hg19-2.1.0/fasta/genome.fa --sample /data/refs/HG002/hg002v1.1.fasta --calls /data/bert/groovi/vcf_export_debug/results/groovi.vcf --gap_file /data/bert/datasets/hg19.gap.txt`
-
-
+- Extracting parameters from groovi config files is very dependent on expected folder structures and likely to break.
+  - It expects remote servers to be mounted locally
+  - It expects a fasta file to be located in a sibling folder of the .bam file, which typically only occurs for synthetic training data.
+  - It expects the call file to be `groovi.vcf` in the config file's results directory
+  - Each of these parameters should be overrided if these conditions aren't met. 
+- The tool expects a `logs` directory in the working directory.
+- If the tool doesn't find a `.mmi` index file attached to the `.fa` sample assembly, it creates one as a cache and stores it in temporary space

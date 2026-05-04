@@ -1,7 +1,10 @@
 import argparse
 import datetime
+import hashlib
 import logging
 import os
+import sys
+import tempfile
 import traceback
 from collections import defaultdict, Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -18,6 +21,93 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
+
+def get_cached_aligner(fasta_path: str, threads: int = 16, preset: str = 'map-pb') -> mappy.Aligner:
+    """Loads a mappy.Aligner by first checking for an existing .mmi next to the FASTA, falling back to a hashed temp cache."""
+    abs_path = os.path.abspath(fasta_path)
+
+    # Check for an existing .mmi file in the same directory as the FASTA
+    base_name, _ = os.path.splitext(abs_path)
+    possible_existing_mmis = [
+        abs_path + ".mmi",
+        base_name + ".mmi"
+    ]
+
+    global_aligner = get_cached_aligner(fasta_path=args.sample, threads=args.threads, preset='map-pb')
+
+    # Proceed with the temp directory cache if no local .mmi exists
+    cache_dir = os.path.join(tempfile.gettempdir(), 'mappy_cache')
+    os.makedirs(cache_dir, exist_ok=True)
+
+    # Get modification time to create a unique, versioned hash
+    mtime = os.path.getmtime(abs_path)
+
+    # Generate an MD5 hash of the path and modification time
+    hash_input = f"{abs_path}_{mtime}".encode('utf-8')
+    path_hash = hashlib.md5(hash_input).hexdigest()
+
+    # Create the cache filename
+    cache_file = os.path.join(cache_dir, f"{path_hash}.mmi")
+
+    # Load from temp cache if it exists, otherwise build and save it there
+    if os.path.exists(cache_file):
+        logger.info(f"Loading cached MMI index for {os.path.basename(fasta_path)} from {cache_file}")
+        aligner = mappy.Aligner(cache_file, preset=preset)
+    else:
+        logger.info(f"Building new MMI index for {os.path.basename(fasta_path)} and saving to {cache_file}...")
+        aligner = mappy.Aligner(abs_path, preset=preset, n_threads=threads, fn_idx_out=cache_file)
+
+    if not aligner:
+        raise RuntimeError(f"Failed to load or index sample genome at {fasta_path}")
+
+    return aligner
+
+def update_args_from_config(args):
+    """
+    Infer parameters from groovi config files
+    :param args: args passed into this tool including args.config pointing to a groovi config file
+    :return: updated args object
+    """
+    with open(args.config, 'r') as file:
+        config_data = yaml.safe_load(file)
+
+        # Find groovi output
+        experiment_dir = str(Path(args.config).parent.resolve())
+        results_dir = os.path.join(experiment_dir, "results")
+        if args.calls is None:
+            args.calls = os.path.join(results_dir, 'groovi.vcf')
+
+        # Attempt to find InsilicoSV sample genome
+        # Assumes a common path organization of mounted drives.
+        exp_path = Path(experiment_dir)
+        prefix = data_dir = next(p for p in exp_path.parents if p.name == 'data').parent
+        bam_path = Path(config_data['bam'])
+        if not bam_path:
+            data_index = bam_path.parts.index('data')
+            bam_path = Path(*bam_path.parts[data_index:])
+
+        bam = prefix / bam_path
+
+        if not args.bam:
+            args.bam = str(bam)
+
+        sample = bam.parent.parent / 'VCF/sim.fa'
+
+        if sample.exists() and args.sample is None:
+            args.sample = str(sample)
+
+        # Grab reference from config
+        fa_path = Path(config_data['fa'])
+        data_index = fa_path.parts.index('data')
+        fa_path = Path(*fa_path.parts[data_index:])
+
+        args.classified = os.path.join(experiment_dir, "results/groovi_bkps_classified.vcf")
+
+        if args.reference is None:
+            args.reference = str(prefix / fa_path)
+
+        logger.info(f'Config updated: {vars(args)}')
+    return args
 
 def get_start_stop(rec: VariantRecord) -> Tuple[int, int]:
     """
@@ -209,7 +299,6 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dic
 
 def get_changed_subsequences(new_sequence, changed_mask, tolerance, offset, buffer, svid, chrom, sv_type):
     """
-
     :param new_sequence:
     :param changed_mask:
     :param tolerance:
@@ -357,7 +446,7 @@ class AlignScorer(object):
                 start, stop = int(row[2]), int(row[3])
                 region_type = row[7]
 
-                print(f"{chrom}\t{start}\t{stop}\t{region_type}")
+                # print(f"{chrom}\t{start}\t{stop}\t{region_type}")
 
                 # if region_type in ['telomere', 'centromere']:
                 # Include all regions in this gap file
@@ -424,7 +513,7 @@ class AlignScorer(object):
                     coords = result['coords']
                     hit_miss = 'hit' if result['is_correct'] else 'miss'
                     match_scores = result['match_scores']
-                    logger.info(f'{svid}\t{sv_type}\t{sequences[0]["chrom"]}:{coords[0]}-{coords[1]}\t{hit_miss}\t{match_scores}')
+                    logger.debug(f'{svid}\t{sv_type}\t{sequences[0]["chrom"]}:{coords[0]}-{coords[1]}\t{hit_miss}\t{match_scores}')
 
                     total_calls[sv_type] += 1
                     overall_count += 1
@@ -466,9 +555,28 @@ def export_igv_session(calls, bam, classified, timestamp, igv_prefix):
     if classified:
         ET.SubElement(resources, "Resource", path=igv_prefix + classified, type="vcf")
     if bam:
-        bam_resource = ET.SubElement(resources, "Resource", path=igv_prefix + bam, type="bam")
-        ET.SubElement(bam_resource, "RenderOptions", colorOption="READ_STRAND", duplicatesOption="FILTER",
-                      groupByOption="LINKED", hideSmallIndels="true", linkByTag="READNAME", linkedReads="true",
+        # 1. Standard BAM Resource
+        bam_path = igv_prefix + bam
+        ET.SubElement(resources, "Resource", path=bam_path, type="bam")
+
+        # 2. Add the Panel and Track structure
+        bam_panel = ET.SubElement(session, "Panel", name="Alignments", height="600")
+
+        align_track = ET.SubElement(bam_panel, "Track",
+                                    clazz="org.broad.igv.sam.AlignmentTrack",
+                                    displayMode="EXPANDED",
+                                    id=bam_path,
+                                    name=os.path.basename(bam_path),
+                                    visible="true")
+
+        # 3. Place RenderOptions inside the Track
+        ET.SubElement(align_track, "RenderOptions",
+                      colorOption="READ_STRAND",
+                      duplicatesOption="FILTER",
+                      groupByOption="LINKED",
+                      hideSmallIndels="true",
+                      linkByTag="READNAME",
+                      linkedReads="true",
                       smallIndelThreshold="2")
 
     # Create the directory structure based on the filename
@@ -484,7 +592,24 @@ def export_igv_session(calls, bam, classified, timestamp, igv_prefix):
 def main():
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H%M%S')
     log_filename = os.path.join("./logs", f'reconstruction_{timestamp}.log')
-    logging.basicConfig(filename=log_filename, level=logging.DEBUG, filemode='w')
+
+    # Create handlers and set their individual log levels
+    file_handler = logging.FileHandler(log_filename, mode='w')
+    file_handler.setLevel(logging.DEBUG)  # File gets DEBUG and above
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)  # Console gets INFO and above (skips DEBUG)
+
+    # Pass the configured handlers to basicConfig
+    logging.basicConfig(
+        level=logging.DEBUG,  # The root logger must be set to the lowest level you want to capture
+        format='%(asctime)s %(levelname)-8s %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+        handlers=[
+            file_handler,
+            console_handler
+        ]
+    )
 
     parser = argparse.ArgumentParser(description='Score VCF SV calls against a reference and sample genome')
     parser.add_argument('--reference', help='Reference genome .fa file', dest='reference')
@@ -502,63 +627,24 @@ def main():
 
     if args.config:
         logger.info(f'Inferring params from {args.config}')
-        with open(args.config, 'r') as file:
-            config_data = yaml.safe_load(file)
-
-            # Find groovi output
-            experiment_dir = str(Path(args.config).parent.resolve())
-            results_dir = os.path.join(experiment_dir, "results")
-            if args.calls is None:
-                args.calls = os.path.join(results_dir, 'groovi.vcf')
-
-            # Attempt to find InsilicoSV sample genome
-            # Assumes a common path organization of mounted drives.
-            exp_path = Path(experiment_dir)
-            prefix = data_dir = next(p for p in exp_path.parents if p.name == 'data').parent
-            bam_path = Path(config_data['bam'])
-            if not bam_path:
-                data_index = bam_path.parts.index('data')
-                bam_path = Path(*bam_path.parts[data_index:])
-
-            bam = prefix / bam_path
-
-            if not args.bam:
-                args.bam = str(bam)
-
-            sample = bam.parent.parent / 'VCF/sim.fa'
-
-            if sample.exists() and args.sample is None:
-                args.sample = str(sample)
-
-            # Grab reference from config
-            fa_path = Path(config_data['fa'])
-            data_index = fa_path.parts.index('data')
-            fa_path = Path(*fa_path.parts[data_index:])
-
-            args.classified = os.path.join(experiment_dir, "results/groovi_bkps_classified.vcf")
-
-            if args.reference is None:
-                args.reference = str(prefix / fa_path)
-
-            logger.info(f'Config: {vars(args)}')
-
+        args = update_args_from_config(args)
 
     global global_ref
     global global_aligner
 
-    print('Initializing scorer and loading callset')
+    logger.info('Initializing scorer and loading callset')
     scorer = AlignScorer(args.calls, args.buffer, args.gap_file)
 
-    print('Finding relevant chromosomes')
+    logger.info('Finding relevant chromosomes')
     chroms = set()
     for records in scorer.variants.values():
         for record in records:
             chroms.add(record.chrom)
             if 'TARGET_CHROM' in record.info:
                 chroms.add(record.info['TARGET_CHROM'])
-    print(f'Found {len(chroms)} referenced chromosomes in callset')
+    logger.info(f'Found {len(chroms)} referenced chromosomes in callset')
 
-    print("Loading reference")
+    logger.info("Loading reference")
     ref_data = {}
     with pysam.FastaFile(args.reference) as f:
         for chrom in chroms:
@@ -566,11 +652,11 @@ def main():
             # ref_data[chrom] = list(sequence_string)
             ref_data[chrom] = bytearray(sequence_string, 'ascii')
     global_ref = ref_data
-    print(f"Reference pre-loaded with {len(global_ref)} chromosomes.")
+    logger.info(f"Reference pre-loaded with {len(global_ref)} chromosomes.")
 
-    print("Loading index into aligner")
+    logger.info("Loading index into aligner")
     global_aligner = mappy.Aligner(args.sample, preset='map-pb', n_threads=16)
-    print("Aligner ready")
+    logger.info("Aligner ready")
 
     precision, correct_calls, total_calls = scorer.score_all()
 
@@ -581,9 +667,9 @@ def main():
         'total_calls': total_calls,
         'precision': precision,
     })
+    df.sort_values('total_calls', ascending=False, inplace=True)
 
-    print(df)
-    logger.info(f'Score table: {df}')
+    logger.info(f'Score table:\n{df}')
 
     export_igv_session(args.calls, args.bam, args.classified, timestamp, args.igv_prefix)
 
