@@ -83,7 +83,8 @@ def extract_junction_sequence(rec: pysam.VariantRecord, buffer: int) -> dict:
         'orientation': orientation,
         'source': source,
         'sequence': seq,
-        'svid': rec.id or f"{chrom1}_{start}_{orientation}"
+        'svid': rec.id or f"{chrom1}_{start}_{orientation}",
+        'support': info['SUPPORT']
     }
 
 
@@ -167,6 +168,7 @@ def main():
                         default=float('inf'))
     parser.add_argument('--error_threshold', help='Max sequence error rate', type=float, default=0.1)
     parser.add_argument('--threads', help='Number of threads', type=int, default=16)
+    parser.add_argument('--min_support', help='Minimum support to score a breakpoint', type=float, default=1)
     args = parser.parse_args()
 
     logger.info(f'Config: {vars(args)}')
@@ -210,6 +212,8 @@ def main():
     overall_count = 0
     overall_correct = 0
 
+    filtered_records = [rec for rec in records if rec.info['SUPPORT'] >= args.min_support]
+
     # Execute the breakpoint scoring in parallel across the specified number of threads
     logger.info("Scoring Breakpoints...")
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
@@ -219,12 +223,12 @@ def main():
                 rec,
                 args.buffer,
                 args.location_tolerance,
-                args.error_threshold
+                args.error_threshold,
             )
-            for rec in records
+            for rec in filtered_records
         }
 
-        pbar = tqdm(as_completed(futures), total=len(records), desc='Scoring Breakpoints')
+        pbar = tqdm(as_completed(futures), total=len(filtered_records), desc='Scoring Breakpoints')
 
         # Aggregate the results as each thread completes
         for future in pbar:
