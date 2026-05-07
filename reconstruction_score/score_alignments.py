@@ -12,6 +12,7 @@ from itertools import groupby
 from pathlib import Path
 from typing import Dict, List, Tuple, Union
 
+import edlib
 import mappy
 import pysam
 import yaml
@@ -21,6 +22,7 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
+MIN_EDLIB_QUERY = 10000
 
 def get_chrom_aligner(sample_fasta: str, chrom: str, cache_dir: str, align_params: dict,
                       threads: int = 4) -> mappy.Aligner:
@@ -28,9 +30,9 @@ def get_chrom_aligner(sample_fasta: str, chrom: str, cache_dir: str, align_param
     mmi_path = os.path.join(cache_dir, f"{chrom}.mmi")
 
     # If we already have the index in the cache, load it directly
-    # if os.path.exists(mmi_path):
-    #     logger.info(f"Loading existing index for {chrom} from {mmi_path}")
-    #     return mappy.Aligner(mmi_path, **align_params)
+    if os.path.exists(mmi_path):
+        logger.info(f"Loading existing index for {chrom} from {mmi_path}")
+        return mappy.Aligner(mmi_path, **align_params)
 
     # Build the index by extracting the relevant contigs
     logger.info(f"Index not found for {chrom}. Extracting sequences...")
@@ -131,9 +133,10 @@ def reverse_complement(seq: Union[str, List[str]]) -> List[str]:
     return [complement[x] for x in reversed(seq)]
 
 
-# Global variable to hold the sample and reference FastaFile instance in each worker process
+# Global variable to share the sample and reference for each worker process
 # (Must be accessible by the worker function)
 global_ref = None
+global_sample = None
 global_aligners = None
 
 
@@ -192,7 +195,6 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dic
     if len(target_records) > 1:
         target_records = sorted(target_records, key=lambda rec: (rec.info['TARGET'], rec.info.get('INSORD', 0)),
                                 reverse=True)
-        # print(f"WARNING: The list for {svid}-{sv_type} contains more than one record with target. Sorting in reverse order by target and INSORD if available, but conflicts are possible")
 
     records = in_place_records + target_records
 
@@ -219,21 +221,14 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dic
     queries = []
 
     for rec in records:
-        # Supported operations:
-        # CUT (aka DEL)
-        # COPY-PASTE (aka dDUP, DUP)
-        # CUT-PASTE (aka nrTRA)
-        # COPYinv_PASTE (aka INV_dDUP)
-        # CUTinv-PASTE (aka INV-nrTRA)
-
         start, stop = get_start_stop(rec)
         target = rec.info.get('TARGET', stop + 1) - target_offset  # Convert target to 0-index and offset
         start -= offset
         stop -= offset
 
         if rec.info.get('TARGET_CHROM', chrom) != chrom:
-            print(
-                f"WARNING: Skipping record: {rec.id}-{sv_type} because interchromosome target. Interchromosome checks not implemented yet.")
+            logger.warning(
+                f"Skipping record: {rec.id}-{sv_type} because interchromosome target. Interchromosome checks not implemented yet.")
             return []
 
         if rec.info['OP_TYPE'] == 'CUT' or rec.info['SVTYPE'] == 'DEL':
@@ -286,10 +281,10 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dic
                 new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
                 target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
         else:
-            print(f"WARNING: Unknown OP_TYPE: {rec.info['OP_TYPE']}")
+            logger.warning(f"Unknown OP_TYPE: {rec.info['OP_TYPE']}")
 
     if len(changed_mask) == 0:
-        print(f"WARNING: No changed intervals found for {svid}-{sv_type}")
+        logger.warning(f"No changed intervals found for {svid}-{sv_type}")
         return []
 
     MERGE_TOLERANCE = 5  # merge intervals that are within this many base pairs (usually alignment or boundary case error)
@@ -300,8 +295,6 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dic
         queries.extend(
             get_changed_subsequences(new_target_sequence, target_changed_mask, MERGE_TOLERANCE, target_offset, buffer,
                                      svid, chrom, sv_type))
-
-    # print(f'Checking {svid}-{sv_type} with {len(queries)} queries')
 
     return queries
 
@@ -319,7 +312,6 @@ def get_changed_subsequences(new_sequence, changed_mask, tolerance, offset, buff
     :return:
     """
     changed_intervals = []
-
     queries = []
 
     # Get contiguous blocks of changed indices in the subsequence
@@ -362,14 +354,77 @@ def load_fasta_to_bytes(filename: str, chroms) -> Dict[str, bytearray]:
             chrom_lower = chrom.lower()
             for ref in fasta_refs:
                 ref_lower = ref.lower()
-                # Ensure 'chr1' matches 'chr1' and 'chr1_paternal', but NOT 'chr11'
                 if ref_lower == chrom_lower or ref_lower.startswith(f"{chrom_lower}_"):
                     sequence_string = f.fetch(reference=ref)
                     data[ref] = bytearray(sequence_string, 'ascii')
     return data
 
 
-def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_tolerance:  Union[int, float],
+def run_edlib_fallback(query_seq: str, chrom: str, location: int, initial_buffer: int, max_tolerance: int,
+                       error_threshold: float) -> float:
+    """
+    Executes an exact edit distance search via edlib, exponentially expanding the search window
+    starting from initial_buffer up to max_tolerance.
+    Returns the calculated error rate, exiting early if it falls below the error_threshold.
+    """
+    global global_sample
+
+    target_keys = [k for k in global_sample.keys() if k == chrom or k.startswith(f"{chrom}_")]
+    if not target_keys:
+        return 1.0
+
+    best_error = 1.0
+    current_tolerance = initial_buffer
+
+    prev_bounds = {k: (-1, -1) for k in target_keys}
+
+    while True:
+        expanded_any = False
+
+        for target_key in target_keys:
+            target_len = len(global_sample[target_key])
+
+            search_start = max(0, location - current_tolerance)
+            search_end = min(target_len, location + len(query_seq) + current_tolerance)
+
+            if (search_start, search_end) == prev_bounds[target_key]:
+                continue
+
+            expanded_any = True
+            prev_bounds[target_key] = (search_start, search_end)
+
+            target_seq = global_sample[target_key][search_start:search_end].decode('ascii')
+
+            result = edlib.align(query_seq.upper(), target_seq.upper(), mode="HW", task="path")
+
+            if result and result['editDistance'] >= 0:
+                edit_dist = result['editDistance']
+
+                # Check that both coordinates actually exist before doing math
+                if result.get('locations') and result['locations'][0][0] is not None and result['locations'][0][1] is not None:
+                    loc = result['locations'][0]
+                    target_match_len = loc[1] - loc[0] + 1
+                    denominator = max(len(query_seq), target_match_len)
+                else:
+                    denominator = len(query_seq)
+
+                error_rate = edit_dist / denominator if denominator > 0 else 1.0
+                best_error = min(best_error, error_rate)
+
+                if best_error <= error_threshold:
+                    return best_error
+
+        if not expanded_any or current_tolerance >= max_tolerance:
+            break
+
+        current_tolerance = max(1, current_tolerance * 10)
+        if current_tolerance > max_tolerance:
+            current_tolerance = max_tolerance
+
+    return best_error
+
+
+def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_tolerance: Union[int, float],
              error_threshold=0.1):
     """
     For a single SV record, simulate the sequence and search for it in the sample genome
@@ -388,46 +443,55 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
         sequences = simulate_subsequences(records, buffer)
         match_scores = []
 
-        # check that all subsequences match
+        mappy_passed_all = True
+
         for query in sequences:
             sequence = query['sequence']
             chrom = query['chrom']
 
-            # If we don't have an aligner for this chrom (e.g., it wasn't in the sample), mark a miss
-            if chrom not in global_aligners:
-                match_scores.append(1.0)
-                continue
+            best_score = 1.0
 
-            aligner = global_aligners[chrom]
+            if chrom in global_aligners:
+                aligner = global_aligners[chrom]
+                all_alignments = list(aligner.map(sequence))
+                alignments = [a for a in all_alignments if abs(a.r_st - query['location']) <= location_tolerance]
 
-            # The aligner only contains the correct chromosome + haplotypes!
-            all_alignments = list(aligner.map(sequence))
+                if len(alignments) > 0:
+                    best_score = min([check_match(a, sequence) for a in alignments])
 
-            # Apply location tolerance
-            alignments = [a for a in all_alignments if abs(a.r_st - query['location']) <= location_tolerance]
+            # Run edlib fallback if mappy missed or failed the error threshold
+            if len(sequence) < MIN_EDLIB_QUERY and best_score > error_threshold:
+                mappy_passed_all = False
+                edlib_score = run_edlib_fallback(
+                    sequence,
+                    chrom,
+                    query['location'],
+                    int(buffer),
+                    int(location_tolerance),
+                    error_threshold
+                )
+                best_score = min(best_score, edlib_score)
 
-            if len(alignments) > 0:
-                match_scores.append(min([check_match(a, sequence) for a in alignments]))
-            else:
-                match_scores.append(1.0)  # maximum error (miss)
+            match_scores.append(best_score)
 
         coords = records[0].pos, records[0].stop
 
         result = {}
 
         if len(sequences) > 0 and all([score <= error_threshold for score in match_scores]):
-            # print("Match successful")
             is_correct = True
             hit_miss = 'hit'
         else:
             hit_miss = 'miss'
             is_correct = False
-            # print("Match not found")
+
+        rescued_by_edlib = is_correct and not mappy_passed_all
 
         return {
             'svid': svid,
             'sv_type': sv_type,
             'is_correct': is_correct,
+            'rescued_by_edlib': rescued_by_edlib,
             'coords': coords,
             'match_scores': match_scores,
             'sequences': sequences,
@@ -435,7 +499,6 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
     except Exception as e:
         error_msg = f"Worker failed for SVID: {records[0].info.get('SVID', 'Unknown')}. Error: {e}\n{traceback.format_exc()}"
         logger.error(error_msg)
-
         raise e
 
 
@@ -480,10 +543,6 @@ class AlignScorer(object):
                 start, stop = int(row[2]), int(row[3])
                 region_type = row[7]
 
-                # print(f"{chrom}\t{start}\t{stop}\t{region_type}")
-
-                # if region_type in ['telomere', 'centromere']:
-                # Include all regions in this gap file
                 exclude_list[chrom][start:stop] = region_type
 
         return exclude_list
@@ -496,9 +555,7 @@ class AlignScorer(object):
         grouped_variants = defaultdict(list)
         vcf_in = pysam.VariantFile(vcf_path)
 
-        # Iterate over all records in the VCF file
         for rec in vcf_in.fetch():
-            # Check the INFO field for 'SVID'
             svid = rec.info.get('SVID')
             if svid:
                 grouped_variants[svid].append(rec)
@@ -518,11 +575,10 @@ class AlignScorer(object):
         correct_calls = Counter()
         overall_count = 0
         overall_correct = 0
+        edlib_rescues = 0
         precision = {}
-        results_list = []
 
         with ThreadPoolExecutor(max_workers=n_threads) as executor:
-            # Submit all SV tasks to the pool
             futures = {
                 executor.submit(
                     score_sv,
@@ -534,8 +590,7 @@ class AlignScorer(object):
                 for svid in self.variants.keys()
             }
 
-            # Aggregate results and manage the progress bar
-            pbar = tqdm(as_completed(futures), total=len(self.variants), desc=f'Scoring SVs')
+            pbar = tqdm(as_completed(futures), total=len(self.variants), desc=f'Scoring SVs', smoothing=0)
 
             for future in pbar:
                 try:
@@ -556,6 +611,8 @@ class AlignScorer(object):
                     if result['is_correct']:
                         correct_calls[sv_type] += 1
                         overall_correct += 1
+                        if result.get('rescued_by_edlib'):
+                            edlib_rescues += 1
                     else:
                         correct_calls[sv_type] += 0
 
@@ -567,10 +624,8 @@ class AlignScorer(object):
                 except Exception as exc:
                     logger.error(f'SV processing generated an exception: {exc}')
 
+        logger.info(f"Total SVs rescued by edlib fallback: {edlib_rescues}")
 
-        # TODO: for each SV that failed the initial check using mappy, also run edlib to check if minimap2 gave up on the match due to repetitive regions
-
-        # Final aggregation
         precision['ALL'] = sum(correct_calls.values()) / sum(total_calls.values())
         correct_calls['ALL'] = sum(correct_calls.values())
         total_calls['ALL'] = sum(total_calls.values())
@@ -597,7 +652,6 @@ def export_igv_session(calls, bam, classified, timestamp, igv_prefix):
         bam_path = igv_prefix + bam
         ET.SubElement(resources, "Resource", path=bam_path, type="bam")
 
-        # Add the Panel and Track structure
         bam_panel = ET.SubElement(session, "Panel", name="Alignments", height="600")
 
         align_track = ET.SubElement(bam_panel, "Track",
@@ -607,7 +661,6 @@ def export_igv_session(calls, bam, classified, timestamp, igv_prefix):
                                     name=os.path.basename(bam_path),
                                     visible="true")
 
-        # Place RenderOptions inside the Track
         ET.SubElement(align_track, "RenderOptions",
                       colorOption="READ_STRAND",
                       duplicatesOption="FILTER",
@@ -617,10 +670,8 @@ def export_igv_session(calls, bam, classified, timestamp, igv_prefix):
                       linkedReads="true",
                       smallIndelThreshold="2")
 
-    # Create the directory structure based on the filename
     os.makedirs(os.path.dirname(output_filename), exist_ok=True)
 
-    # Write to file with standard header
     tree = ET.ElementTree(session)
     tree.write(output_filename, encoding="utf-8", xml_declaration=True)
 
@@ -630,20 +681,17 @@ def export_igv_session(calls, bam, classified, timestamp, igv_prefix):
 def main():
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H%M%S')
 
-    # Ensure logs directory exists before setting up handlers
     os.makedirs('./logs', exist_ok=True)
     log_filename = os.path.join("./logs", f'reconstruction_{timestamp}.log')
 
-    # Create handlers and set their individual log levels
     file_handler = logging.FileHandler(log_filename, mode='w')
-    file_handler.setLevel(logging.DEBUG)  # File gets DEBUG and above
+    file_handler.setLevel(logging.DEBUG)
 
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)  # Console gets INFO and above (skips DEBUG)
+    console_handler.setLevel(logging.INFO)
 
-    # Pass the configured handlers to basicConfig
     logging.basicConfig(
-        level=logging.DEBUG,  # The root logger must be set to the lowest level you want to capture
+        level=logging.DEBUG,
         format='%(asctime)s %(levelname)-8s %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S',
         handlers=[
@@ -679,6 +727,7 @@ def main():
         args = update_args_from_config(args)
 
     global global_ref
+    global global_sample
     global global_aligners
 
     logger.info('Initializing scorer and loading callset')
@@ -693,13 +742,11 @@ def main():
                 chroms.add(record.info['TARGET_CHROM'])
     logger.info(f'Found {len(chroms)} referenced chromosomes in callset')
 
-    logger.info("Loading reference")
+    logger.info("Loading reference and sample bytearrays")
     global_ref = load_fasta_to_bytes(args.reference, chroms)
-    logger.info(f"Reference pre-loaded with {len(global_ref)} chromosomes.")
+    global_sample = load_fasta_to_bytes(args.sample, chroms)
+    logger.info(f"Loaded {len(global_ref)} reference chromosomes and {len(global_sample)} sample chromosomes.")
 
-    # parameters from cue2
-    # mappy.Aligner(seq=seq, preset="sr", best_n=1, min_cnt=1, k=15, w=5,
-    #                                                   min_dp_score=10, min_chain_score=1)
     align_params = {
         'preset': 'map-hifi',
         'k': 15,
@@ -710,7 +757,6 @@ def main():
         'min_chain_score': 1,
     }
 
-    # Determine our cache directory
     if args.chrom_cache:
         cache_dir = args.chrom_cache
         logger.info(f"Using persistent cache directory: {cache_dir}")
@@ -722,8 +768,6 @@ def main():
 
     logger.info("Building/loading per-chromosome aligners...")
     global_aligners = {}
-
-    # aligner = mappy.Aligner(args.sample, **align_params)
 
     for chrom in chroms:
         aligner = get_chrom_aligner(args.sample, chrom, cache_dir, align_params, threads=16)
