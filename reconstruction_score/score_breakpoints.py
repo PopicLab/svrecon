@@ -11,20 +11,12 @@ import pandas as pd
 from tqdm import tqdm
 import sys
 
-from score_alignments import check_match, get_cached_aligner
+from score_alignments import check_match, get_cached_aligner, reverse_complement
 
 logger = logging.getLogger(__name__)
 
 global_aligner = None
 global_ref = None
-
-
-def reverse_complement(seq: str) -> str:
-    """Returns the reverse complement of a given DNA sequence string."""
-    complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A',
-                  'a': 't', 'c': 'g', 'g': 'c', 't': 'a',
-                  'N': 'N', 'n': 'n'}
-    return ''.join(complement.get(base, base) for base in reversed(seq))
 
 
 def get_sequence_slice(chrom: str, start: int, stop: int) -> str:

@@ -22,43 +22,45 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 
-def get_cached_aligner(fasta_path: str, threads: int = 16, preset: str = 'map-pb') -> mappy.Aligner:
-    """Loads a mappy.Aligner by first checking for an existing .mmi next to the FASTA, falling back to a hashed temp cache."""
-    abs_path = os.path.abspath(fasta_path)
+def get_chrom_aligner(sample_fasta: str, chrom: str, cache_dir: str, align_params: dict,
+                      threads: int = 4) -> mappy.Aligner:
+    """Loads a per-chromosome MMI index, building it first if it doesn't exist."""
+    mmi_path = os.path.join(cache_dir, f"{chrom}.mmi")
 
-    # Check for an existing .mmi file in the same directory as the FASTA
-    base_name, _ = os.path.splitext(abs_path)
-    possible_existing_mmis = [
-        abs_path + ".mmi",
-        base_name + ".mmi"
-    ]
+    # If we already have the index in the cache, load it directly
+    # if os.path.exists(mmi_path):
+    #     logger.info(f"Loading existing index for {chrom} from {mmi_path}")
+    #     return mappy.Aligner(mmi_path, **align_params)
 
-    # Proceed with the temp directory cache if no local .mmi exists
-    cache_dir = os.path.join(tempfile.gettempdir(), 'mappy_cache')
-    os.makedirs(cache_dir, exist_ok=True)
+    # Build the index by extracting the relevant contigs
+    logger.info(f"Index not found for {chrom}. Extracting sequences...")
+    chrom_fa_path = os.path.join(cache_dir, f"{chrom}.fa")
+    written_contigs = 0
 
-    # Get modification time to create a unique, versioned hash
-    mtime = os.path.getmtime(abs_path)
+    with pysam.FastaFile(sample_fasta) as fasta:
+        with open(chrom_fa_path, 'w') as out_f:
+            for ref in fasta.references:
+                # Catch exact chrom or haplotype extensions (e.g., chr1, chr1_paternal)
+                if ref == chrom or ref.startswith(f"{chrom}_"):
+                    seq = fasta.fetch(ref)
+                    out_f.write(f">{ref}\n{seq}\n")
+                    written_contigs += 1
 
-    # Generate an MD5 hash of the path and modification time
-    hash_input = f"{abs_path}_{mtime}".encode('utf-8')
-    path_hash = hashlib.md5(hash_input).hexdigest()
+    if written_contigs == 0:
+        if os.path.exists(chrom_fa_path):
+            os.remove(chrom_fa_path)
+        return None
 
-    # Create the cache filename
-    cache_file = os.path.join(cache_dir, f"{path_hash}.mmi")
+    # Build the mappy index, saving it to mmi_path
+    logger.info(f"Building MMI index for {chrom} at {mmi_path}...")
+    aligner = mappy.Aligner(chrom_fa_path, n_threads=threads, fn_idx_out=mmi_path, **align_params)
 
-    # Load from temp cache if it exists, otherwise build and save it there
-    if os.path.exists(cache_file):
-        logger.info(f"Loading cached MMI index for {os.path.basename(fasta_path)} from {cache_file}")
-        aligner = mappy.Aligner(cache_file, preset=preset)
-    else:
-        logger.info(f"Building new MMI index for {os.path.basename(fasta_path)} and saving to {cache_file}...")
-        aligner = mappy.Aligner(abs_path, preset=preset, n_threads=threads, fn_idx_out=cache_file)
-
-    if not aligner:
-        raise RuntimeError(f"Failed to load or index sample genome at {fasta_path}")
+    # Clean up the intermediate FASTA to save disk space
+    if os.path.exists(chrom_fa_path):
+        os.remove(chrom_fa_path)
 
     return aligner
+
 
 def update_args_from_config(args):
     """
@@ -107,6 +109,7 @@ def update_args_from_config(args):
         logger.info(f'Config updated: {vars(args)}')
     return args
 
+
 def get_start_stop(rec: VariantRecord) -> Tuple[int, int]:
     """
     Converts VCF start/stop coordinates to Python style
@@ -119,10 +122,19 @@ def get_start_stop(rec: VariantRecord) -> Tuple[int, int]:
 
     return start, stop
 
-# Global variable to hold the sample Aligner and reference FastaFile instance in each worker process
+
+def reverse_complement(seq: Union[str, List[str]]) -> List[str]:
+    """Returns the reverse complement of a given DNA sequence string."""
+    complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A',
+                  'a': 't', 'c': 'g', 'g': 'c', 't': 'a',
+                  'N': 'N', 'n': 'n'}
+    return [complement[x] for x in reversed(seq)]
+
+
+# Global variable to hold the sample and reference FastaFile instance in each worker process
 # (Must be accessible by the worker function)
-global_aligner = None
 global_ref = None
+global_aligners = None
 
 
 def check_match(alignment, query):
@@ -178,7 +190,8 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dic
             in_place_records.append(rec)
 
     if len(target_records) > 1:
-        target_records = sorted(target_records, key=lambda rec: (rec.info['TARGET'], rec.info.get('INSORD', 0)), reverse=True)
+        target_records = sorted(target_records, key=lambda rec: (rec.info['TARGET'], rec.info.get('INSORD', 0)),
+                                reverse=True)
         # print(f"WARNING: The list for {svid}-{sv_type} contains more than one record with target. Sorting in reverse order by target and INSORD if available, but conflicts are possible")
 
     records = in_place_records + target_records
@@ -202,12 +215,6 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dic
         target_changed_mask = [False] * len(new_target_sequence)
 
     delete_placeholder = ''
-    complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A', '': '',
-                  'a': 't', 'c': 'g', 'g': 'c', 't': 'a',   # preserve soft masking
-                  'N': 'N', 'n': 'n'}
-
-    def reverse_complement(seq: List):
-        return [complement[x] for x in reversed(seq)]
 
     queries = []
 
@@ -225,7 +232,8 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dic
         stop -= offset
 
         if rec.info.get('TARGET_CHROM', chrom) != chrom:
-            print(f"WARNING: Skipping record: {rec.id}-{sv_type} because interchromosome target. Interchromosome checks not implemented yet.")
+            print(
+                f"WARNING: Skipping record: {rec.id}-{sv_type} because interchromosome target. Interchromosome checks not implemented yet.")
             return []
 
         if rec.info['OP_TYPE'] == 'CUT' or rec.info['SVTYPE'] == 'DEL':
@@ -286,9 +294,12 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dic
 
     MERGE_TOLERANCE = 5  # merge intervals that are within this many base pairs (usually alignment or boundary case error)
 
-    queries.extend(get_changed_subsequences(new_sequence, changed_mask, MERGE_TOLERANCE, offset, buffer, svid, chrom, sv_type))
+    queries.extend(
+        get_changed_subsequences(new_sequence, changed_mask, MERGE_TOLERANCE, offset, buffer, svid, chrom, sv_type))
     if not merged_target_sequence:
-        queries.extend(get_changed_subsequences(new_target_sequence, target_changed_mask, MERGE_TOLERANCE, target_offset, buffer, svid, chrom, sv_type))
+        queries.extend(
+            get_changed_subsequences(new_target_sequence, target_changed_mask, MERGE_TOLERANCE, target_offset, buffer,
+                                     svid, chrom, sv_type))
 
     # print(f'Checking {svid}-{sv_type} with {len(queries)} queries')
 
@@ -343,7 +354,23 @@ def get_changed_subsequences(new_sequence, changed_mask, tolerance, offset, buff
     return queries
 
 
-def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_tolerance: int, error_threshold=0.1):
+def load_fasta_to_bytes(filename: str, chroms) -> Dict[str, bytearray]:
+    data = {}
+    with pysam.FastaFile(filename) as f:
+        fasta_refs = f.references
+        for chrom in chroms:
+            chrom_lower = chrom.lower()
+            for ref in fasta_refs:
+                ref_lower = ref.lower()
+                # Ensure 'chr1' matches 'chr1' and 'chr1_paternal', but NOT 'chr11'
+                if ref_lower == chrom_lower or ref_lower.startswith(f"{chrom_lower}_"):
+                    sequence_string = f.fetch(reference=ref)
+                    data[ref] = bytearray(sequence_string, 'ascii')
+    return data
+
+
+def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_tolerance:  Union[int, float],
+             error_threshold=0.1):
     """
     For a single SV record, simulate the sequence and search for it in the sample genome
 
@@ -353,6 +380,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
     :param error_threshold: The proportion of bps that can mismatch between the simulated sequence and the sample
     :return:
     """
+    global global_aligners
     try:
         svid = records[0].info['SVID']
         sv_type = records[0].info['SVTYPE']
@@ -363,16 +391,25 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
         # check that all subsequences match
         for query in sequences:
             sequence = query['sequence']
-            all_alignments = list(global_aligner.map(sequence))
+            chrom = query['chrom']
 
-            alignments = [a for a in all_alignments if a.ctg.startswith(query['chrom'])]
+            # If we don't have an aligner for this chrom (e.g., it wasn't in the sample), mark a miss
+            if chrom not in global_aligners:
+                match_scores.append(1.0)
+                continue
 
-            alignments = [a for a in alignments if abs(a.r_st - query['location']) <= location_tolerance]
+            aligner = global_aligners[chrom]
+
+            # The aligner only contains the correct chromosome + haplotypes!
+            all_alignments = list(aligner.map(sequence))
+
+            # Apply location tolerance
+            alignments = [a for a in all_alignments if abs(a.r_st - query['location']) <= location_tolerance]
 
             if len(alignments) > 0:
                 match_scores.append(min([check_match(a, sequence) for a in alignments]))
             else:
-                match_scores.append(1)  # no candidate alignments found, marking this as a miss by adding a match error of 1.0 (maximum error)
+                match_scores.append(1.0)  # maximum error (miss)
 
         coords = records[0].pos, records[0].stop
 
@@ -396,11 +433,9 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
             'sequences': sequences,
         }
     except Exception as e:
-        # 1. Log the full traceback *immediately*
         error_msg = f"Worker failed for SVID: {records[0].info.get('SVID', 'Unknown')}. Error: {e}\n{traceback.format_exc()}"
-        print(error_msg)
+        logger.error(error_msg)
 
-        # 2. Re-raise the exception so the main process still knows it failed
         raise e
 
 
@@ -423,7 +458,8 @@ class AlignScorer(object):
                 for rec in records:
                     target_chrom = rec.info['TARGET_CHROM'] if 'TARGET_CHROM' in rec.info else None
                     if self.exclude_list[rec.chrom].overlap(rec.start, rec.stop) or \
-                        target_chrom and self.exclude_list[target_chrom].overlap(rec.info['TARGET'], rec.info['TARGET'] + 1):
+                            target_chrom and self.exclude_list[target_chrom].overlap(rec.info['TARGET'],
+                                                                                     rec.info['TARGET'] + 1):
                         # record is in the excluded regions
                         allowed = False
                         break
@@ -511,7 +547,8 @@ class AlignScorer(object):
                     coords = result['coords']
                     hit_miss = 'hit' if result['is_correct'] else 'miss'
                     match_scores = result['match_scores']
-                    logger.debug(f'{svid}\t{sv_type}\t{sequences[0]["chrom"]}:{coords[0]}-{coords[1]}\t{hit_miss}\t{match_scores}')
+                    logger.debug(
+                        f'{svid}\t{sv_type}\t{sequences[0]["chrom"]}:{coords[0]}-{coords[1]}\t{hit_miss}\t{match_scores}')
 
                     total_calls[sv_type] += 1
                     overall_count += 1
@@ -530,7 +567,10 @@ class AlignScorer(object):
                 except Exception as exc:
                     logger.error(f'SV processing generated an exception: {exc}')
 
-        # 4. Final aggregation
+
+        # TODO: for each SV that failed the initial check using mappy, also run edlib to check if minimap2 gave up on the match due to repetitive regions
+
+        # Final aggregation
         precision['ALL'] = sum(correct_calls.values()) / sum(total_calls.values())
         correct_calls['ALL'] = sum(correct_calls.values())
         total_calls['ALL'] = sum(total_calls.values())
@@ -544,7 +584,7 @@ def export_igv_session(calls, bam, classified, timestamp, igv_prefix):
 
     output_filename = f"./igv_sessions/session_{timestamp}.xml"
 
-    # 2. Build XML
+    # Build XML
     session = ET.Element("Session", genome="hg19", version="8")
     resources = ET.SubElement(session, "Resources")
 
@@ -553,11 +593,11 @@ def export_igv_session(calls, bam, classified, timestamp, igv_prefix):
     if classified:
         ET.SubElement(resources, "Resource", path=igv_prefix + classified, type="vcf")
     if bam:
-        # 1. Standard BAM Resource
+        # Standard BAM Resource
         bam_path = igv_prefix + bam
         ET.SubElement(resources, "Resource", path=bam_path, type="bam")
 
-        # 2. Add the Panel and Track structure
+        # Add the Panel and Track structure
         bam_panel = ET.SubElement(session, "Panel", name="Alignments", height="600")
 
         align_track = ET.SubElement(bam_panel, "Track",
@@ -567,7 +607,7 @@ def export_igv_session(calls, bam, classified, timestamp, igv_prefix):
                                     name=os.path.basename(bam_path),
                                     visible="true")
 
-        # 3. Place RenderOptions inside the Track
+        # Place RenderOptions inside the Track
         ET.SubElement(align_track, "RenderOptions",
                       colorOption="READ_STRAND",
                       duplicatesOption="FILTER",
@@ -580,7 +620,7 @@ def export_igv_session(calls, bam, classified, timestamp, igv_prefix):
     # Create the directory structure based on the filename
     os.makedirs(os.path.dirname(output_filename), exist_ok=True)
 
-    # 3. Write to file with standard header
+    # Write to file with standard header
     tree = ET.ElementTree(session)
     tree.write(output_filename, encoding="utf-8", xml_declaration=True)
 
@@ -589,6 +629,9 @@ def export_igv_session(calls, bam, classified, timestamp, igv_prefix):
 
 def main():
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H%M%S')
+
+    # Ensure logs directory exists before setting up handlers
+    os.makedirs('./logs', exist_ok=True)
     log_filename = os.path.join("./logs", f'reconstruction_{timestamp}.log')
 
     # Create handlers and set their individual log levels
@@ -613,12 +656,20 @@ def main():
     parser.add_argument('--reference', help='Reference genome .fa file', dest='reference')
     parser.add_argument('--sample', help='Sample genome .fa file', dest='sample')
     parser.add_argument('--calls', help='VCF containing called SVs', dest='calls')
+    parser.add_argument('--location_tolerance', help='BP tolerance for matching SV location', type=int,
+                        default=10000000)
     parser.add_argument('--buffer', help='Subsequence context buffer', type=int, dest='buffer', default=500)
-    parser.add_argument('--gap_file', help='Tab-delimited file containing regions to omit (e.g., centromere and telomere)', default=None)
+    parser.add_argument('--gap_file',
+                        help='Tab-delimited file containing regions to omit (e.g., centromere and telomere)',
+                        default=None)
     parser.add_argument('--config', help='Groovi call config used to infer other params', dest='config')
     parser.add_argument('--bam', help='BAM file for generating IGV config', dest='bam')
-    parser.add_argument('--classified', help='VCF file of groovi-style classified breakpoints for IGV config', dest='classified')
+    parser.add_argument('--classified', help='VCF file of groovi-style classified breakpoints for IGV config',
+                        dest='classified')
     parser.add_argument('--igv_prefix', help='Prefix for igv session paths', default='', dest='igv_prefix')
+    parser.add_argument('--chrom_cache',
+                        help='Directory to save/load per-chromosome MMI indices. If omitted, uses a temporary directory.',
+                        default=None)
     args = parser.parse_args()
 
     logger.info(f'Config: {vars(args)}')
@@ -628,7 +679,7 @@ def main():
         args = update_args_from_config(args)
 
     global global_ref
-    global global_aligner
+    global global_aligners
 
     logger.info('Initializing scorer and loading callset')
     scorer = AlignScorer(args.calls, args.buffer, args.gap_file)
@@ -643,20 +694,47 @@ def main():
     logger.info(f'Found {len(chroms)} referenced chromosomes in callset')
 
     logger.info("Loading reference")
-    ref_data = {}
-    with pysam.FastaFile(args.reference) as f:
-        for chrom in chroms:
-            sequence_string = f.fetch(reference=chrom)
-            # ref_data[chrom] = list(sequence_string)
-            ref_data[chrom] = bytearray(sequence_string, 'ascii')
-    global_ref = ref_data
+    global_ref = load_fasta_to_bytes(args.reference, chroms)
     logger.info(f"Reference pre-loaded with {len(global_ref)} chromosomes.")
 
-    logger.info("Loading index into aligner")
-    global_aligner = get_cached_aligner(args.sample, preset='map-pb', threads=16)
-    logger.info("Aligner ready")
+    # parameters from cue2
+    # mappy.Aligner(seq=seq, preset="sr", best_n=1, min_cnt=1, k=15, w=5,
+    #                                                   min_dp_score=10, min_chain_score=1)
+    align_params = {
+        'preset': 'map-hifi',
+        'k': 15,
+        'w': 5,
+        'best_n': 100,
+        'min_cnt': 1,
+        'min_dp_score': 10,
+        'min_chain_score': 1,
+    }
 
-    precision, correct_calls, total_calls = scorer.score_all()
+    # Determine our cache directory
+    if args.chrom_cache:
+        cache_dir = args.chrom_cache
+        logger.info(f"Using persistent cache directory: {cache_dir}")
+    else:
+        cache_dir = os.path.join(tempfile.gettempdir(), 'mappy_chrom_cache')
+        logger.info(f"Using temporary cache directory: {cache_dir}")
+
+    os.makedirs(cache_dir, exist_ok=True)
+
+    logger.info("Building/loading per-chromosome aligners...")
+    global_aligners = {}
+
+    # aligner = mappy.Aligner(args.sample, **align_params)
+
+    for chrom in chroms:
+        aligner = get_chrom_aligner(args.sample, chrom, cache_dir, align_params, threads=16)
+        if aligner:
+            global_aligners[chrom] = aligner
+        else:
+            logger.warning(f"No sequences found for {chrom} in sample FASTA.")
+
+    logger.info("Aligners ready")
+
+    precision, correct_calls, total_calls = scorer.score_all(location_tolerance=args.location_tolerance)
 
     import pandas as pd
 
