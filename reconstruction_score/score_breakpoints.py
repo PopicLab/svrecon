@@ -28,6 +28,7 @@ def get_sequence_slice(chrom: str, start: int, stop: int) -> str:
     """Extracts a specific subsequence from the pre-loaded global reference bytearray."""
     return global_ref[chrom][start:stop].decode('ascii')
 
+
 def extract_junction_sequence(rec: pysam.VariantRecord, buffer: int) -> dict:
     """Extracts the expected sample sequence across the breakpoint junction based on ORIENTATION rules."""
     chrom1 = rec.chrom
@@ -126,15 +127,19 @@ def score_breakpoint(rec: pysam.VariantRecord, buffer: int, location_tolerance: 
         mappy_passed_all = False
 
         # Edlib fallback on chrom1 around the origin breakpoint
-        edlib_score1 = run_edlib_fallback(
+        edlib_res1 = run_edlib_fallback(
             sequence, chrom1, start, int(buffer),
             location_tolerance, error_threshold, global_sample
         )
+        edlib_score1 = edlib_res1['error'] if edlib_res1 else 1.0
+
         # Edlib fallback on chrom2 around the target breakpoint
-        edlib_score2 = run_edlib_fallback(
+        edlib_res2 = run_edlib_fallback(
             sequence, chrom2, stop, int(buffer),
             location_tolerance, error_threshold, global_sample
         )
+        edlib_score2 = edlib_res2['error'] if edlib_res2 else 1.0
+
         best_score = min(best_score, edlib_score1, edlib_score2)
 
     is_correct = best_score <= error_threshold

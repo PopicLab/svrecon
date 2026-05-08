@@ -18,7 +18,8 @@ from tqdm import tqdm
 
 from sv_scoring_utils import (
     get_chrom_aligner, update_args_from_config, get_start_stop,
-    reverse_complement, check_match, load_fasta_to_bytes, run_edlib_fallback
+    reverse_complement, check_match, load_fasta_to_bytes, run_edlib_fallback,
+    edlib_to_cigartuples, validate_junctions_from_cigar
 )
 
 logger = logging.getLogger(__name__)
@@ -69,13 +70,19 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dic
     orig_sequence = list(global_ref[chrom][offset:sequence_end].decode('ascii'))
     new_sequence = orig_sequence.copy()
     changed_mask = [False] * len(new_sequence)
+    junction_mask = [False] * len(new_sequence)
 
     if not merged_target_sequence:
         new_target_sequence = list(global_ref[chrom][target_offset:target_sequence_end].decode('ascii'))
         target_changed_mask = [False] * len(new_target_sequence)
+        target_junction_mask = [False] * len(new_target_sequence)
 
     delete_placeholder = ''
     queries = []
+
+    def mark_junction(mask, idx):
+        if 0 <= idx < len(mask):
+            mask[idx] = True
 
     for rec in records:
         start, stop = get_start_stop(rec)
@@ -91,48 +98,84 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dic
         if rec.info['OP_TYPE'] == 'CUT' or rec.info['SVTYPE'] == 'DEL':
             new_sequence[start:stop] = [delete_placeholder] * (stop - start)
             changed_mask[start:stop] = [True] * (stop - start)
+            mark_junction(junction_mask, start)
+            mark_junction(junction_mask, stop - 1)
         elif rec.info['OP_TYPE'] == 'INV' or rec.info['SVTYPE'] == 'INV':
             new_sequence[start:stop] = reverse_complement(orig_sequence[start:stop])
             changed_mask[start:stop] = [True] * (stop - start)
+            mark_junction(junction_mask, start)
+            mark_junction(junction_mask, stop - 1)
         elif rec.info['OP_TYPE'] == 'COPY-PASTE' or rec.info['SVTYPE'] in ['DUP', 'dDUP']:
             clip = orig_sequence[start:stop]
             if merged_target_sequence:
                 new_sequence = new_sequence[:target] + clip + new_sequence[target:]
                 changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
+                junction_mask = junction_mask[:target] + [False] * len(clip) + junction_mask[target:]
+                mark_junction(junction_mask, target)
+                mark_junction(junction_mask, target + len(clip) - 1)
             else:
                 new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
                 target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
+                target_junction_mask = target_junction_mask[:target] + [False] * len(clip) + target_junction_mask[
+                    target:]
+                mark_junction(target_junction_mask, target)
+                mark_junction(target_junction_mask, target + len(clip) - 1)
         elif rec.info['OP_TYPE'] in ['CUT-PASTE'] or rec.info['SVTYPE'] == 'nrTRA':
             clip = orig_sequence[start:stop]
             new_sequence[start:stop] = [delete_placeholder] * (stop - start)
             changed_mask[start:stop] = [True] * len(clip)
+            mark_junction(junction_mask, start)
+            mark_junction(junction_mask, stop - 1)
 
             if merged_target_sequence:
                 new_sequence = new_sequence[:target] + clip + new_sequence[target:]
                 changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
+                junction_mask = junction_mask[:target] + [False] * len(clip) + junction_mask[target:]
+                mark_junction(junction_mask, target)
+                mark_junction(junction_mask, target + len(clip) - 1)
             else:
                 new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
                 target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
+                target_junction_mask = target_junction_mask[:target] + [False] * len(clip) + target_junction_mask[
+                    target:]
+                mark_junction(target_junction_mask, target)
+                mark_junction(target_junction_mask, target + len(clip) - 1)
         elif rec.info['OP_TYPE'] == 'COPYinv-PASTE' or rec.info['SVTYPE'] in ['INV_dDUP']:
             clip = reverse_complement(orig_sequence[start:stop])
 
             if merged_target_sequence:
                 new_sequence = new_sequence[:target] + clip + new_sequence[target:]
                 changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
+                junction_mask = junction_mask[:target] + [False] * len(clip) + junction_mask[target:]
+                mark_junction(junction_mask, target)
+                mark_junction(junction_mask, target + len(clip) - 1)
             else:
                 new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
                 target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
+                target_junction_mask = target_junction_mask[:target] + [False] * len(clip) + target_junction_mask[
+                    target:]
+                mark_junction(target_junction_mask, target)
+                mark_junction(target_junction_mask, target + len(clip) - 1)
         elif rec.info['OP_TYPE'] == 'CUTinv-PASTE' or rec.info['SVTYPE'] in ['INV_nrTRA']:
             clip = reverse_complement(orig_sequence[start:stop])
             new_sequence[start:stop] = [delete_placeholder] * (stop - start)
             changed_mask[start:stop] = [True] * len(clip)
+            mark_junction(junction_mask, start)
+            mark_junction(junction_mask, stop - 1)
 
             if merged_target_sequence:
                 new_sequence = new_sequence[:target] + clip + new_sequence[target:]
                 changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
+                junction_mask = junction_mask[:target] + [False] * len(clip) + junction_mask[target:]
+                mark_junction(junction_mask, target)
+                mark_junction(junction_mask, target + len(clip) - 1)
             else:
                 new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
                 target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
+                target_junction_mask = target_junction_mask[:target] + [False] * len(clip) + target_junction_mask[
+                    target:]
+                mark_junction(target_junction_mask, target)
+                mark_junction(target_junction_mask, target + len(clip) - 1)
         else:
             logger.warning(f"Unknown OP_TYPE: {rec.info['OP_TYPE']}")
 
@@ -143,16 +186,19 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dic
     MERGE_TOLERANCE = 5
 
     queries.extend(
-        get_changed_subsequences(new_sequence, changed_mask, MERGE_TOLERANCE, offset, buffer, svid, chrom, sv_type))
+        get_changed_subsequences(new_sequence, changed_mask, junction_mask, MERGE_TOLERANCE, offset, buffer, svid,
+                                 chrom, sv_type))
     if not merged_target_sequence:
         queries.extend(
-            get_changed_subsequences(new_target_sequence, target_changed_mask, MERGE_TOLERANCE, target_offset, buffer,
+            get_changed_subsequences(new_target_sequence, target_changed_mask, target_junction_mask, MERGE_TOLERANCE,
+                                     target_offset, buffer,
                                      svid, chrom, sv_type))
 
     return queries
 
 
-def get_changed_subsequences(new_sequence, changed_mask, tolerance, offset, buffer, svid, chrom, sv_type):
+def get_changed_subsequences(new_sequence, changed_mask, junction_mask, tolerance, offset, buffer, svid, chrom,
+                             sv_type):
     changed_intervals = []
     queries = []
 
@@ -173,7 +219,22 @@ def get_changed_subsequences(new_sequence, changed_mask, tolerance, offset, buff
     for start, stop in changed_intervals:
         adjusted_start = max(0, start - buffer)
         adjusted_stop = min(stop + buffer + 1, len(new_sequence))
-        sequence = ''.join(new_sequence[adjusted_start:adjusted_stop])
+
+        seq_slice = new_sequence[adjusted_start:adjusted_stop]
+        junc_slice = junction_mask[adjusted_start:adjusted_stop]
+
+        sequence = ""
+        junctions = []
+        current_str_idx = 0
+
+        for seq_char, is_junc in zip(seq_slice, junc_slice):
+            if is_junc:
+                junctions.append(current_str_idx)
+            sequence += seq_char
+            current_str_idx += len(seq_char)
+
+        junctions = sorted(list(set(junctions)))
+
         query = {
             'chrom': chrom,
             'svtype': sv_type,
@@ -181,6 +242,7 @@ def get_changed_subsequences(new_sequence, changed_mask, tolerance, offset, buff
             'sequence': sequence,
             'location': adjusted_start + offset,
             'length': len(sequence),
+            'junctions': junctions
         }
         queries.append(query)
 
@@ -199,24 +261,38 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
         match_scores = []
         mappy_passed_all = True
 
+        sv_junction_rejected = False
+        best_rejected_err = None
+
         for query in sequences:
             sequence = query['sequence']
             chrom = query['chrom']
 
             best_score = 1.0
+            mappy_matched = False
+
+            seq_had_junction_rejection = False
+            seq_best_rejected_err = 1.0
 
             if chrom in global_aligners:
                 aligner = global_aligners[chrom]
                 all_alignments = list(aligner.map(sequence))
                 alignments = [a for a in all_alignments if abs(a.r_st - query['location']) <= location_tolerance]
 
-                if len(alignments) > 0:
-                    best_score = min([check_match(a, sequence) for a in alignments])
+                for a in alignments:
+                    err = check_match(a, sequence)
+                    if err <= error_threshold:
+                        if validate_junctions_from_cigar(a.cigar, query.get('junctions', []),
+                                                         error_threshold=error_threshold):
+                            best_score = min(best_score, err)
+                            mappy_matched = True
+                        else:
+                            seq_had_junction_rejection = True
+                            seq_best_rejected_err = min(seq_best_rejected_err, err)
 
-            # Run edlib fallback if mappy missed or failed the error threshold
-            if len(sequence) < MIN_EDLIB_QUERY and best_score > error_threshold:
+            if len(sequence) < MIN_EDLIB_QUERY and not mappy_matched:
                 mappy_passed_all = False
-                edlib_score = run_edlib_fallback(
+                edlib_res = run_edlib_fallback(
                     sequence,
                     chrom,
                     query['location'],
@@ -225,9 +301,25 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                     error_threshold,
                     global_sample
                 )
-                best_score = min(best_score, edlib_score)
+                if edlib_res and edlib_res['error'] <= error_threshold:
+                    cigartuples = edlib_to_cigartuples(edlib_res['cigar'])
+                    if validate_junctions_from_cigar(cigartuples, query.get('junctions', []),
+                                                     error_threshold=error_threshold):
+                        best_score = min(best_score, edlib_res['error'])
+                    else:
+                        seq_had_junction_rejection = True
+                        seq_best_rejected_err = min(seq_best_rejected_err, edlib_res['error'])
 
             match_scores.append(best_score)
+
+            # If this sequence didn't find a valid match, but DID find matches that passed
+            # the global threshold and failed the junction check:
+            if best_score > error_threshold and seq_had_junction_rejection:
+                sv_junction_rejected = True
+                if best_rejected_err is None:
+                    best_rejected_err = seq_best_rejected_err
+                else:
+                    best_rejected_err = min(best_rejected_err, seq_best_rejected_err)
 
         coords = records[0].pos, records[0].stop
 
@@ -237,6 +329,11 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
         else:
             hit_miss = 'miss'
             is_correct = False
+
+            # Log a single time for the entire SV if the miss was caused by the junction contract
+            if sv_junction_rejected:
+                logger.debug(
+                    f"Rejected {svid} {sv_type}: Alignments passed overall error (best: {best_rejected_err:.4f}) but ALL failed junction validation.")
 
         rescued_by_edlib = is_correct and not mappy_passed_all
 

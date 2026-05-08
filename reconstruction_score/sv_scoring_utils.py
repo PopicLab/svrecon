@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from typing import Dict, List, Tuple, Union
 
+import re
 import edlib
 import mappy
 import pysam
@@ -10,6 +11,55 @@ import yaml
 from pysam import VariantRecord
 
 logger = logging.getLogger(__name__)
+
+
+def edlib_to_cigartuples(cigar_str: str) -> List[Tuple[int, int]]:
+    op_map = {'=': 7, 'X': 8, 'I': 1, 'D': 2}
+    return [(int(m.group(1)), op_map[m.group(2)]) for m in re.finditer(r'(\d+)([=XID])', cigar_str)]
+
+
+def validate_junctions_from_cigar(cigartuples: List[Tuple[int, int]], junctions: List[int], window: int = 50,
+                                  error_threshold: float = 0.1) -> bool:
+    for j_idx in junctions:
+        start_q = max(0, j_idx - window)
+        end_q = j_idx + window
+
+        q_curr = 0
+        errors = 0
+        total_bases = 0
+
+        for length, op in cigartuples:
+            if q_curr > end_q and op not in (2, 3):
+                break
+
+            if op in (2, 3):
+                if start_q <= q_curr < end_q:
+                    errors += length
+                    total_bases += length
+                continue
+
+            op_start = q_curr
+            op_end = q_curr + length
+
+            overlap_start = max(start_q, op_start)
+            overlap_end = min(end_q, op_end)
+            overlap_len = max(0, overlap_end - overlap_start)
+
+            if overlap_len > 0:
+                if op in (0, 7):
+                    total_bases += overlap_len
+                elif op in (1, 4, 8):
+                    errors += overlap_len
+                    total_bases += overlap_len
+
+            if op in (0, 1, 4, 7, 8):
+                q_curr += length
+
+        err_rate = errors / total_bases if total_bases > 0 else 1.0
+        if err_rate > error_threshold:
+            return False
+
+    return True
 
 
 def get_chrom_aligner(sample_fasta: str, chrom: str, cache_dir: str, align_params: dict,
@@ -128,21 +178,18 @@ def load_fasta_to_bytes(filename: str, chroms) -> Dict[str, bytearray]:
     return data
 
 
+
 def run_edlib_fallback(query_seq: str, chrom: str, location: int, initial_buffer: int, max_tolerance: int,
-                       error_threshold: float, sample_dict: Dict[str, bytearray]) -> float:
-    """
-    Executes an exact edit distance search via edlib, exponentially expanding the search window
-    starting from initial_buffer up to max_tolerance.
-    Returns the calculated error rate, exiting early if it falls below the error_threshold.
-    """
+                       error_threshold: float, sample_dict: Dict[str, bytearray]) -> Union[Dict, None]:
     if sample_dict is None:
-        return 1.0
+        return None
 
     target_keys = [k for k in sample_dict.keys() if k == chrom or k.startswith(f"{chrom}_")]
     if not target_keys:
-        return 1.0
+        return None
 
     best_error = 1.0
+    best_res = None
     current_tolerance = initial_buffer
 
     prev_bounds = {k: (-1, -1) for k in target_keys}
@@ -169,7 +216,8 @@ def run_edlib_fallback(query_seq: str, chrom: str, location: int, initial_buffer
             if result and result['editDistance'] >= 0:
                 edit_dist = result['editDistance']
 
-                if result.get('locations') and result['locations'][0][0] is not None and result['locations'][0][1] is not None:
+                if result.get('locations') and result['locations'][0][0] is not None and result['locations'][0][
+                    1] is not None:
                     loc = result['locations'][0]
                     target_match_len = loc[1] - loc[0] + 1
                     denominator = max(len(query_seq), target_match_len)
@@ -177,10 +225,16 @@ def run_edlib_fallback(query_seq: str, chrom: str, location: int, initial_buffer
                     denominator = len(query_seq)
 
                 error_rate = edit_dist / denominator if denominator > 0 else 1.0
-                best_error = min(best_error, error_rate)
+
+                if error_rate < best_error:
+                    best_error = error_rate
+                    best_res = {
+                        'error': error_rate,
+                        'cigar': result['cigar']
+                    }
 
                 if best_error <= error_threshold:
-                    return best_error
+                    return best_res
 
         if not expanded_any or current_tolerance >= max_tolerance:
             break
@@ -189,4 +243,4 @@ def run_edlib_fallback(query_seq: str, chrom: str, location: int, initial_buffer
         if current_tolerance > max_tolerance:
             current_tolerance = max_tolerance
 
-    return best_error
+    return best_res
