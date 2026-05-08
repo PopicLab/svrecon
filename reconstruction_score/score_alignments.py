@@ -25,6 +25,7 @@ from sv_scoring_utils import (
 logger = logging.getLogger(__name__)
 
 MIN_EDLIB_QUERY = 5000
+JUNCTION_VALIDATION_WINDOW = 150
 
 # Global variables to share the sample, reference, and aligners for each worker process
 global_ref = None
@@ -283,6 +284,8 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                     err = check_match(a, sequence)
                     if err <= error_threshold:
                         if validate_junctions_from_cigar(a.cigar, query.get('junctions', []),
+                                                         window=JUNCTION_VALIDATION_WINDOW,
+                                                         q_st=a.q_st,
                                                          error_threshold=error_threshold):
                             best_score = min(best_score, err)
                             mappy_matched = True
@@ -304,6 +307,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                 if edlib_res and edlib_res['error'] <= error_threshold:
                     cigartuples = edlib_to_cigartuples(edlib_res['cigar'])
                     if validate_junctions_from_cigar(cigartuples, query.get('junctions', []),
+                                                     window=JUNCTION_VALIDATION_WINDOW,
                                                      error_threshold=error_threshold):
                         best_score = min(best_score, edlib_res['error'])
                     else:
@@ -312,7 +316,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
 
             match_scores.append(best_score)
 
-            # If this sequence didn't find a valid match, but DID find matches that passed
+            # If this sequence didn't find a valid match, but did find matches that passed
             # the global threshold and failed the junction check:
             if best_score > error_threshold and seq_had_junction_rejection:
                 sv_junction_rejected = True
@@ -333,7 +337,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
             # Log a single time for the entire SV if the miss was caused by the junction contract
             if sv_junction_rejected:
                 logger.debug(
-                    f"Rejected {svid} {sv_type}: Alignments passed overall error (best: {best_rejected_err:.4f}) but ALL failed junction validation.")
+                    f"Rejected {svid} {sv_type}: Alignments passed overall error (best: {best_rejected_err:.4f}) but failed junction validation.")
 
         rescued_by_edlib = is_correct and not mappy_passed_all
 

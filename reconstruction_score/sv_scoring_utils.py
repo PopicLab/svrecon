@@ -12,55 +12,104 @@ from pysam import VariantRecord
 
 logger = logging.getLogger(__name__)
 
+from typing import List, Tuple
+import re
+
 
 def edlib_to_cigartuples(cigar_str: str) -> List[Tuple[int, int]]:
+    """
+    Translates an Edlib character-based CIGAR string into BAM standard integer tuples.
+    """
     op_map = {'=': 7, 'X': 8, 'I': 1, 'D': 2}
     return [(int(m.group(1)), op_map[m.group(2)]) for m in re.finditer(r'(\d+)([=XID])', cigar_str)]
 
 
-def validate_junctions_from_cigar(cigartuples: List[Tuple[int, int]], junctions: List[int], window: int = 50,
-                                  error_threshold: float = 0.1) -> bool:
-    for j_idx in junctions:
-        start_q = max(0, j_idx - window)
-        end_q = j_idx + window
+def validate_junctions_from_cigar(cigartuples: List[Tuple[int, int]], junctions: List[int], q_st: int = 0,
+                                  window: int = 150, error_threshold: float = 0.1) -> bool:
+    """
+    Calculates the local error rate within a specified window around structural variant junctions.
+    Uses q_st to synchronize absolute junction indices with the relative CIGAR string.
 
-        q_curr = 0
+    Official SAM/BAM CIGAR Specification: https://samtools.github.io/hts-specs/SAMv1.pdf
+    """
+    # Define CIGAR operation constants for readability
+    MATCH = 0  # M: Alignment match (can be sequence match or mismatch)
+    INS = 1  # I: Insertion to the reference
+    DEL = 2  # D: Deletion from the reference
+    REF_SKIP = 3  # N: Skipped region from the reference
+    SOFT_CLIP = 4  # S: Soft clipping (clipped sequences present in query)
+    HARD_CLIP = 5  # H: Hard clipping (clipped sequences NOT present in query)
+    PAD = 6  # P: Padding (silent deletion from padded reference)
+    SEQ_MATCH = 7  # =: Exact sequence match
+    SEQ_MISMATCH = 8  # X: Exact sequence mismatch
+
+    # Conceptually group the operations
+    # Operations that consume space in the simulated query sequence
+    QUERY_CONSUMING_OPS = {MATCH, INS, SOFT_CLIP, SEQ_MATCH, SEQ_MISMATCH}
+
+    # Operations that only represent gaps in the target assembly
+    TARGET_ONLY_OPS = {DEL, REF_SKIP}
+
+    # Calculate total query length consumed by this specific CIGAR
+    cigar_q_len = sum(length for length, op in cigartuples if op in QUERY_CONSUMING_OPS)
+    q_en = q_st + cigar_q_len
+
+    for j_idx in junctions:
+        # Only validate junctions that fall within the scope of this alignment segment.
+        # This prevents "False Misses" when Mappy splits chimeric alignments.
+        if j_idx < q_st - window or j_idx > q_en + window:
+            continue
+
+        # Translate the absolute query junction index to a relative position within this CIGAR
+        relative_j_idx = j_idx - q_st
+
+        window_start = max(0, relative_j_idx - window)
+        window_end = min(cigar_q_len, relative_j_idx + window)
+
+        query_cursor = 0
         errors = 0
         total_bases = 0
 
         for length, op in cigartuples:
-            if q_curr > end_q and op not in (2, 3):
+            # Stop processing if the cursor has moved past the evaluation window
+            if query_cursor > window_end and op not in TARGET_ONLY_OPS:
                 break
 
-            if op in (2, 3):
-                if start_q <= q_curr < end_q:
+            # --- TARGET-ONLY OPERATIONS (Deletions / Skips) ---
+            if op in TARGET_ONLY_OPS:
+                # If a deletion occurs while the cursor is inside the window, it is recorded as an error.
+                if window_start <= query_cursor < window_end:
                     errors += length
                     total_bases += length
                 continue
 
-            op_start = q_curr
-            op_end = q_curr + length
+            # --- QUERY-CONSUMING OPERATIONS ---
+            op_start = query_cursor
+            op_end = query_cursor + length
 
-            overlap_start = max(start_q, op_start)
-            overlap_end = min(end_q, op_end)
+            # Calculate the overlap between this CIGAR operation and the evaluation window
+            overlap_start = max(window_start, op_start)
+            overlap_end = min(window_end, op_end)
             overlap_len = max(0, overlap_end - overlap_start)
 
             if overlap_len > 0:
-                if op in (0, 7):
+                if op in (MATCH, SEQ_MATCH):
                     total_bases += overlap_len
-                elif op in (1, 4, 8):
+                elif op in (INS, SOFT_CLIP, SEQ_MISMATCH):
                     errors += overlap_len
                     total_bases += overlap_len
 
-            if op in (0, 1, 4, 7, 8):
-                q_curr += length
+            # Advance the query cursor
+            if op in QUERY_CONSUMING_OPS:
+                query_cursor += length
 
-        err_rate = errors / total_bases if total_bases > 0 else 1.0
-        if err_rate > error_threshold:
-            return False
+        # Validate the error rate if the window contained sequence data
+        if total_bases > 0:
+            err_rate = errors / total_bases
+            if err_rate > error_threshold:
+                return False
 
     return True
-
 
 def get_chrom_aligner(sample_fasta: str, chrom: str, cache_dir: str, align_params: dict,
                       threads: int = 4) -> mappy.Aligner:
