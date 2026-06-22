@@ -183,6 +183,7 @@ def update_args_from_config(args):
             args.reference = str(prefix / fa_path)
 
         logger.info(f'Config updated: {vars(args)}')
+        logger.debug(f'Full groovi config: {config_data}')
     return args
 
 

@@ -1,5 +1,6 @@
 import argparse
 import datetime
+import hashlib
 import logging
 import os
 import sys
@@ -27,7 +28,6 @@ logger = logging.getLogger(__name__)
 MIN_EDLIB_QUERY = 5000
 JUNCTION_VALIDATION_WINDOW = 150
 
-# Global variables to share the sample, reference, and aligners for each worker process
 global_ref = None
 global_sample = None
 global_aligners = None
@@ -93,7 +93,7 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dic
 
         if rec.info.get('TARGET_CHROM', chrom) != chrom:
             logger.warning(
-                f"Skipping record: {rec.id}-{sv_type} because interchromosome target. Interchromosome checks not implemented yet.")
+                f'Skipping record: {rec.id}-{sv_type} because interchromosome target. Interchromosome checks not implemented yet.')
             return []
 
         if rec.info['OP_TYPE'] == 'CUT' or rec.info['SVTYPE'] == 'DEL':
@@ -178,10 +178,10 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dic
                 mark_junction(target_junction_mask, target)
                 mark_junction(target_junction_mask, target + len(clip) - 1)
         else:
-            logger.warning(f"Unknown OP_TYPE: {rec.info['OP_TYPE']}")
+            logger.warning(f'Unknown OP_TYPE: {rec.info["OP_TYPE"]}')
 
     if len(changed_mask) == 0:
-        logger.warning(f"No changed intervals found for {svid}-{sv_type}")
+        logger.warning(f'No changed intervals found for {svid}-{sv_type}')
         return []
 
     MERGE_TOLERANCE = 5
@@ -224,7 +224,7 @@ def get_changed_subsequences(new_sequence, changed_mask, junction_mask, toleranc
         seq_slice = new_sequence[adjusted_start:adjusted_stop]
         junc_slice = junction_mask[adjusted_start:adjusted_stop]
 
-        sequence = ""
+        sequence = ''
         junctions = []
         current_str_idx = 0
 
@@ -276,48 +276,47 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
             seq_best_rejected_err = 1.0
 
             if chrom in global_aligners:
-                aligner = global_aligners[chrom]
-                all_alignments = list(aligner.map(sequence))
-                alignments = [a for a in all_alignments if abs(a.r_st - query['location']) <= location_tolerance]
+                for aligner in global_aligners[chrom]:
+                    all_alignments = list(aligner.map(sequence))
+                    alignments = [a for a in all_alignments if abs(a.r_st - query['location']) <= location_tolerance]
 
-                for a in alignments:
-                    err = check_match(a, sequence)
-                    if err <= error_threshold:
-                        if validate_junctions_from_cigar(a.cigar, query.get('junctions', []),
-                                                         window=JUNCTION_VALIDATION_WINDOW,
-                                                         q_st=a.q_st,
-                                                         error_threshold=error_threshold):
-                            best_score = min(best_score, err)
-                            mappy_matched = True
-                        else:
-                            seq_had_junction_rejection = True
-                            seq_best_rejected_err = min(seq_best_rejected_err, err)
+                    for a in alignments:
+                        err = check_match(a, sequence)
+                        if err <= error_threshold:
+                            if validate_junctions_from_cigar(a.cigar, query.get('junctions', []),
+                                                             window=JUNCTION_VALIDATION_WINDOW,
+                                                             q_st=a.q_st,
+                                                             error_threshold=error_threshold):
+                                best_score = min(best_score, err)
+                                mappy_matched = True
+                            else:
+                                seq_had_junction_rejection = True
+                                seq_best_rejected_err = min(seq_best_rejected_err, err)
 
             if len(sequence) < MIN_EDLIB_QUERY and not mappy_matched:
                 mappy_passed_all = False
-                edlib_res = run_edlib_fallback(
-                    sequence,
-                    chrom,
-                    query['location'],
-                    int(buffer),
-                    int(location_tolerance),
-                    error_threshold,
-                    global_sample
-                )
-                if edlib_res and edlib_res['error'] <= error_threshold:
-                    cigartuples = edlib_to_cigartuples(edlib_res['cigar'])
-                    if validate_junctions_from_cigar(cigartuples, query.get('junctions', []),
-                                                     window=JUNCTION_VALIDATION_WINDOW,
-                                                     error_threshold=error_threshold):
-                        best_score = min(best_score, edlib_res['error'])
-                    else:
-                        seq_had_junction_rejection = True
-                        seq_best_rejected_err = min(seq_best_rejected_err, edlib_res['error'])
+                for samp_bytes in global_sample:
+                    edlib_res = run_edlib_fallback(
+                        sequence,
+                        chrom,
+                        query['location'],
+                        int(buffer),
+                        int(location_tolerance),
+                        error_threshold,
+                        samp_bytes
+                    )
+                    if edlib_res and edlib_res['error'] <= error_threshold:
+                        cigartuples = edlib_to_cigartuples(edlib_res['cigar'])
+                        if validate_junctions_from_cigar(cigartuples, query.get('junctions', []),
+                                                         window=JUNCTION_VALIDATION_WINDOW,
+                                                         error_threshold=error_threshold):
+                            best_score = min(best_score, edlib_res['error'])
+                        else:
+                            seq_had_junction_rejection = True
+                            seq_best_rejected_err = min(seq_best_rejected_err, edlib_res['error'])
 
             match_scores.append(best_score)
 
-            # If this sequence didn't find a valid match, but did find matches that passed
-            # the global threshold and failed the junction check:
             if best_score > error_threshold and seq_had_junction_rejection:
                 sv_junction_rejected = True
                 if best_rejected_err is None:
@@ -334,10 +333,9 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
             hit_miss = 'miss'
             is_correct = False
 
-            # Log a single time for the entire SV if the miss was caused by the junction contract
             if sv_junction_rejected:
                 logger.debug(
-                    f"Rejected {svid} {sv_type}: Alignments passed overall error (best: {best_rejected_err:.4f}) but failed junction validation.")
+                    f'Rejected {svid} {sv_type}: Alignments passed overall error (best: {best_rejected_err:.4f}) but failed junction validation.')
 
         rescued_by_edlib = is_correct and not mappy_passed_all
 
@@ -351,7 +349,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
             'sequences': sequences,
         }
     except Exception as e:
-        error_msg = f"Worker failed for SVID: {records[0].info.get('SVID', 'Unknown')}. Error: {e}\n{traceback.format_exc()}"
+        error_msg = f'Worker failed for SVID: {records[0].info.get("SVID", "Unknown")}. Error: {e}\n{traceback.format_exc()}'
         logger.error(error_msg)
         raise e
 
@@ -403,7 +401,7 @@ class AlignScorer(object):
         self.variants = grouped_variants
         self.vcf_header = vcf_in.header
 
-    def score_all(self, location_tolerance=float('inf'), error_threshold=0.1, n_threads=16):
+    def score_all(self, location_tolerance=float('inf'), error_threshold=0.1, n_threads=40):
         total_calls = Counter()
         correct_calls = Counter()
         overall_count = 0
@@ -455,7 +453,7 @@ class AlignScorer(object):
                 except Exception as exc:
                     logger.error(f'SV processing generated an exception: {exc}')
 
-        logger.info(f"Total SVs rescued by edlib fallback: {edlib_rescues}")
+        logger.info(f'Total SVs rescued by edlib fallback: {edlib_rescues}')
 
         precision['ALL'] = sum(correct_calls.values()) / sum(total_calls.values())
         correct_calls['ALL'] = sum(correct_calls.values())
@@ -466,37 +464,37 @@ class AlignScorer(object):
 
 def export_igv_session(calls, bam, classified, timestamp, igv_prefix):
     import xml.etree.ElementTree as ET
-    output_filename = f"./igv_sessions/session_{timestamp}.xml"
+    output_filename = f'./igv_sessions/session_{timestamp}.xml'
 
-    session = ET.Element("Session", genome="hg19", version="8")
-    resources = ET.SubElement(session, "Resources")
+    session = ET.Element('Session', genome='hg19', version='8')
+    resources = ET.SubElement(session, 'Resources')
 
     if calls:
-        ET.SubElement(resources, "Resource", path=igv_prefix + calls, type="vcf")
+        ET.SubElement(resources, 'Resource', path=igv_prefix + calls, type='vcf')
     if classified:
-        ET.SubElement(resources, "Resource", path=igv_prefix + classified, type="vcf")
+        ET.SubElement(resources, 'Resource', path=igv_prefix + classified, type='vcf')
     if bam:
         bam_path = igv_prefix + bam
-        ET.SubElement(resources, "Resource", path=bam_path, type="bam")
-        bam_panel = ET.SubElement(session, "Panel", name="Alignments", height="600")
-        align_track = ET.SubElement(bam_panel, "Track", clazz="org.broad.igv.sam.AlignmentTrack",
-                                    displayMode="EXPANDED", id=bam_path, name=os.path.basename(bam_path),
-                                    visible="true")
-        ET.SubElement(align_track, "RenderOptions", colorOption="READ_STRAND", duplicatesOption="FILTER",
-                      groupByOption="LINKED", hideSmallIndels="true", linkByTag="READNAME",
-                      linkedReads="true", smallIndelThreshold="2")
+        ET.SubElement(resources, 'Resource', path=bam_path, type='bam')
+        bam_panel = ET.SubElement(session, 'Panel', name='Alignments', height='600')
+        align_track = ET.SubElement(bam_panel, 'Track', clazz='org.broad.igv.sam.AlignmentTrack',
+                                    displayMode='EXPANDED', id=bam_path, name=os.path.basename(bam_path),
+                                    visible='true')
+        ET.SubElement(align_track, 'RenderOptions', colorOption='READ_STRAND', duplicatesOption='FILTER',
+                      groupByOption='LINKED', hideSmallIndels='true', linkByTag='READNAME',
+                      linkedReads='true', smallIndelThreshold='2')
 
     os.makedirs(os.path.dirname(output_filename), exist_ok=True)
     tree = ET.ElementTree(session)
-    tree.write(output_filename, encoding="utf-8", xml_declaration=True)
-    print(f"File saved to {output_filename}")
+    tree.write(output_filename, encoding='utf-8', xml_declaration=True)
+    print(f'File saved to {output_filename}')
 
 
 def main():
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H%M%S')
 
     os.makedirs('./logs', exist_ok=True)
-    log_filename = os.path.join("./logs", f'reconstruction_{timestamp}.log')
+    log_filename = os.path.join('./logs', f'reconstruction_{timestamp}.log')
 
     file_handler = logging.FileHandler(log_filename, mode='w')
     file_handler.setLevel(logging.DEBUG)
@@ -513,7 +511,7 @@ def main():
 
     parser = argparse.ArgumentParser(description='Score VCF SV calls against a reference and sample genome')
     parser.add_argument('--reference', help='Reference genome .fa file', dest='reference')
-    parser.add_argument('--sample', help='Sample genome .fa file', dest='sample')
+    parser.add_argument('--sample', help='Sample genome .fa file(s)', dest='sample', nargs='+')
     parser.add_argument('--calls', help='VCF containing called SVs', dest='calls')
     parser.add_argument('--location_tolerance', help='BP tolerance for matching SV location', type=int,
                         default=10000000)
@@ -550,10 +548,10 @@ def main():
                 chroms.add(record.info['TARGET_CHROM'])
     logger.info(f'Found {len(chroms)} referenced chromosomes in callset')
 
-    logger.info("Loading reference and sample bytearrays")
+    logger.info('Loading reference and sample bytearrays')
     global_ref = load_fasta_to_bytes(args.reference, chroms)
-    global_sample = load_fasta_to_bytes(args.sample, chroms)
-    logger.info(f"Loaded {len(global_ref)} reference chromosomes and {len(global_sample)} sample chromosomes.")
+    global_sample = [load_fasta_to_bytes(samp, chroms) for samp in args.sample]
+    logger.info(f'Loaded {len(global_ref)} reference chromosomes and initialized {len(global_sample)} sample files.')
 
     align_params = {
         'preset': 'map-hifi',
@@ -567,24 +565,29 @@ def main():
 
     if args.chrom_cache:
         cache_dir = args.chrom_cache
-        logger.info(f"Using persistent cache directory: {cache_dir}")
+        logger.info(f'Using persistent cache directory: {cache_dir}')
     else:
         cache_dir = os.path.join(tempfile.gettempdir(), 'mappy_chrom_cache')
-        logger.info(f"Using temporary cache directory: {cache_dir}")
+        logger.info(f'Using temporary cache directory: {cache_dir}')
 
     os.makedirs(cache_dir, exist_ok=True)
 
-    logger.info("Building/loading per-chromosome aligners...")
-    global_aligners = {}
+    logger.info('Building/loading per-chromosome aligners...')
+    global_aligners = defaultdict(list)
 
-    for chrom in chroms:
-        aligner = get_chrom_aligner(args.sample, chrom, cache_dir, align_params, threads=16)
-        if aligner:
-            global_aligners[chrom] = aligner
-        else:
-            logger.warning(f"No sequences found for {chrom} in sample FASTA.")
+    for samp in args.sample:
+        samp_path_hash = hashlib.md5(os.path.abspath(samp).encode('utf-8')).hexdigest()[:8]
+        samp_cache_dir = os.path.join(cache_dir, f'{os.path.basename(samp)}_{samp_path_hash}')
+        os.makedirs(samp_cache_dir, exist_ok=True)
 
-    logger.info("Aligners ready")
+        for chrom in chroms:
+            aligner = get_chrom_aligner(samp, chrom, samp_cache_dir, align_params, threads=32)
+            if aligner:
+                global_aligners[chrom].append(aligner)
+            else:
+                logger.warning(f'No sequences found for {chrom} in sample FASTA {samp}.')
+
+    logger.info('Aligners ready')
 
     precision, correct_calls, total_calls = scorer.score_all(location_tolerance=args.location_tolerance)
 
