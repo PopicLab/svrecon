@@ -20,17 +20,25 @@ from tqdm import tqdm
 from sv_scoring_utils import (
     get_chrom_aligner, update_args_from_config, get_start_stop,
     reverse_complement, check_match, load_fasta_to_bytes, run_edlib_fallback,
-    edlib_to_cigartuples, validate_junctions_from_cigar
+    edlib_to_cigartuples, validate_junctions_from_cigar,
+    BamReader, run_read_edlib
 )
 
 logger = logging.getLogger(__name__)
 
 MIN_EDLIB_QUERY = 5000
-JUNCTION_VALIDATION_WINDOW = 150
+JUNCTION_VALIDATION_WINDOW = 300
 
 global_ref = None
 global_sample = None
 global_aligners = None
+
+# Read-based evaluation config (set in main()).
+global_eval_mode = 'assembly'          # 'assembly' | 'reads' | 'both'
+global_bam_reader = None
+global_read_error_threshold = 0.1
+global_min_read_support = 1
+global_max_reads_per_site = 1000  # overridden by --max_reads_per_site in main()
 
 
 def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dict]:
@@ -254,6 +262,8 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
              error_threshold=0.1):
     global global_aligners
     global global_sample
+    global global_eval_mode, global_bam_reader, global_read_error_threshold
+    global global_min_read_support, global_max_reads_per_site
     try:
         svid = records[0].info['SVID']
         sv_type = records[0].info['SVTYPE']
@@ -261,10 +271,26 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
         sequences = simulate_subsequences(records, buffer)
         match_scores = []
         subseq_diagnostics = []
+        subseq_sources = []
         mappy_passed_all = True
 
         sv_junction_rejected = False
         best_rejected_err = None
+
+        # Reference footprint of the SV (incl. any DUP/translocation TARGET loci),
+        # used as the window reads must OVERLAP to become candidates in
+        # read-based evaluation (we don't require spanning; SV-carrying reads are
+        # typically split-aligned).
+        read_bp_start = read_bp_end = None
+        if global_eval_mode in ('reads', 'both'):
+            starts = [r.start for r in records]
+            stops = [r.stop for r in records]
+            for r in records:
+                if 'TARGET' in r.info:
+                    starts.append(int(r.info['TARGET']))
+                    stops.append(int(r.info['TARGET']))
+            read_bp_start = max(0, min(starts))
+            read_bp_end = max(stops)
 
         for query in sequences:
             sequence = query['sequence']
@@ -279,8 +305,16 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
             seq_has_aligner = chrom in global_aligners
             seq_saw_candidate = False
             seq_best_fail_err = None
+            seq_no_reads = False
+            seq_reads_too_short = False  # candidate reads existed but none long enough to host the alt
+            seq_source = None  # which tier validated this subsequence: assembly | edlib | reads
 
-            if chrom in global_aligners:
+            if global_eval_mode in ('assembly', 'both') and chrom in global_aligners:
+                # Primary assembly check: align the reconstructed subsequence to
+                # the per-chromosome assembly aligner(s), keep alignments landing
+                # within location_tolerance of the expected locus, and accept a
+                # match only when the error rate clears error_threshold AND the
+                # SV junctions validate against the alignment's CIGAR.
                 for aligner in global_aligners[chrom]:
                     all_alignments = list(aligner.map(sequence))
                     alignments = [a for a in all_alignments if abs(a.r_st - query['location']) <= location_tolerance]
@@ -295,6 +329,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                                                              error_threshold=error_threshold):
                                 best_score = min(best_score, err)
                                 mappy_matched = True
+                                seq_source = 'assembly'
                             else:
                                 seq_had_junction_rejection = True
                                 seq_best_rejected_err = min(seq_best_rejected_err, err)
@@ -302,7 +337,11 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                         else:
                             seq_best_fail_err = err if seq_best_fail_err is None else min(seq_best_fail_err, err)
 
-            if len(sequence) < MIN_EDLIB_QUERY and not mappy_matched:
+            if global_eval_mode in ('assembly', 'both') and len(sequence) < MIN_EDLIB_QUERY and not mappy_matched:
+                # Assembly edlib fallback: for short subsequences that mappy
+                # failed to align (mappy can miss very short queries), retry with
+                # edlib against expanding windows of the assembly, applying the
+                # same error-threshold + junction-validation acceptance criteria.
                 mappy_passed_all = False
                 for samp_bytes in global_sample:
                     edlib_res = run_edlib_fallback(
@@ -322,6 +361,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                                                              window=JUNCTION_VALIDATION_WINDOW,
                                                              error_threshold=error_threshold):
                                 best_score = min(best_score, edlib_res['error'])
+                                seq_source = 'edlib'
                             else:
                                 seq_had_junction_rejection = True
                                 seq_best_rejected_err = min(seq_best_rejected_err, edlib_res['error'])
@@ -329,10 +369,51 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                         else:
                             seq_best_fail_err = edlib_res['error'] if seq_best_fail_err is None else min(seq_best_fail_err, edlib_res['error'])
 
+            # Read-based evaluation: same edlib primitive, but the targets are
+            # long reads spanning the SV locus instead of the assembly. In 'both'
+            # mode this only fires to rescue subsequences the assembly missed.
+            if global_eval_mode in ('reads', 'both') and best_score > error_threshold:
+                read_seqs = global_bam_reader.candidate_read_seqs(
+                    chrom, read_bp_start, read_bp_end, int(buffer), global_max_reads_per_site)
+                if not read_seqs:
+                    seq_no_reads = True
+                else:
+                    read_res, n_tried = run_read_edlib(sequence, read_seqs,
+                                                       global_read_error_threshold, global_min_read_support)
+                    if not read_res and n_tried == 0:
+                        seq_reads_too_short = True
+                    if read_res:
+                        seq_saw_candidate = True
+                        if read_res['error'] <= global_read_error_threshold:
+                            cigartuples = edlib_to_cigartuples(read_res['cigar'])
+                            if validate_junctions_from_cigar(cigartuples, query.get('junctions', []),
+                                                             window=JUNCTION_VALIDATION_WINDOW,
+                                                             error_threshold=global_read_error_threshold):
+                                best_score = min(best_score, read_res['error'])
+                                seq_source = 'reads'
+                            else:
+                                seq_had_junction_rejection = True
+                                seq_best_rejected_err = min(seq_best_rejected_err, read_res['error'])
+                                seq_best_fail_err = read_res['error'] if seq_best_fail_err is None else min(seq_best_fail_err, read_res['error'])
+                        else:
+                            seq_best_fail_err = read_res['error'] if seq_best_fail_err is None else min(seq_best_fail_err, read_res['error'])
+
             match_scores.append(best_score)
 
             if best_score <= error_threshold:
                 reason = 'pass'
+            elif global_eval_mode == 'reads':
+                if seq_no_reads:
+                    reason = 'no_reads'
+                elif seq_reads_too_short:
+                    reason = 'alt_exceeds_reads'
+                elif seq_had_junction_rejection:
+                    reason = 'junction_failed'
+                else:
+                    # Either a read aligned but over threshold (seq_best_fail_err
+                    # set), or every long-enough read aligned worse than the 2x
+                    # bound and edlib aborted (no error recorded -> 'aborted').
+                    reason = 'over_error_threshold'
             elif not seq_has_aligner:
                 reason = 'no_aligner'
             elif not seq_saw_candidate:
@@ -341,8 +422,14 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                 reason = 'junction_failed'
             else:
                 reason = 'over_error_threshold'
-            err_str = f'{seq_best_fail_err:.4f}' if seq_best_fail_err is not None else 'NA'
+            if seq_best_fail_err is not None:
+                err_str = f'{seq_best_fail_err:.4f}'
+            elif reason == 'over_error_threshold':
+                err_str = 'aborted'  # reads aligned but exceeded the 2x-threshold edlib bound
+            else:
+                err_str = 'NA'
             subseq_diagnostics.append(f'{reason}:{err_str}')
+            subseq_sources.append(seq_source)
 
             if best_score > error_threshold and seq_had_junction_rejection:
                 sv_junction_rejected = True
@@ -366,11 +453,25 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
 
         rescued_by_edlib = is_correct and not mappy_passed_all
 
+        # Per-SV provenance: the highest tier any passing subsequence needed.
+        # 'reads' implies the SV would have been an assembly-miss without reads.
+        if is_correct:
+            srcs = set(s for s in subseq_sources if s)
+            if 'reads' in srcs:
+                validation_source = 'reads'
+            elif 'edlib' in srcs:
+                validation_source = 'edlib'
+            else:
+                validation_source = 'assembly'
+        else:
+            validation_source = None
+
         return {
             'svid': svid,
             'sv_type': sv_type,
             'is_correct': is_correct,
             'rescued_by_edlib': rescued_by_edlib,
+            'validation_source': validation_source,
             'coords': coords,
             'match_scores': match_scores,
             'sequences': sequences,
@@ -432,6 +533,9 @@ class AlignScorer(object):
     def score_all(self, location_tolerance=float('inf'), error_threshold=0.1, n_threads=40):
         total_calls = Counter()
         correct_calls = Counter()
+        assembly_hits = Counter()   # hits validated by the assembly (mappy or edlib)
+        read_hits = Counter()       # hits validated only by reads
+        source_counts = Counter()   # overall hit provenance: assembly | edlib | reads
         overall_count = 0
         overall_correct = 0
         edlib_rescues = 0
@@ -463,6 +567,8 @@ class AlignScorer(object):
                     line = f'{svid}\t{sv_type}\t{sequences[0]["chrom"]}:{coords[0]}-{coords[1]}\t{hit_miss}\t{match_scores}'
                     if hit_miss == 'miss':
                         line += f'\t{result.get("subseq_diagnostics", [])}'
+                    else:
+                        line += f'\t{result.get("validation_source", "")}'
                     logger.debug(line)
 
                     total_calls[sv_type] += 1
@@ -473,6 +579,12 @@ class AlignScorer(object):
                         overall_correct += 1
                         if result.get('rescued_by_edlib'):
                             edlib_rescues += 1
+                        src = result.get('validation_source') or 'assembly'
+                        source_counts[src] += 1
+                        if src == 'reads':
+                            read_hits[sv_type] += 1
+                        else:
+                            assembly_hits[sv_type] += 1
                     else:
                         correct_calls[sv_type] += 0
 
@@ -484,12 +596,18 @@ class AlignScorer(object):
                     logger.error(f'SV processing generated an exception: {exc}')
 
         logger.info(f'Total SVs rescued by edlib fallback: {edlib_rescues}')
+        logger.info(
+            f"Hits by validation source: assembly={source_counts['assembly']} "
+            f"edlib={source_counts['edlib']} reads={source_counts['reads']} "
+            f"(misses={overall_count - overall_correct})")
 
         precision['ALL'] = sum(correct_calls.values()) / sum(total_calls.values())
         correct_calls['ALL'] = sum(correct_calls.values())
         total_calls['ALL'] = sum(total_calls.values())
+        assembly_hits['ALL'] = sum(assembly_hits.values())
+        read_hits['ALL'] = sum(read_hits.values())
 
-        return precision, correct_calls, total_calls
+        return precision, correct_calls, total_calls, assembly_hits, read_hits
 
 
 def export_igv_session(calls, bam, classified, timestamp, igv_prefix):
@@ -566,10 +684,26 @@ def main():
                         dest='classified')
     parser.add_argument('--igv_prefix', help='Prefix for igv session paths', default='', dest='igv_prefix')
     parser.add_argument('--chrom_cache', help='Directory to save/load per-chromosome MMI indices.', default=None)
+    parser.add_argument('--eval_mode', choices=['assembly', 'reads', 'both'], default='assembly',
+                        help="Validation source: 'assembly' (default, current behavior), 'reads' "
+                             "(skip the assembly entirely and validate against BAM long reads), or "
+                             "'both' (assembly first, reads to rescue misses).")
+    parser.add_argument('--read_error_threshold', type=float, default=0.1,
+                        help='Max edlib error rate for a read to validate a reconstruction (read modes). '
+                             'Keep <= the assembly error threshold (0.1) for consistent hit/miss calls.')
+    parser.add_argument('--min_read_support', type=int, default=1,
+                        help='Min number of spanning reads that must clear --read_error_threshold (read modes).')
+    parser.add_argument('--max_reads_per_site', type=int, default=1000,
+                        help='Cap on candidate reads gathered per SV locus (read modes); '
+                             'bounds work on deep read pileups.')
     args = parser.parse_args()
 
     os.makedirs('./logs', exist_ok=True)
     log_basename = log_name_from_config(args.config) or f'reconstruction_{timestamp}'
+    # Keep eval modes in separate logs so a read-based run doesn't overwrite the
+    # assembly baseline for the same experiment ('assembly' keeps the bare name).
+    if args.eval_mode != 'assembly':
+        log_basename += f'.{args.eval_mode}'
     log_filename = os.path.join('./logs', f'{log_basename}.log')
 
     file_handler = logging.FileHandler(log_filename, mode='w')
@@ -595,6 +729,13 @@ def main():
     global global_ref
     global global_sample
     global global_aligners
+    global global_eval_mode, global_bam_reader, global_read_error_threshold
+    global global_min_read_support, global_max_reads_per_site
+
+    global_eval_mode = args.eval_mode
+    global_read_error_threshold = args.read_error_threshold
+    global_min_read_support = args.min_read_support
+    global_max_reads_per_site = args.max_reads_per_site
 
     logger.info('Initializing scorer and loading callset')
     scorer = AlignScorer(args.calls, args.buffer, args.gap_file)
@@ -608,54 +749,73 @@ def main():
                 chroms.add(record.info['TARGET_CHROM'])
     logger.info(f'Found {len(chroms)} referenced chromosomes in callset')
 
-    logger.info('Loading reference and sample bytearrays')
+    logger.info('Loading reference bytearrays')
     global_ref = load_fasta_to_bytes(args.reference, chroms)
-    global_sample = [load_fasta_to_bytes(samp, chroms) for samp in args.sample]
-    logger.info(f'Loaded {len(global_ref)} reference chromosomes and initialized {len(global_sample)} sample files.')
+    logger.info(f'Loaded {len(global_ref)} reference chromosomes.')
 
-    align_params = {
-        'preset': 'map-hifi',
-        'k': 15,
-        'w': 5,
-        'best_n': 100,
-        'min_cnt': 1,
-        'min_dp_score': 10,
-        'min_chain_score': 1,
-    }
-
-    if args.chrom_cache:
-        cache_dir = args.chrom_cache
-        logger.info(f'Using persistent cache directory: {cache_dir}')
-    else:
-        cache_dir = os.path.join(tempfile.gettempdir(), 'mappy_chrom_cache')
-        logger.info(f'Using temporary cache directory: {cache_dir}')
-
-    os.makedirs(cache_dir, exist_ok=True)
-
-    logger.info('Building/loading per-chromosome aligners...')
+    global_sample = []
     global_aligners = defaultdict(list)
 
-    for samp in args.sample:
-        samp_path_hash = hashlib.md5(os.path.abspath(samp).encode('utf-8')).hexdigest()[:8]
-        samp_cache_dir = os.path.join(cache_dir, f'{os.path.basename(samp)}_{samp_path_hash}')
-        os.makedirs(samp_cache_dir, exist_ok=True)
+    if global_eval_mode in ('assembly', 'both'):
+        logger.info('Loading sample assembly bytearrays')
+        global_sample = [load_fasta_to_bytes(samp, chroms) for samp in args.sample]
+        logger.info(f'Initialized {len(global_sample)} sample assembly file(s).')
 
-        for chrom in chroms:
-            aligner = get_chrom_aligner(samp, chrom, samp_cache_dir, align_params, threads=32)
-            if aligner:
-                global_aligners[chrom].append(aligner)
-            else:
-                logger.warning(f'No sequences found for {chrom} in sample FASTA {samp}.')
+        align_params = {
+            'preset': 'map-hifi',
+            'k': 15,
+            'w': 5,
+            'best_n': 100,
+            'min_cnt': 1,
+            'min_dp_score': 10,
+            'min_chain_score': 1,
+        }
 
-    logger.info('Aligners ready')
+        if args.chrom_cache:
+            cache_dir = args.chrom_cache
+            logger.info(f'Using persistent cache directory: {cache_dir}')
+        else:
+            cache_dir = os.path.join(tempfile.gettempdir(), 'mappy_chrom_cache')
+            logger.info(f'Using temporary cache directory: {cache_dir}')
 
-    precision, correct_calls, total_calls = scorer.score_all(location_tolerance=args.location_tolerance)
+        os.makedirs(cache_dir, exist_ok=True)
+
+        logger.info('Building/loading per-chromosome aligners...')
+        for samp in args.sample:
+            samp_path_hash = hashlib.md5(os.path.abspath(samp).encode('utf-8')).hexdigest()[:8]
+            samp_cache_dir = os.path.join(cache_dir, f'{os.path.basename(samp)}_{samp_path_hash}')
+            os.makedirs(samp_cache_dir, exist_ok=True)
+
+            for chrom in chroms:
+                aligner = get_chrom_aligner(samp, chrom, samp_cache_dir, align_params, threads=32)
+                if aligner:
+                    global_aligners[chrom].append(aligner)
+                else:
+                    logger.warning(f'No sequences found for {chrom} in sample FASTA {samp}.')
+
+        logger.info('Aligners ready')
+    else:
+        logger.info('Read-only eval mode: skipping sample assembly load and aligner build.')
+
+    if global_eval_mode in ('reads', 'both'):
+        if not args.bam:
+            logger.error('--eval_mode reads/both requires a BAM (--bam) for read-based evaluation.')
+            sys.exit(1)
+        logger.info(f'Initializing thread-safe BAM reader: {args.bam}')
+        global_bam_reader = BamReader(args.bam)
+
+    precision, correct_calls, total_calls, assembly_hits, read_hits = scorer.score_all(
+        location_tolerance=args.location_tolerance)
 
     df = pd.DataFrame({
         'correct_calls': correct_calls,
         'total_calls': total_calls,
         'precision': precision,
+        'assembly_hits': assembly_hits,
+        'read_hits': read_hits,
     })
+    df['assembly_hits'] = df['assembly_hits'].fillna(0).astype(int)
+    df['read_hits'] = df['read_hits'].fillna(0).astype(int)
     df.sort_values('total_calls', ascending=False, inplace=True)
 
     logger.info(f'Score table:\n{df}')
