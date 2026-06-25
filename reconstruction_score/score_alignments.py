@@ -260,6 +260,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
 
         sequences = simulate_subsequences(records, buffer)
         match_scores = []
+        subseq_diagnostics = []
         mappy_passed_all = True
 
         sv_junction_rejected = False
@@ -275,12 +276,17 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
             seq_had_junction_rejection = False
             seq_best_rejected_err = 1.0
 
+            seq_has_aligner = chrom in global_aligners
+            seq_saw_candidate = False
+            seq_best_fail_err = None
+
             if chrom in global_aligners:
                 for aligner in global_aligners[chrom]:
                     all_alignments = list(aligner.map(sequence))
                     alignments = [a for a in all_alignments if abs(a.r_st - query['location']) <= location_tolerance]
 
                     for a in alignments:
+                        seq_saw_candidate = True
                         err = check_match(a, sequence)
                         if err <= error_threshold:
                             if validate_junctions_from_cigar(a.cigar, query.get('junctions', []),
@@ -292,6 +298,9 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                             else:
                                 seq_had_junction_rejection = True
                                 seq_best_rejected_err = min(seq_best_rejected_err, err)
+                                seq_best_fail_err = err if seq_best_fail_err is None else min(seq_best_fail_err, err)
+                        else:
+                            seq_best_fail_err = err if seq_best_fail_err is None else min(seq_best_fail_err, err)
 
             if len(sequence) < MIN_EDLIB_QUERY and not mappy_matched:
                 mappy_passed_all = False
@@ -305,17 +314,35 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                         error_threshold,
                         samp_bytes
                     )
-                    if edlib_res and edlib_res['error'] <= error_threshold:
-                        cigartuples = edlib_to_cigartuples(edlib_res['cigar'])
-                        if validate_junctions_from_cigar(cigartuples, query.get('junctions', []),
-                                                         window=JUNCTION_VALIDATION_WINDOW,
-                                                         error_threshold=error_threshold):
-                            best_score = min(best_score, edlib_res['error'])
+                    if edlib_res:
+                        seq_saw_candidate = True
+                        if edlib_res['error'] <= error_threshold:
+                            cigartuples = edlib_to_cigartuples(edlib_res['cigar'])
+                            if validate_junctions_from_cigar(cigartuples, query.get('junctions', []),
+                                                             window=JUNCTION_VALIDATION_WINDOW,
+                                                             error_threshold=error_threshold):
+                                best_score = min(best_score, edlib_res['error'])
+                            else:
+                                seq_had_junction_rejection = True
+                                seq_best_rejected_err = min(seq_best_rejected_err, edlib_res['error'])
+                                seq_best_fail_err = edlib_res['error'] if seq_best_fail_err is None else min(seq_best_fail_err, edlib_res['error'])
                         else:
-                            seq_had_junction_rejection = True
-                            seq_best_rejected_err = min(seq_best_rejected_err, edlib_res['error'])
+                            seq_best_fail_err = edlib_res['error'] if seq_best_fail_err is None else min(seq_best_fail_err, edlib_res['error'])
 
             match_scores.append(best_score)
+
+            if best_score <= error_threshold:
+                reason = 'pass'
+            elif not seq_has_aligner:
+                reason = 'no_aligner'
+            elif not seq_saw_candidate:
+                reason = 'no_alignment_in_window'
+            elif seq_had_junction_rejection:
+                reason = 'junction_failed'
+            else:
+                reason = 'over_error_threshold'
+            err_str = f'{seq_best_fail_err:.4f}' if seq_best_fail_err is not None else 'NA'
+            subseq_diagnostics.append(f'{reason}:{err_str}')
 
             if best_score > error_threshold and seq_had_junction_rejection:
                 sv_junction_rejected = True
@@ -347,6 +374,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
             'coords': coords,
             'match_scores': match_scores,
             'sequences': sequences,
+            'subseq_diagnostics': subseq_diagnostics,
         }
     except Exception as e:
         error_msg = f'Worker failed for SVID: {records[0].info.get("SVID", "Unknown")}. Error: {e}\n{traceback.format_exc()}'
@@ -432,8 +460,10 @@ class AlignScorer(object):
                     coords = result['coords']
                     hit_miss = 'hit' if result['is_correct'] else 'miss'
                     match_scores = result['match_scores']
-                    logger.debug(
-                        f'{svid}\t{sv_type}\t{sequences[0]["chrom"]}:{coords[0]}-{coords[1]}\t{hit_miss}\t{match_scores}')
+                    line = f'{svid}\t{sv_type}\t{sequences[0]["chrom"]}:{coords[0]}-{coords[1]}\t{hit_miss}\t{match_scores}'
+                    if hit_miss == 'miss':
+                        line += f'\t{result.get("subseq_diagnostics", [])}'
+                    logger.debug(line)
 
                     total_calls[sv_type] += 1
                     overall_count += 1
@@ -490,24 +520,36 @@ def export_igv_session(calls, bam, classified, timestamp, igv_prefix):
     print(f'File saved to {output_filename}')
 
 
+def log_name_from_config(config):
+    """Derive a stable log basename from the config's experiment directory.
+
+    The experiment is identified by the config's directory relative to an
+    `experiments/` ancestor, with path components joined by dots. For example:
+        .../experiments/HG00733/groovi.yaml            -> reconstruction.HG00733
+        .../experiments/hg002/latest_filtering/groovi.yaml
+                                                       -> reconstruction.hg002.latest_filtering
+    Falls back to the config's parent directory name when no `experiments/`
+    ancestor is present, and returns None if no config is given.
+    """
+    if not config:
+        return None
+
+    exp_dir = os.path.dirname(os.path.abspath(config))
+    parts = exp_dir.split(os.sep)
+    if 'experiments' in parts:
+        idx = parts.index('experiments')
+        rel_parts = parts[idx + 1:]
+    else:
+        rel_parts = parts[-1:]
+
+    rel_parts = [p for p in rel_parts if p]
+    if not rel_parts:
+        return None
+    return 'reconstruction.' + '.'.join(rel_parts)
+
+
 def main():
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H%M%S')
-
-    os.makedirs('./logs', exist_ok=True)
-    log_filename = os.path.join('./logs', f'reconstruction_{timestamp}.log')
-
-    file_handler = logging.FileHandler(log_filename, mode='w')
-    file_handler.setLevel(logging.DEBUG)
-
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
-
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(asctime)s %(levelname)-8s %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        handlers=[file_handler, console_handler]
-    )
 
     parser = argparse.ArgumentParser(description='Score VCF SV calls against a reference and sample genome')
     parser.add_argument('--reference', help='Reference genome .fa file', dest='reference')
@@ -526,6 +568,24 @@ def main():
     parser.add_argument('--chrom_cache', help='Directory to save/load per-chromosome MMI indices.', default=None)
     args = parser.parse_args()
 
+    os.makedirs('./logs', exist_ok=True)
+    log_basename = log_name_from_config(args.config) or f'reconstruction_{timestamp}'
+    log_filename = os.path.join('./logs', f'{log_basename}.log')
+
+    file_handler = logging.FileHandler(log_filename, mode='w')
+    file_handler.setLevel(logging.DEBUG)
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s %(levelname)-8s %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+        handlers=[file_handler, console_handler]
+    )
+
+    logger.info(f'Logging to {log_filename}')
     logger.info(f'Config: {vars(args)}')
 
     if args.config:
