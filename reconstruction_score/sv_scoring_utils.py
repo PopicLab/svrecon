@@ -195,12 +195,15 @@ def get_start_stop(rec: VariantRecord) -> Tuple[int, int]:
     return start, stop
 
 
-def reverse_complement(seq: Union[str, List[str]]) -> List[str]:
-    """Returns the reverse complement of a given DNA sequence string."""
-    complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A',
-                  'a': 't', 'c': 'g', 'g': 'c', 't': 'a',
-                  'N': 'N', 'n': 'n'}
-    return [complement[x] for x in reversed(seq)]
+_RC_TRANS = str.maketrans('ACGTNacgtn', 'TGCANtgcan')
+
+
+def reverse_complement(seq: Union[str, List[str]]) -> str:
+    """Reverse complement of a DNA sequence (unknown bases -> N). Accepts a str or
+    a list of single-character strings; always returns a str."""
+    if not isinstance(seq, str):
+        seq = ''.join(seq)
+    return seq.translate(_RC_TRANS)[::-1]
 
 
 def check_match(alignment, query):
@@ -375,7 +378,7 @@ class BamReader:
 
 
 def run_read_edlib(query_seq: str, read_seqs: List[str], error_threshold: float,
-                   min_support: int = 1) -> Union[Dict, None]:
+                   min_support: int = 1) -> Tuple[Union[Dict, None], int]:
     """Align ``query_seq`` against each candidate read with the shared
     ``edlib_score`` primitive.
 
@@ -393,9 +396,7 @@ def run_read_edlib(query_seq: str, read_seqs: List[str], error_threshold: float,
     n_tried = 0
     # A read can't contain the alt under HW alignment if it is shorter than the
     # alt by more than the error budget: the unmatched overhang alone forces
-    # error >= (len(alt) - len(read)) / len(alt). Skip those reads -- this avoids
-    # billions of futile edlib cells when the SV is longer than any read (e.g.
-    # large complex events), the dominant cost in read mode.
+    # error >= (len(alt) - len(read)) / len(alt). Skip those reads.
     min_target_len = len(query_seq) * (1.0 - error_threshold)
     # Bound each edlib alignment so non-matching reads abort early instead of
     # computing a full O(len*len) matrix -- without this, a multi-kb alt that no
@@ -407,9 +408,14 @@ def run_read_edlib(query_seq: str, read_seqs: List[str], error_threshold: float,
         if len(target_seq) < min_target_len:
             continue
         n_tried += 1
-        res = edlib_score(query_seq, target_seq, k=k)
-        if res is None:
+        # A read molecule can be sequenced from either strand relative to the
+        # reference-oriented alt, so try BOTH orientations and keep the better.
+        candidates = [r for r in (edlib_score(query_seq, target_seq, k=k),
+                                   edlib_score(query_seq, reverse_complement(target_seq), k=k))
+                      if r is not None]
+        if not candidates:
             continue
+        res = min(candidates, key=lambda r: r['error'])
         if res['error'] < best_error:
             best_error = res['error']
             best_res = res

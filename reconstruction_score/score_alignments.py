@@ -150,7 +150,7 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dic
                 mark_junction(target_junction_mask, target)
                 mark_junction(target_junction_mask, target + len(clip) - 1)
         elif rec.info['OP_TYPE'] == 'COPYinv-PASTE' or rec.info['SVTYPE'] in ['INV_dDUP']:
-            clip = reverse_complement(orig_sequence[start:stop])
+            clip = list(reverse_complement(orig_sequence[start:stop]))
 
             if merged_target_sequence:
                 new_sequence = new_sequence[:target] + clip + new_sequence[target:]
@@ -166,7 +166,7 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int) -> List[Dic
                 mark_junction(target_junction_mask, target)
                 mark_junction(target_junction_mask, target + len(clip) - 1)
         elif rec.info['OP_TYPE'] == 'CUTinv-PASTE' or rec.info['SVTYPE'] in ['INV_nrTRA']:
-            clip = reverse_complement(orig_sequence[start:stop])
+            clip = list(reverse_complement(orig_sequence[start:stop]))
             new_sequence[start:stop] = [delete_placeholder] * (stop - start)
             changed_mask[start:stop] = [True] * len(clip)
             mark_junction(junction_mask, start)
@@ -210,6 +210,12 @@ def get_changed_subsequences(new_sequence, changed_mask, junction_mask, toleranc
                              sv_type):
     changed_intervals = []
     queries = []
+    # Length of the FULL resulting allele these subsequences are carved from -- a
+    # read must be at least this long to contain the whole variant (read mode).
+    # Sum the element lengths rather than len(new_sequence): deletions leave empty
+    # '' placeholders (and inserted clips can be multi-char), so element count
+    # over-estimates the true bp length for deletion-containing alleles.
+    result_len = sum(len(s) for s in new_sequence)
 
     current_index = 0
     for value, group in groupby(changed_mask):
@@ -251,7 +257,8 @@ def get_changed_subsequences(new_sequence, changed_mask, junction_mask, toleranc
             'sequence': sequence,
             'location': adjusted_start + offset,
             'length': len(sequence),
-            'junctions': junctions
+            'junctions': junctions,
+            'result_len': result_len,
         }
         queries.append(query)
 
@@ -272,6 +279,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
         match_scores = []
         subseq_diagnostics = []
         subseq_sources = []
+        subseq_status = []   # per-subsequence: 'pass' | 'fail' | 'inconclusive'
         mappy_passed_all = True
 
         sv_junction_rejected = False
@@ -306,15 +314,51 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
             seq_saw_candidate = False
             seq_best_fail_err = None
             seq_no_reads = False
-            seq_reads_too_short = False  # candidate reads existed but none long enough to host the alt
+            seq_inconclusive = False  # reads overlap but none span the full resulting allele
+            seq_reads_aborted = False  # spanning reads existed but all exceeded the 2x edlib bound
             seq_source = None  # which tier validated this subsequence: assembly | edlib | reads
 
-            if global_eval_mode in ('assembly', 'both') and chrom in global_aligners:
-                # Primary assembly check: align the reconstructed subsequence to
-                # the per-chromosome assembly aligner(s), keep alignments landing
-                # within location_tolerance of the expected locus, and accept a
-                # match only when the error rate clears error_threshold AND the
-                # SV junctions validate against the alignment's CIGAR.
+            # Read-based evaluation
+            if global_eval_mode in ('reads', 'both'):
+                read_seqs = global_bam_reader.candidate_read_seqs(
+                    chrom, read_bp_start, read_bp_end, int(buffer), global_max_reads_per_site)
+                # A read can only confirm the variant if it is long enough to hold
+                # the resulting allele
+                result_len = query.get('result_len') or len(sequence)
+                spanning = [r for r in read_seqs if len(r) >= result_len]
+                if not read_seqs:
+                    seq_no_reads = True
+                elif not spanning:
+                    seq_inconclusive = True
+                else:
+                    read_res, _ = run_read_edlib(sequence, spanning,
+                                                 global_read_error_threshold, global_min_read_support)
+                    if read_res:
+                        seq_saw_candidate = True
+                        if read_res['error'] <= global_read_error_threshold:
+                            cigartuples = edlib_to_cigartuples(read_res['cigar'])
+                            if validate_junctions_from_cigar(cigartuples, query.get('junctions', []),
+                                                             window=JUNCTION_VALIDATION_WINDOW,
+                                                             error_threshold=global_read_error_threshold):
+                                best_score = min(best_score, read_res['error'])
+                                seq_source = 'reads'
+                            else:
+                                seq_had_junction_rejection = True
+                                seq_best_rejected_err = min(seq_best_rejected_err, read_res['error'])
+                                seq_best_fail_err = read_res['error'] if seq_best_fail_err is None else min(seq_best_fail_err, read_res['error'])
+                        else:
+                            seq_best_fail_err = read_res['error'] if seq_best_fail_err is None else min(seq_best_fail_err, read_res['error'])
+                    else:
+                        # spanning reads existed but all exceeded the 2x edlib bound
+                        seq_reads_aborted = True
+
+            if global_eval_mode in ('assembly', 'both') and best_score > error_threshold and chrom in global_aligners:
+                # Assembly check (Tier 2). In 'both' mode this only runs when the
+                # reads above did not already validate the subsequence. Align the
+                # reconstructed subsequence to the per-chromosome assembly
+                # aligner(s), keep alignments within location_tolerance of the
+                # expected locus, and accept a match only when the error rate
+                # clears error_threshold AND the SV junctions validate.
                 for aligner in global_aligners[chrom]:
                     all_alignments = list(aligner.map(sequence))
                     alignments = [a for a in all_alignments if abs(a.r_st - query['location']) <= location_tolerance]
@@ -337,7 +381,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                         else:
                             seq_best_fail_err = err if seq_best_fail_err is None else min(seq_best_fail_err, err)
 
-            if global_eval_mode in ('assembly', 'both') and len(sequence) < MIN_EDLIB_QUERY and not mappy_matched:
+            if global_eval_mode in ('assembly', 'both') and best_score > error_threshold and len(sequence) < MIN_EDLIB_QUERY and not mappy_matched:
                 # Assembly edlib fallback: for short subsequences that mappy
                 # failed to align (mappy can miss very short queries), retry with
                 # edlib against expanding windows of the assembly, applying the
@@ -369,67 +413,41 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                         else:
                             seq_best_fail_err = edlib_res['error'] if seq_best_fail_err is None else min(seq_best_fail_err, edlib_res['error'])
 
-            # Read-based evaluation: same edlib primitive, but the targets are
-            # long reads spanning the SV locus instead of the assembly. In 'both'
-            # mode this only fires to rescue subsequences the assembly missed.
-            if global_eval_mode in ('reads', 'both') and best_score > error_threshold:
-                read_seqs = global_bam_reader.candidate_read_seqs(
-                    chrom, read_bp_start, read_bp_end, int(buffer), global_max_reads_per_site)
-                if not read_seqs:
-                    seq_no_reads = True
-                else:
-                    read_res, n_tried = run_read_edlib(sequence, read_seqs,
-                                                       global_read_error_threshold, global_min_read_support)
-                    if not read_res and n_tried == 0:
-                        seq_reads_too_short = True
-                    if read_res:
-                        seq_saw_candidate = True
-                        if read_res['error'] <= global_read_error_threshold:
-                            cigartuples = edlib_to_cigartuples(read_res['cigar'])
-                            if validate_junctions_from_cigar(cigartuples, query.get('junctions', []),
-                                                             window=JUNCTION_VALIDATION_WINDOW,
-                                                             error_threshold=global_read_error_threshold):
-                                best_score = min(best_score, read_res['error'])
-                                seq_source = 'reads'
-                            else:
-                                seq_had_junction_rejection = True
-                                seq_best_rejected_err = min(seq_best_rejected_err, read_res['error'])
-                                seq_best_fail_err = read_res['error'] if seq_best_fail_err is None else min(seq_best_fail_err, read_res['error'])
-                        else:
-                            seq_best_fail_err = read_res['error'] if seq_best_fail_err is None else min(seq_best_fail_err, read_res['error'])
-
             match_scores.append(best_score)
 
+            # Classify the subsequence from the evidence gathered above. It falls
+            # into exactly one category, and the category fixes both the scoring
+            # status and the diagnostic reason. Checked in priority order:
+            #   CONFIRMED    -- some tier matched within threshold -> pass.
+            #   CONTRADICTED -- a candidate (spanning read or assembly alignment)
+            #                   was evaluated and disagreed -> fail. In 'both' mode
+            #                   this means neither tier could confirm it.
+            #   UNTESTABLE   -- the read tier had no read to judge with (no
+            #                   overlapping / no spanning read) -> inconclusive:
+            #                   absence of a read is not evidence against the call.
+            #   NOT_FOUND    -- assembly tier produced nothing to compare against.
+            #                   In assembly mode absence IS the verdict -> fail.
             if best_score <= error_threshold:
-                reason = 'pass'
-            elif global_eval_mode == 'reads':
-                if seq_no_reads:
-                    reason = 'no_reads'
-                elif seq_reads_too_short:
-                    reason = 'alt_exceeds_reads'
-                elif seq_had_junction_rejection:
-                    reason = 'junction_failed'
-                else:
-                    # Either a read aligned but over threshold (seq_best_fail_err
-                    # set), or every long-enough read aligned worse than the 2x
-                    # bound and edlib aborted (no error recorded -> 'aborted').
-                    reason = 'over_error_threshold'
-            elif not seq_has_aligner:
-                reason = 'no_aligner'
-            elif not seq_saw_candidate:
-                reason = 'no_alignment_in_window'
-            elif seq_had_junction_rejection:
-                reason = 'junction_failed'
+                status, reason = 'pass', 'pass'
+            elif seq_had_junction_rejection or seq_saw_candidate or seq_reads_aborted:
+                status = 'fail'
+                reason = 'junction_failed' if seq_had_junction_rejection else 'over_error_threshold'
+            elif seq_no_reads or seq_inconclusive:
+                status = 'inconclusive'
+                reason = 'no_reads' if seq_no_reads else 'inconclusive'
             else:
-                reason = 'over_error_threshold'
+                status = 'fail'
+                reason = 'no_aligner' if not seq_has_aligner else 'no_alignment_in_window'
+
             if seq_best_fail_err is not None:
                 err_str = f'{seq_best_fail_err:.4f}'
             elif reason == 'over_error_threshold':
-                err_str = 'aborted'  # reads aligned but exceeded the 2x-threshold edlib bound
+                err_str = 'aborted'  # spanning reads exceeded the 2x-threshold edlib bound
             else:
                 err_str = 'NA'
             subseq_diagnostics.append(f'{reason}:{err_str}')
             subseq_sources.append(seq_source)
+            subseq_status.append(status)
 
             if best_score > error_threshold and seq_had_junction_rejection:
                 sv_junction_rejected = True
@@ -440,16 +458,25 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
 
         coords = records[0].pos, records[0].stop
 
-        if len(sequences) > 0 and all([score <= error_threshold for score in match_scores]):
-            is_correct = True
-            hit_miss = 'hit'
+        # SV-level roll-up:
+        #   hit          -> every subsequence passed
+        #   miss         -> at least one subsequence was contradicted (spanning
+        #                   reads / assembly aligned but didn't match)
+        #   inconclusive -> no contradiction, but at least one subsequence could
+        #                   not be tested (reads mode: no read spans the full allele)
+        if len(subseq_status) > 0 and all(s == 'pass' for s in subseq_status):
+            outcome = 'hit'
+        elif 'fail' in subseq_status:
+            outcome = 'miss'
+        elif 'inconclusive' in subseq_status:
+            outcome = 'inconclusive'
         else:
-            hit_miss = 'miss'
-            is_correct = False
+            outcome = 'miss'
+        is_correct = (outcome == 'hit')
 
-            if sv_junction_rejected:
-                logger.debug(
-                    f'Rejected {svid} {sv_type}: Alignments passed overall error (best: {best_rejected_err:.4f}) but failed junction validation.')
+        if outcome == 'miss' and sv_junction_rejected:
+            logger.debug(
+                f'Rejected {svid} {sv_type}: Alignments passed overall error (best: {best_rejected_err:.4f}) but failed junction validation.')
 
         rescued_by_edlib = is_correct and not mappy_passed_all
 
@@ -466,12 +493,28 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
         else:
             validation_source = None
 
+        # Coarse evaluation tier for two-tier reporting:
+        #   'read'     (Tier 1) -- a single actual read contained the allele. The
+        #              strongest, most concrete evidence; independent of any
+        #              assembly's quality.
+        #   'assembly' (Tier 2) -- confirmed only against the reconstructed
+        #              assembly (mappy or the edlib fallback). Supporting evidence
+        #              for events too long for any single read to span.
+        if validation_source == 'reads':
+            tier = 'read'
+        elif validation_source in ('assembly', 'edlib'):
+            tier = 'assembly'
+        else:
+            tier = None
+
         return {
             'svid': svid,
             'sv_type': sv_type,
             'is_correct': is_correct,
+            'outcome': outcome,   # 'hit' | 'miss' | 'inconclusive'
             'rescued_by_edlib': rescued_by_edlib,
             'validation_source': validation_source,
+            'tier': tier,   # 'read' (Tier 1) | 'assembly' (Tier 2) | None
             'coords': coords,
             'match_scores': match_scores,
             'sequences': sequences,
@@ -533,11 +576,13 @@ class AlignScorer(object):
     def score_all(self, location_tolerance=float('inf'), error_threshold=0.1, n_threads=40):
         total_calls = Counter()
         correct_calls = Counter()
+        inconclusive_calls = Counter()  # reads mode: no read spans the full resulting allele
         assembly_hits = Counter()   # hits validated by the assembly (mappy or edlib)
         read_hits = Counter()       # hits validated only by reads
         source_counts = Counter()   # overall hit provenance: assembly | edlib | reads
         overall_count = 0
         overall_correct = 0
+        overall_inconclusive = 0
         edlib_rescues = 0
         precision = {}
 
@@ -562,19 +607,20 @@ class AlignScorer(object):
                     svid = result['svid']
                     sequences = result['sequences']
                     coords = result['coords']
-                    hit_miss = 'hit' if result['is_correct'] else 'miss'
+                    outcome = result.get('outcome', 'hit' if result['is_correct'] else 'miss')
                     match_scores = result['match_scores']
-                    line = f'{svid}\t{sv_type}\t{sequences[0]["chrom"]}:{coords[0]}-{coords[1]}\t{hit_miss}\t{match_scores}'
-                    if hit_miss == 'miss':
+                    line = f'{svid}\t{sv_type}\t{sequences[0]["chrom"]}:{coords[0]}-{coords[1]}\t{outcome}\t{match_scores}'
+                    if outcome == 'hit':
+                        # Tier 1 (read) vs Tier 2 (assembly), plus the detailed source.
+                        line += f'\t{result.get("tier", "")}\t{result.get("validation_source", "")}'
+                    else:  # miss or inconclusive -> show why
                         line += f'\t{result.get("subseq_diagnostics", [])}'
-                    else:
-                        line += f'\t{result.get("validation_source", "")}'
                     logger.debug(line)
 
                     total_calls[sv_type] += 1
                     overall_count += 1
 
-                    if result['is_correct']:
+                    if outcome == 'hit':
                         correct_calls[sv_type] += 1
                         overall_correct += 1
                         if result.get('rescued_by_edlib'):
@@ -585,29 +631,46 @@ class AlignScorer(object):
                             read_hits[sv_type] += 1
                         else:
                             assembly_hits[sv_type] += 1
-                    else:
-                        correct_calls[sv_type] += 0
+                    elif outcome == 'inconclusive':
+                        inconclusive_calls[sv_type] += 1
+                        overall_inconclusive += 1
+                    # else: miss -> counts toward total but not correct/inconclusive
 
+                    # precision is over CONCLUSIVE calls only (hits + misses)
+                    conclusive = overall_count - overall_inconclusive
                     pbar.set_description(
-                        f'Scoring SVs. Current precision {overall_correct / overall_count:.2f} ({overall_correct} / {overall_count})')
-                    precision[sv_type] = correct_calls[sv_type] / total_calls[sv_type]
+                        f'Scoring SVs. Precision {overall_correct / conclusive:.2f} '
+                        f'({overall_correct}/{conclusive}); inconclusive {overall_inconclusive}')
+                    denom = total_calls[sv_type] - inconclusive_calls[sv_type]
+                    precision[sv_type] = correct_calls[sv_type] / denom if denom else float('nan')
 
                 except Exception as exc:
                     logger.error(f'SV processing generated an exception: {exc}')
 
         logger.info(f'Total SVs rescued by edlib fallback: {edlib_rescues}')
+        overall_miss = overall_count - overall_correct - overall_inconclusive
+        logger.info(
+            f"Outcomes: hit={overall_correct} miss={overall_miss} inconclusive={overall_inconclusive} "
+            f"(inconclusive = no read spans the full resulting allele; excluded from precision)")
         logger.info(
             f"Hits by validation source: assembly={source_counts['assembly']} "
-            f"edlib={source_counts['edlib']} reads={source_counts['reads']} "
-            f"(misses={overall_count - overall_correct})")
+            f"edlib={source_counts['edlib']} reads={source_counts['reads']}")
+        logger.info(
+            f"Hits by tier: read(Tier1)={source_counts['reads']} "
+            f"assembly(Tier2)={source_counts['assembly'] + source_counts['edlib']} "
+            f"(Tier1 = a single real read contained the allele; Tier2 = confirmed only against the assembly)")
 
-        precision['ALL'] = sum(correct_calls.values()) / sum(total_calls.values())
+        total_all = sum(total_calls.values())
+        inc_all = sum(inconclusive_calls.values())
+        conclusive_all = total_all - inc_all
+        precision['ALL'] = sum(correct_calls.values()) / conclusive_all if conclusive_all else float('nan')
         correct_calls['ALL'] = sum(correct_calls.values())
-        total_calls['ALL'] = sum(total_calls.values())
+        total_calls['ALL'] = total_all
+        inconclusive_calls['ALL'] = inc_all
         assembly_hits['ALL'] = sum(assembly_hits.values())
         read_hits['ALL'] = sum(read_hits.values())
 
-        return precision, correct_calls, total_calls, assembly_hits, read_hits
+        return precision, correct_calls, total_calls, inconclusive_calls, assembly_hits, read_hits
 
 
 def export_igv_session(calls, bam, classified, timestamp, igv_prefix):
@@ -804,21 +867,24 @@ def main():
         logger.info(f'Initializing thread-safe BAM reader: {args.bam}')
         global_bam_reader = BamReader(args.bam)
 
-    precision, correct_calls, total_calls, assembly_hits, read_hits = scorer.score_all(
+    precision, correct_calls, total_calls, inconclusive_calls, assembly_hits, read_hits = scorer.score_all(
         location_tolerance=args.location_tolerance)
 
     df = pd.DataFrame({
         'correct_calls': correct_calls,
         'total_calls': total_calls,
+        'inconclusive': inconclusive_calls,
         'precision': precision,
         'assembly_hits': assembly_hits,
         'read_hits': read_hits,
     })
-    df['assembly_hits'] = df['assembly_hits'].fillna(0).astype(int)
-    df['read_hits'] = df['read_hits'].fillna(0).astype(int)
+    # count columns: missing SV-type keys (e.g. a type with 0 hits) -> 0, not NaN
+    for col in ('correct_calls', 'total_calls', 'inconclusive', 'assembly_hits', 'read_hits'):
+        df[col] = df[col].fillna(0).astype(int)
     df.sort_values('total_calls', ascending=False, inplace=True)
 
-    logger.info(f'Score table:\n{df}')
+    # to_string() prints all columns (default repr truncates the middle ones)
+    logger.info('Score table:\n' + df.to_string())
 
     export_igv_session(args.calls, args.bam, args.classified, timestamp, args.igv_prefix)
 
