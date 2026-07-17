@@ -2,3 +2,4 @@
 logs/
 igv_sessions/
 experiments/
+__pycache__/

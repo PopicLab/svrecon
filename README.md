@@ -4,13 +4,18 @@
 
 ## Instructions for running:
 
+There are two ways to supply parameters:
+
+- **`--config <experiment>.yaml`** (recommended): an svrecon YAML config whose keys mirror the flags below (e.g. `reference:`, `sample:`, `calls:`, `eval_mode:`, `report:`). **Logs and reports are written to the config file's directory**, so each run is self-contained — create `experiments/hg002_max_support/config.yaml`, then `score_alignments.py --config experiments/hg002_max_support/config.yaml` writes `reconstruction.log` (and `reconstruction.eval.jsonl` when `report: json`) right beside it.
+- **Explicit flags** (below): usable on their own, or to override individual config values. Precedence is **CLI flag > `--config` value > `--groovi_config` inference > default**. Without `--config`, outputs go to `./logs/`.
+
 Run with the following parameters.
 - `--reference`: Path to .fa file containing the reference genome
 - `--sample`: Path to .fa file containing the sample genome (on which SVs have been called)
 - `--calls`: Path to .vcf file containing called SVs in InsilicoSV format
 - `--buffer`:  Subsequence context buffer size, number of bps before and after reconstructed SV to compare
 - `--gap_file`: (Optional) Tab-delimited file containing regions to omit (e.g., centromere and telomere)
-- `--location_tolerance`: (Optional) Max bp between a mappy hit's reference start and the expected SV locus for the hit to count; default **unbounded**. Bounding it is only safe for well-scaffolded assemblies — for per-contig/unscaffolded assemblies, whose hit coordinates are contig-local rather than genomic, a bounded tolerance rejects valid matches.
+- `--location_tolerance`: (Optional) Max bp between a mappy hit's reference start and the expected SV locus for the hit to count; default **unbounded**. Bounding it is only safe for well-scaffolded assemblies — for per-contig/unscaffolded assemblies, whose hit coordinates are contig-local rather than genomic, a bounded tolerance rejects valid matches. In a `--config` YAML, write infinity as `.inf` (bare `inf` is parsed as a string).
 - `--chrom_cache`: (Optional) Directory to save/load the per-chromosome `.mmi` indices (defaults to temporary space).
 - `--report`: (Optional) `none` (default) or `json`. `json` writes a per-SV evaluation sidecar (see "Per-SV evaluation report" below) alongside the log. Off by default; the log and score table are identical either way.
 
@@ -21,13 +26,14 @@ Read-based evaluation parameters (see "Read-based evaluation" below):
 - `--min_read_support`: min number of spanning reads that must clear the threshold (default 1).
 - `--max_reads_per_site`: cap on candidate reads gathered per locus (default 1000).
 
+- `--groovi_config`: (Optional) A groovi *call* config used to **infer** unset params (`bam`, `classified`, `reference`, `sample`, `calls`) from groovi's internal folder layout, so those can be omitted. This was the old `--config`. See notes.
+
 Optionally include the following parameters to generate IGV session xmls to visualize the predictions
-- `--config`: (Optional) Groovi call config used to infer other params (will attempt to infer `bam`, `classified`, `reference`, `sample`, and `calls`, so those can be omitted if they are in the config file). See notes.
 - `--bam`: (Optional) BAM file for generating IGV config
 - `--classified`: (Optional) VCF file of groovi-style classified breakpoints for IGV config
 - `--igv_prefix`: (Optional) Path prefix prepended to file paths in the generated IGV session XMLs (e.g., a local mount point for files that live on a remote server).
 
-Path resolution when inferring from a config file is somewhat sensitive to how we organize files internally, so it may not work in other environments. It's just a shortcut for manually inputting each parameter, so it should be possible to work around.
+Path resolution when inferring from a `--groovi_config` file is sensitive to how those files are organized internally, so it may not work in other environments. It is just a shortcut for supplying each parameter manually (or in an svrecon `--config`), so it can be worked around.
 
 ## Example calls 
 - `python score_alignments.py --reference ./data/genome.chr21.fa --sample ./sim_data/sim.combined.fa --calls ./sim_data/sim.vcf --buffer 500`
@@ -147,10 +153,10 @@ reconstructed subsequence, not per VCF record.
 
 **Notes**
 
-- Extracting parameters from groovi config files is very dependent on expected folder structures and likely to break.
+- `--groovi_config` inference is very dependent on groovi's expected folder structure and likely to break.
   - It expects remote servers to be mounted locally
   - It expects a fasta file to be located in a sibling folder of the .bam file, which typically only occurs for synthetic training data.
-  - It expects the call file to be `groovi.vcf` in the config file's results directory
-  - Each of these parameters should be overrided if these conditions aren't met. 
-- The tool writes to a `logs` directory in the working directory, creating it if absent.
+  - It expects the call file to be `groovi.vcf` in the groovi config's results directory
+  - Each of these parameters should be overridden (via `--config` or a flag) if these conditions aren't met.
+- Outputs go to the `--config` file's directory; without a `--config`, the tool writes to a `logs` directory in the working directory, creating it if absent.
 - If the tool doesn't find a `.mmi` index file attached to the `.fa` sample assembly, it creates one as a cache and stores it in temporary space

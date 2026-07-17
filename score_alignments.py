@@ -18,8 +18,10 @@ from intervaltree import IntervalTree
 from pysam import VariantRecord
 from tqdm import tqdm
 
+import yaml
+
 from sv_scoring_utils import (
-    get_chrom_aligner, update_args_from_config, get_start_stop,
+    get_chrom_aligner, update_args_from_groovi_config, get_start_stop,
     reverse_complement, check_match, load_fasta_to_bytes, run_edlib_fallback,
     edlib_to_cigartuples, validate_junctions_from_cigar,
     BamReader, run_read_edlib
@@ -792,50 +794,97 @@ def main():
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H%M%S')
 
     parser = argparse.ArgumentParser(description='Score VCF SV calls against a reference and sample genome')
-    parser.add_argument('--reference', help='Reference genome .fa file', dest='reference')
-    parser.add_argument('--sample', help='Sample genome .fa file(s)', dest='sample', nargs='+')
-    parser.add_argument('--calls', help='VCF containing called SVs', dest='calls')
+    # An svrecon config (YAML whose keys mirror these flags) supplies any of the params below;
+    # logs and reports are written to that config's directory. Explicit CLI flags override the
+    # config. Mergeable params default to None so we can tell "unset" from an explicit value.
+    parser.add_argument('--config', help='svrecon YAML config; keys mirror these flags. Logs and '
+                        'reports are written to this file\'s directory.', dest='config')
+    parser.add_argument('--groovi_config', help='(Optional) groovi call config used to INFER unset '
+                        'params (reference/sample/bam/calls/classified). Was --config previously.',
+                        dest='groovi_config', default=None)
+    parser.add_argument('--reference', help='Reference genome .fa file', dest='reference', default=None)
+    parser.add_argument('--sample', help='Sample genome .fa file(s)', dest='sample', nargs='+', default=None)
+    parser.add_argument('--calls', help='VCF containing called SVs', dest='calls', default=None)
     parser.add_argument('--location_tolerance',
                         help='BP tolerance between a mappy hit and the expected SV location; '
                              'default unbounded (recommended for per-contig/unscaffolded assemblies '
                              'whose hit coordinates are contig-local, not genomic)',
-                        type=float, default=float('inf'))
-    parser.add_argument('--buffer', help='Subsequence context buffer', type=int, dest='buffer', default=500)
+                        type=float, default=None)
+    parser.add_argument('--buffer', help='Subsequence context buffer (default 500)', type=int, dest='buffer', default=None)
     parser.add_argument('--gap_file', help='Tab-delimited file containing regions to omit (e.g., centromere and telomere)',
                         default=None)
-    parser.add_argument('--config', help='Groovi call config used to infer other params', dest='config')
-    parser.add_argument('--bam', help='BAM file for generating IGV config', dest='bam')
+    parser.add_argument('--bam', help='BAM file for generating IGV config', dest='bam', default=None)
     parser.add_argument('--classified', help='VCF file of groovi-style classified breakpoints for IGV config',
-                        dest='classified')
-    parser.add_argument('--igv_prefix', help='Prefix for igv session paths', default='', dest='igv_prefix')
+                        dest='classified', default=None)
+    parser.add_argument('--igv_prefix', help='Prefix for igv session paths (default empty)', dest='igv_prefix', default=None)
     parser.add_argument('--chrom_cache', help='Directory to save/load per-chromosome MMI indices.', default=None)
-    parser.add_argument('--eval_mode', choices=['assembly', 'reads', 'both'], default='assembly',
-                        help="Validation source: 'assembly' (default, current behavior), 'reads' "
+    parser.add_argument('--eval_mode', choices=['assembly', 'reads', 'both'], default=None,
+                        help="Validation source: 'assembly' (default), 'reads' "
                              "(skip the assembly entirely and validate against BAM long reads), or "
                              "'both' (assembly first, reads to rescue misses).")
-    parser.add_argument('--read_error_threshold', type=float, default=0.1,
-                        help='Max edlib error rate for a read to validate a reconstruction (read modes). '
-                             'Keep <= the assembly error threshold (0.1) for consistent hit/miss calls.')
-    parser.add_argument('--min_read_support', type=int, default=1,
-                        help='Min number of spanning reads that must clear --read_error_threshold (read modes).')
-    parser.add_argument('--max_reads_per_site', type=int, default=1000,
-                        help='Cap on candidate reads gathered per SV locus (read modes); '
+    parser.add_argument('--read_error_threshold', type=float, default=None,
+                        help='Max edlib error rate for a read to validate a reconstruction (read modes; '
+                             'default 0.1). Keep <= the assembly error threshold (0.1) for consistent hit/miss calls.')
+    parser.add_argument('--min_read_support', type=int, default=None,
+                        help='Min number of spanning reads that must clear --read_error_threshold (read modes; default 1).')
+    parser.add_argument('--max_reads_per_site', type=int, default=None,
+                        help='Cap on candidate reads gathered per SV locus (read modes; default 1000); '
                              'bounds work on deep read pileups.')
-    parser.add_argument('--report', choices=['none', 'json'], default='none',
+    parser.add_argument('--report', choices=['none', 'json'], default=None,
                         help="Write a per-SV evaluation sidecar. 'json' emits "
                              "<logbasename>.eval.jsonl next to the log (one JSON record per SV: "
                              "svid, outcome, tier, and per-segment status/reason/source/error/"
                              "junctions). Default 'none' (log and score table are unchanged).")
     args = parser.parse_args()
 
-    os.makedirs('./logs', exist_ok=True)
-    log_basename = log_name_from_config(args.config) or f'reconstruction_{timestamp}'
+    # --- Resolve the effective config: CLI flag > svrecon --config value > groovi inference > default ---
+    MERGE_KEYS = ['reference', 'sample', 'calls', 'bam', 'classified', 'gap_file', 'chrom_cache',
+                  'igv_prefix', 'eval_mode', 'buffer', 'location_tolerance', 'read_error_threshold',
+                  'min_read_support', 'max_reads_per_site', 'report', 'groovi_config']
+    cfg, unknown_keys = {}, []
+    if args.config:
+        with open(args.config) as f:
+            cfg = yaml.safe_load(f) or {}
+        unknown_keys = sorted(set(cfg) - set(MERGE_KEYS))
+        for k in MERGE_KEYS:                       # svrecon config fills anything not set on the CLI
+            if getattr(args, k) is None and k in cfg:
+                setattr(args, k, cfg[k])
+
+    if args.groovi_config:                          # groovi inference fills anything still unset
+        args = update_args_from_groovi_config(args, args.groovi_config)
+
+    defaults = {'eval_mode': 'assembly', 'buffer': 500, 'location_tolerance': float('inf'),
+                'igv_prefix': '', 'read_error_threshold': 0.1, 'min_read_support': 1,
+                'max_reads_per_site': 1000, 'report': 'none'}
+    for k, v in defaults.items():
+        if getattr(args, k) is None:
+            setattr(args, k, v)
+
+    # YAML already infers int/float for numeric params (write infinity as `.inf`); a bad value
+    # crashes on use. But a wrong eval_mode/report from the config does NOT crash -- it silently
+    # mis-scores or skips the report -- so validate those. Also accept a scalar `sample:` path.
+    if isinstance(args.sample, str):
+        args.sample = [args.sample]
+    if args.eval_mode not in ('assembly', 'reads', 'both'):
+        parser.error(f"eval_mode must be assembly|reads|both, got {args.eval_mode!r}")
+    if args.report not in ('none', 'json'):
+        parser.error(f"report must be none|json, got {args.report!r}")
+
+    # Outputs live beside the svrecon config (the experiment dir); without one, fall back to
+    # ./logs with the historical experiment-derived name (from --groovi_config) or a timestamp.
+    if args.config:
+        output_dir = os.path.dirname(os.path.abspath(args.config))
+        log_basename = 'reconstruction'
+    else:
+        output_dir = './logs'
+        log_basename = log_name_from_config(args.groovi_config) or f'reconstruction_{timestamp}'
+    os.makedirs(output_dir, exist_ok=True)
     # Keep eval modes in separate logs so a read-based run doesn't overwrite the
-    # assembly baseline for the same experiment ('assembly' keeps the bare name).
+    # assembly baseline ('assembly' keeps the bare name).
     if args.eval_mode != 'assembly':
         log_basename += f'.{args.eval_mode}'
-    log_filename = os.path.join('./logs', f'{log_basename}.log')
-    report_path = os.path.join('./logs', f'{log_basename}.eval.jsonl') if args.report == 'json' else None
+    log_filename = os.path.join(output_dir, f'{log_basename}.log')
+    report_path = os.path.join(output_dir, f'{log_basename}.eval.jsonl') if args.report == 'json' else None
 
     file_handler = logging.FileHandler(log_filename, mode='w')
     file_handler.setLevel(logging.DEBUG)
@@ -851,11 +900,11 @@ def main():
     )
 
     logger.info(f'Logging to {log_filename}')
-    logger.info(f'Config: {vars(args)}')
-
     if args.config:
-        logger.info(f'Inferring params from {args.config}')
-        args = update_args_from_config(args)
+        logger.info(f'Loaded svrecon config: {args.config} (outputs -> {output_dir})')
+    if unknown_keys:
+        logger.warning(f'Ignoring unrecognized keys in {args.config}: {unknown_keys}')
+    logger.info(f'Config: {vars(args)}')
 
     global global_ref
     global global_sample

@@ -163,12 +163,16 @@ def get_chrom_aligner(sample_fasta: str, chrom: str, cache_dir: str, align_param
     return aligner
 
 
-def update_args_from_config(args):
-    """Infer parameters from groovi config files"""
-    with open(args.config, 'r') as file:
+def update_args_from_groovi_config(args, groovi_config_path):
+    """Infer parameters from a groovi call config file.
+
+    Fills only params that are still unset (None) on `args`, so it never overrides a
+    value given explicitly on the CLI or in an svrecon --config. Path resolution is
+    sensitive to the internal groovi folder layout (see README notes)."""
+    with open(groovi_config_path, 'r') as file:
         config_data = yaml.safe_load(file)
 
-        experiment_dir = str(Path(args.config).parent.resolve())
+        experiment_dir = str(Path(groovi_config_path).parent.resolve())
         results_dir = os.path.join(experiment_dir, "results")
         if args.calls is None:
             args.calls = os.path.join(results_dir, 'groovi.vcf')
@@ -194,7 +198,8 @@ def update_args_from_config(args):
         data_index = fa_path.parts.index('data')
         fa_path = Path(*fa_path.parts[data_index:])
 
-        args.classified = os.path.join(experiment_dir, "results/groovi_bkps_classified.vcf")
+        if args.classified is None:
+            args.classified = os.path.join(experiment_dir, "results/groovi_bkps_classified.vcf")
 
         if args.reference is None:
             args.reference = str(prefix / fa_path)
