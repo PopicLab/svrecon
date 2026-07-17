@@ -27,6 +27,12 @@ from sv_scoring_utils import (
 logger = logging.getLogger(__name__)
 
 MIN_EDLIB_QUERY = 5000
+# Search-window radius for the assembly edlib fallback (a legacy path for short
+# queries mappy missed). This is a COST bound on an unbounded O(n*m) edlib search,
+# kept separate from --location_tolerance: the latter only filters mappy hits by
+# genomic position and defaults to infinity (meaningless for unscaffolded, per-
+# contig assemblies where a hit's r_st is contig-local, not a genomic coordinate).
+EDLIB_FALLBACK_MAX_TOLERANCE = 10_000_000
 JUNCTION_VALIDATION_WINDOW = 300
 
 global_ref = None
@@ -317,6 +323,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
             seq_inconclusive = False  # reads overlap but none span the full resulting allele
             seq_reads_aborted = False  # spanning reads existed but all exceeded the 2x edlib bound
             seq_source = None  # which tier validated this subsequence: assembly | edlib | reads
+            seq_passed = False  # a tier validated it within ITS OWN threshold (+ junctions)
 
             # Read-based evaluation
             if global_eval_mode in ('reads', 'both'):
@@ -342,6 +349,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                                                              error_threshold=global_read_error_threshold):
                                 best_score = min(best_score, read_res['error'])
                                 seq_source = 'reads'
+                                seq_passed = True
                             else:
                                 seq_had_junction_rejection = True
                                 seq_best_rejected_err = min(seq_best_rejected_err, read_res['error'])
@@ -352,7 +360,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                         # spanning reads existed but all exceeded the 2x edlib bound
                         seq_reads_aborted = True
 
-            if global_eval_mode in ('assembly', 'both') and best_score > error_threshold and chrom in global_aligners:
+            if global_eval_mode in ('assembly', 'both') and not seq_passed and chrom in global_aligners:
                 # Assembly check (Tier 2). In 'both' mode this only runs when the
                 # reads above did not already validate the subsequence. Align the
                 # reconstructed subsequence to the per-chromosome assembly
@@ -374,6 +382,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                                 best_score = min(best_score, err)
                                 mappy_matched = True
                                 seq_source = 'assembly'
+                                seq_passed = True
                             else:
                                 seq_had_junction_rejection = True
                                 seq_best_rejected_err = min(seq_best_rejected_err, err)
@@ -381,7 +390,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                         else:
                             seq_best_fail_err = err if seq_best_fail_err is None else min(seq_best_fail_err, err)
 
-            if global_eval_mode in ('assembly', 'both') and best_score > error_threshold and len(sequence) < MIN_EDLIB_QUERY and not mappy_matched:
+            if global_eval_mode in ('assembly', 'both') and not seq_passed and len(sequence) < MIN_EDLIB_QUERY and not mappy_matched:
                 # Assembly edlib fallback: for short subsequences that mappy
                 # failed to align (mappy can miss very short queries), retry with
                 # edlib against expanding windows of the assembly, applying the
@@ -393,7 +402,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                         chrom,
                         query['location'],
                         int(buffer),
-                        int(location_tolerance),
+                        EDLIB_FALLBACK_MAX_TOLERANCE,
                         error_threshold,
                         samp_bytes
                     )
@@ -406,6 +415,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                                                              error_threshold=error_threshold):
                                 best_score = min(best_score, edlib_res['error'])
                                 seq_source = 'edlib'
+                                seq_passed = True
                             else:
                                 seq_had_junction_rejection = True
                                 seq_best_rejected_err = min(seq_best_rejected_err, edlib_res['error'])
@@ -427,7 +437,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
             #                   absence of a read is not evidence against the call.
             #   NOT_FOUND    -- assembly tier produced nothing to compare against.
             #                   In assembly mode absence IS the verdict -> fail.
-            if best_score <= error_threshold:
+            if seq_passed:
                 status, reason = 'pass', 'pass'
             elif seq_had_junction_rejection or seq_saw_candidate or seq_reads_aborted:
                 status = 'fail'
@@ -736,8 +746,11 @@ def main():
     parser.add_argument('--reference', help='Reference genome .fa file', dest='reference')
     parser.add_argument('--sample', help='Sample genome .fa file(s)', dest='sample', nargs='+')
     parser.add_argument('--calls', help='VCF containing called SVs', dest='calls')
-    parser.add_argument('--location_tolerance', help='BP tolerance for matching SV location', type=int,
-                        default=10000000)
+    parser.add_argument('--location_tolerance',
+                        help='BP tolerance between a mappy hit and the expected SV location; '
+                             'default unbounded (recommended for per-contig/unscaffolded assemblies '
+                             'whose hit coordinates are contig-local, not genomic)',
+                        type=float, default=float('inf'))
     parser.add_argument('--buffer', help='Subsequence context buffer', type=int, dest='buffer', default=500)
     parser.add_argument('--gap_file', help='Tab-delimited file containing regions to omit (e.g., centromere and telomere)',
                         default=None)
