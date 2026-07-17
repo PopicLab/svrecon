@@ -13,8 +13,11 @@ covered here -- it is inlined and would require full VCF/BAM/aligner fixtures.
 """
 import unittest
 
-from sv_scoring_utils import reverse_complement, edlib_score, run_read_edlib
+from sv_scoring_utils import reverse_complement, edlib_score, run_read_edlib, validate_junctions_from_cigar
 import score_alignments as SA
+
+# BAM CIGAR op codes used to build fixtures below.
+SEQ_MATCH, SEQ_MISMATCH = 7, 8
 
 
 class TestReverseComplement(unittest.TestCase):
@@ -144,6 +147,47 @@ class TestGetChangedSubsequences(unittest.TestCase):
         junc[2] = True
         q = SA.get_changed_subsequences(new_seq, changed, junc, 5, 0, 5, 'sv3', 'chr1', 'DUP')
         self.assertEqual(q[0]['result_len'], 8)
+
+
+class TestValidateJunctionsFromCigar(unittest.TestCase):
+    """The validator returns an ordered list of per-junction {'error','passed'} dicts
+    (not a bool). Overall verdict is all(j['passed'] for j in results); an empty list
+    (no in-scope junction) passes. It short-circuits on the first failing junction."""
+
+    def test_clean_match_passes(self):
+        # 200 exact matches; a junction mid-alignment sees zero local error.
+        results = validate_junctions_from_cigar([(200, SEQ_MATCH)], [100], window=50, error_threshold=0.1)
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]['passed'])
+        self.assertEqual(results[0]['error'], 0.0)  # native number
+        self.assertTrue(all(j['passed'] for j in results))
+
+    def test_mismatch_cluster_at_junction_fails(self):
+        # 20 mismatches inside a 100bp window (err 0.2 > 0.1) -> the junction fails.
+        cig = [(50, SEQ_MATCH), (20, SEQ_MISMATCH), (130, SEQ_MATCH)]
+        results = validate_junctions_from_cigar(cig, [60], window=50, error_threshold=0.1)
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0]['passed'])
+        self.assertAlmostEqual(results[0]['error'], 0.2, places=6)  # native number
+        self.assertFalse(all(j['passed'] for j in results))
+
+    def test_short_circuits_on_first_failure(self):
+        # Two junctions, the first fails -> the list ends at it; the second is not checked.
+        cig = [(50, SEQ_MATCH), (20, SEQ_MISMATCH), (130, SEQ_MATCH)]
+        results = validate_junctions_from_cigar(cig, [60, 500], window=50, error_threshold=0.1)
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0]['passed'])
+
+    def test_out_of_scope_junction_skipped(self):
+        # A junction beyond this alignment segment is not counted (empty -> passes).
+        results = validate_junctions_from_cigar([(200, SEQ_MATCH)], [10000], window=50)
+        self.assertEqual(results, [])
+        self.assertTrue(all(j['passed'] for j in results))
+
+    def test_no_junctions_returns_empty_and_passes(self):
+        results = validate_junctions_from_cigar([(200, SEQ_MATCH)], [], window=50)
+        self.assertEqual(results, [])
+        self.assertTrue(all(j['passed'] for j in results))
 
 
 if __name__ == '__main__':

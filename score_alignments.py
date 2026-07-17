@@ -1,6 +1,7 @@
 import argparse
 import datetime
 import hashlib
+import json
 import logging
 import os
 import sys
@@ -286,6 +287,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
         subseq_diagnostics = []
         subseq_sources = []
         subseq_status = []   # per-subsequence: 'pass' | 'fail' | 'inconclusive'
+        segments = []        # structured per-subsequence detail for the optional JSON report
         mappy_passed_all = True
 
         sv_junction_rejected = False
@@ -324,6 +326,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
             seq_reads_aborted = False  # spanning reads existed but all exceeded the 2x edlib bound
             seq_source = None  # which tier validated this subsequence: assembly | edlib | reads
             seq_passed = False  # a tier validated it within ITS OWN threshold (+ junctions)
+            seq_junctions = []  # per-junction results from the tier whose check we report
 
             # Read-based evaluation
             if global_eval_mode in ('reads', 'both'):
@@ -344,9 +347,12 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                         seq_saw_candidate = True
                         if read_res['error'] <= global_read_error_threshold:
                             cigartuples = edlib_to_cigartuples(read_res['cigar'])
-                            if validate_junctions_from_cigar(cigartuples, query.get('junctions', []),
+                            junc = validate_junctions_from_cigar(cigartuples, query.get('junctions', []),
                                                              window=JUNCTION_VALIDATION_WINDOW,
-                                                             error_threshold=global_read_error_threshold):
+                                                             error_threshold=global_read_error_threshold)
+                            if not seq_passed:
+                                seq_junctions = junc
+                            if all(j['passed'] for j in junc):
                                 best_score = min(best_score, read_res['error'])
                                 seq_source = 'reads'
                                 seq_passed = True
@@ -375,10 +381,13 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                         seq_saw_candidate = True
                         err = check_match(a, sequence)
                         if err <= error_threshold:
-                            if validate_junctions_from_cigar(a.cigar, query.get('junctions', []),
+                            junc = validate_junctions_from_cigar(a.cigar, query.get('junctions', []),
                                                              window=JUNCTION_VALIDATION_WINDOW,
                                                              q_st=a.q_st,
-                                                             error_threshold=error_threshold):
+                                                             error_threshold=error_threshold)
+                            if not seq_passed:
+                                seq_junctions = junc
+                            if all(j['passed'] for j in junc):
                                 best_score = min(best_score, err)
                                 mappy_matched = True
                                 seq_source = 'assembly'
@@ -410,9 +419,12 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
                         seq_saw_candidate = True
                         if edlib_res['error'] <= error_threshold:
                             cigartuples = edlib_to_cigartuples(edlib_res['cigar'])
-                            if validate_junctions_from_cigar(cigartuples, query.get('junctions', []),
+                            junc = validate_junctions_from_cigar(cigartuples, query.get('junctions', []),
                                                              window=JUNCTION_VALIDATION_WINDOW,
-                                                             error_threshold=error_threshold):
+                                                             error_threshold=error_threshold)
+                            if not seq_passed:
+                                seq_junctions = junc
+                            if all(j['passed'] for j in junc):
                                 best_score = min(best_score, edlib_res['error'])
                                 seq_source = 'edlib'
                                 seq_passed = True
@@ -458,6 +470,25 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
             subseq_diagnostics.append(f'{reason}:{err_str}')
             subseq_sources.append(seq_source)
             subseq_status.append(status)
+
+            # Structured per-subsequence record for the optional JSON report. `error` is the
+            # winning error when the subsequence passed, else the best failing error, else None
+            # (nothing testable produced a number).
+            if status == 'pass':
+                seg_error = float(f'{best_score:.4g}')
+            elif seq_best_fail_err is not None:
+                seg_error = float(f'{seq_best_fail_err:.4g}')
+            else:
+                seg_error = None
+            segments.append({
+                'chrom': chrom,
+                'ref_start': query['location'],
+                'status': status,
+                'reason': reason,
+                'source': seq_source,
+                'error': seg_error,
+                'junctions': seq_junctions,
+            })
 
             if best_score > error_threshold and seq_had_junction_rejection:
                 sv_junction_rejected = True
@@ -529,6 +560,7 @@ def score_sv(records: List[VariantRecord], buffer: Union[int, float], location_t
             'match_scores': match_scores,
             'sequences': sequences,
             'subseq_diagnostics': subseq_diagnostics,
+            'segments': segments,
         }
     except Exception as e:
         error_msg = f'Worker failed for SVID: {records[0].info.get("SVID", "Unknown")}. Error: {e}\n{traceback.format_exc()}'
@@ -583,7 +615,7 @@ class AlignScorer(object):
         self.variants = grouped_variants
         self.vcf_header = vcf_in.header
 
-    def score_all(self, location_tolerance=float('inf'), error_threshold=0.1, n_threads=40):
+    def score_all(self, location_tolerance=float('inf'), error_threshold=0.1, n_threads=40, report_path=None):
         total_calls = Counter()
         correct_calls = Counter()
         inconclusive_calls = Counter()  # reads mode: no read spans the full resulting allele
@@ -595,6 +627,10 @@ class AlignScorer(object):
         overall_inconclusive = 0
         edlib_rescues = 0
         precision = {}
+
+        # Optional per-SV JSON sidecar (one record per line). Additive: it does not affect the
+        # log output or the score table. Written from this single consumer thread, so no lock.
+        report_fh = open(report_path, 'w') if report_path else None
 
         with ThreadPoolExecutor(max_workers=n_threads) as executor:
             futures = {
@@ -627,6 +663,15 @@ class AlignScorer(object):
                         line += f'\t{result.get("subseq_diagnostics", [])}'
                     logger.debug(line)
 
+                    if report_fh is not None:
+                        report_fh.write(json.dumps({
+                            'svid': svid,
+                            'svtype': sv_type,
+                            'outcome': outcome,
+                            'tier': result.get('tier'),
+                            'segments': result.get('segments', []),
+                        }) + '\n')
+
                     total_calls[sv_type] += 1
                     overall_count += 1
 
@@ -656,6 +701,10 @@ class AlignScorer(object):
 
                 except Exception as exc:
                     logger.error(f'SV processing generated an exception: {exc}')
+
+        if report_fh is not None:
+            report_fh.close()
+            logger.info(f'Wrote per-SV eval report: {report_path}')
 
         logger.info(f'Total SVs rescued by edlib fallback: {edlib_rescues}')
         overall_miss = overall_count - overall_correct - overall_inconclusive
@@ -772,6 +821,11 @@ def main():
     parser.add_argument('--max_reads_per_site', type=int, default=1000,
                         help='Cap on candidate reads gathered per SV locus (read modes); '
                              'bounds work on deep read pileups.')
+    parser.add_argument('--report', choices=['none', 'json'], default='none',
+                        help="Write a per-SV evaluation sidecar. 'json' emits "
+                             "<logbasename>.eval.jsonl next to the log (one JSON record per SV: "
+                             "svid, outcome, tier, and per-segment status/reason/source/error/"
+                             "junctions). Default 'none' (log and score table are unchanged).")
     args = parser.parse_args()
 
     os.makedirs('./logs', exist_ok=True)
@@ -781,6 +835,7 @@ def main():
     if args.eval_mode != 'assembly':
         log_basename += f'.{args.eval_mode}'
     log_filename = os.path.join('./logs', f'{log_basename}.log')
+    report_path = os.path.join('./logs', f'{log_basename}.eval.jsonl') if args.report == 'json' else None
 
     file_handler = logging.FileHandler(log_filename, mode='w')
     file_handler.setLevel(logging.DEBUG)
@@ -881,7 +936,7 @@ def main():
         global_bam_reader = BamReader(args.bam)
 
     precision, correct_calls, total_calls, inconclusive_calls, assembly_hits, read_hits = scorer.score_all(
-        location_tolerance=args.location_tolerance)
+        location_tolerance=args.location_tolerance, report_path=report_path)
 
     df = pd.DataFrame({
         'correct_calls': correct_calls,

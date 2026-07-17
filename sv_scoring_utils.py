@@ -26,10 +26,17 @@ def edlib_to_cigartuples(cigar_str: str) -> List[Tuple[int, int]]:
 
 
 def validate_junctions_from_cigar(cigartuples: List[Tuple[int, int]], junctions: List[int], q_st: int = 0,
-                                  window: int = 150, error_threshold: float = 0.1) -> bool:
+                                  window: int = 150, error_threshold: float = 0.1) -> List[Dict]:
     """
     Calculates the local error rate within a specified window around structural variant junctions.
     Uses q_st to synchronize absolute junction indices with the relative CIGAR string.
+
+    Returns an ordered list of per-junction results, one ``{'error', 'passed'}`` dict per
+    in-scope junction in the order checked. Evaluation short-circuits on the first junction
+    whose local error exceeds ``error_threshold``: that failing junction is the last entry and
+    later in-scope junctions are not checked. A junction whose window contains no assessable
+    bases is recorded as ``{'error': None, 'passed': True}``. Callers derive the overall verdict
+    as ``all(j['passed'] for j in results)`` (an empty list -- no in-scope junctions -- passes).
 
     Official SAM/BAM CIGAR Specification: https://samtools.github.io/hts-specs/SAMv1.pdf
     """
@@ -55,6 +62,7 @@ def validate_junctions_from_cigar(cigartuples: List[Tuple[int, int]], junctions:
     cigar_q_len = sum(length for length, op in cigartuples if op in QUERY_CONSUMING_OPS)
     q_en = q_st + cigar_q_len
 
+    results = []
     for j_idx in junctions:
         # Only validate junctions that fall within the scope of this alignment segment.
         # This prevents "False Misses" when Mappy splits chimeric alignments.
@@ -104,13 +112,21 @@ def validate_junctions_from_cigar(cigartuples: List[Tuple[int, int]], junctions:
             if op in QUERY_CONSUMING_OPS:
                 query_cursor += length
 
-        # Validate the error rate if the window contained sequence data
+        # Record the per-junction result. Windows with no assessable bases cannot be
+        # judged, so they are treated as passing (matching the original skip behavior).
         if total_bases > 0:
             err_rate = errors / total_bases
-            if err_rate > error_threshold:
-                return False
+            passed = err_rate <= error_threshold
+            # Store as a native JSON number at 4 sig figs; small rates keep precision and
+            # serialize in exponent form (e.g. 8.6e-06) rather than flattening to 0.
+            results.append({'error': float(f'{err_rate:.4g}'), 'passed': passed})
+            # Short-circuit on the first failing junction (original return-False behavior).
+            if not passed:
+                break
+        else:
+            results.append({'error': None, 'passed': True})
 
-    return True
+    return results
 
 def get_chrom_aligner(sample_fasta: str, chrom: str, cache_dir: str, align_params: dict,
                       threads: int = 4) -> mappy.Aligner:

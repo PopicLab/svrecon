@@ -12,6 +12,7 @@ Run with the following parameters.
 - `--gap_file`: (Optional) Tab-delimited file containing regions to omit (e.g., centromere and telomere)
 - `--location_tolerance`: (Optional) Max bp between a mappy hit's reference start and the expected SV locus for the hit to count; default **unbounded**. Bounding it is only safe for well-scaffolded assemblies — for per-contig/unscaffolded assemblies, whose hit coordinates are contig-local rather than genomic, a bounded tolerance rejects valid matches.
 - `--chrom_cache`: (Optional) Directory to save/load the per-chromosome `.mmi` indices (defaults to temporary space).
+- `--report`: (Optional) `none` (default) or `json`. `json` writes a per-SV evaluation sidecar (see "Per-SV evaluation report" below) alongside the log. Off by default; the log and score table are identical either way.
 
 Read-based evaluation parameters (see "Read-based evaluation" below):
 - `--eval_mode`: `assembly` (default), `reads`, or `both`. `reads` validates each call against the long reads in `--bam` instead of the assembly; `both` is **reads-first** — it consults the reads (Tier 1) and only falls back to the assembly (Tier 2) for events no single read can span.
@@ -108,6 +109,41 @@ assembly only for alleles longer than any single read. In `both` mode, an SV is
 `inconclusive` only when neither tier could test it (no read spans the allele and
 the assembly produced no candidate alignment); if either tier aligns a candidate
 that disagrees, it is a genuine `miss`.
+
+**Per-SV evaluation report (`--report json`)**
+
+The score table and log summarize the run; the log's per-SV lines give one outcome
+(plus tier or a compact diagnostic) per call. For deeper inspection — *which checks
+ran, which passed, and the local errors at each breakpoint* — pass `--report json`.
+It writes a JSONL sidecar next to the log (`logs/<logbasename>.eval.jsonl`), one
+record per SV. This is additive: the log and score table are byte-for-byte identical
+whether or not it is enabled.
+
+Each record holds only what the *evaluation* concluded; join back to the call VCF on
+`svid` for coordinates, types, and operations (which are not duplicated here):
+
+```json
+{"svid": "sv10319",
+ "svtype": "dupINVdup",         // redundant with the VCF; included for quick scanning
+ "outcome": "hit",              // hit | miss | inconclusive
+ "tier": "assembly",            // read | assembly | null (null unless hit)
+ "segments": [                  // one entry per reconstructed subsequence
+   {"chrom": "chr3",            // chromosome the subsequence maps to (pairs with ref_start)
+    "ref_start": 187135426,     // reference coord of the subsequence window's left anchor
+    "status": "pass",           // pass | fail | inconclusive
+    "reason": "pass",           // pass | junction_failed | over_error_threshold |
+                                //   no_reads | inconclusive | no_aligner | no_alignment_in_window
+    "source": "assembly",       // reads | assembly | edlib | null (tier that decided it)
+    "error": 0.0696,            // number, 4 sig figs: winning error if pass, best failing error if
+                                //   fail, null if untestable. Tiny rates keep precision and serialize
+                                //   in exponent form (e.g. 8.6e-06).
+    "junctions": [              // per-junction results in the order checked; truncated at the
+      {"error": 0.0, "passed": true}, ...]}]}  // first failure. Empty if no junction in scope.
+```
+
+Note the `ref_start` is the window anchor (≈ breakpoint − buffer), not an exact
+breakpoint, and a multi-operation complex SV produces one `segments` entry per
+reconstructed subsequence, not per VCF record.
 
 **Notes**
 
