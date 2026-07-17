@@ -1,4 +1,6 @@
-# Reconstruction Scorer
+# svrecon
+
+**svrecon** — structural-variant reconstruction scoring. Validate called SVs by rebuilding each variant's alt allele and checking whether real sequence supports it, against a sample assembly (`assembly`), long reads (`reads`), or reads-first with assembly fallback (`both`).
 
 ## Instructions for running:
 
@@ -8,6 +10,8 @@ Run with the following parameters.
 - `--calls`: Path to .vcf file containing called SVs in InsilicoSV format
 - `--buffer`:  Subsequence context buffer size, number of bps before and after reconstructed SV to compare
 - `--gap_file`: (Optional) Tab-delimited file containing regions to omit (e.g., centromere and telomere)
+- `--location_tolerance`: (Optional) Max bp between a mappy hit's reference start and the expected SV locus for the hit to count; default **unbounded**. Bounding it is only safe for well-scaffolded assemblies — for per-contig/unscaffolded assemblies, whose hit coordinates are contig-local rather than genomic, a bounded tolerance rejects valid matches.
+- `--chrom_cache`: (Optional) Directory to save/load the per-chromosome `.mmi` indices (defaults to temporary space).
 
 Read-based evaluation parameters (see "Read-based evaluation" below):
 - `--eval_mode`: `assembly` (default), `reads`, or `both`. `reads` validates each call against the long reads in `--bam` instead of the assembly; `both` is **reads-first** — it consults the reads (Tier 1) and only falls back to the assembly (Tier 2) for events no single read can span.
@@ -20,6 +24,7 @@ Optionally include the following parameters to generate IGV session xmls to visu
 - `--config`: (Optional) Groovi call config used to infer other params (will attempt to infer `bam`, `classified`, `reference`, `sample`, and `calls`, so those can be omitted if they are in the config file). See notes.
 - `--bam`: (Optional) BAM file for generating IGV config
 - `--classified`: (Optional) VCF file of groovi-style classified breakpoints for IGV config
+- `--igv_prefix`: (Optional) Path prefix prepended to file paths in the generated IGV session XMLs (e.g., a local mount point for files that live on a remote server).
 
 Path resolution when inferring from a config file is somewhat sensitive to how we organize files internally, so it may not work in other environments. It's just a shortcut for manually inputting each parameter, so it should be possible to work around.
 
@@ -41,8 +46,8 @@ Complex SVs may include multiple operations, so we extract the subsequence surro
 positions and targets of the included operations, and implement the resulting subsequence after transformation. We extract the sequence plus and minus a buffer of bps around the endpoints. This results in a subsequence that, if the SV is correctly called, should appear in the indicated chromosome of the sample.
 
 - To search the sample for the subsequence, we load the sample into a minimap2 aligner.
-    - Current implementation uses map-pb long read preset for mappy, but this may not be the best setting. The disconnect is that we are seeking the best full match to the query subsequence created by the SV, but aligner objectives can highly score partial matches. We don’t want partial matches, since they will be good partial matches with or without the SV transformations.
-    - After finding alignments, we compute the full edit distance between the query and the match, and if the ratio of edit distance to the query length is below a threshold, it’s considered a match, and the SV is considered **correct**.
+    - Current implementation uses the map-hifi preset for mappy, but this may not be the best setting. The disconnect is that we are seeking the best full match to the query subsequence created by the SV, but aligner objectives can highly score partial matches. We don’t want partial matches, since they will be good partial matches with or without the SV transformations.
+    - After finding alignments, we compute the full edit distance between the query and the match, and a match requires **both** (a) the ratio of edit distance to the query length below a threshold, **and** (b) the SV's breakpoint junctions to validate — the reconstructed adjacencies must align cleanly within a ±300 bp window (`JUNCTION_VALIDATION_WINDOW`) around each junction. Only then is the SV considered **correct**. The junction check catches alignments whose overall error is diluted below threshold by the flanking buffer but that are wrong precisely at the novel adjacency.
 - We run each SV alone, which means the effects of other SVs in the genome (called or not) are ignored. Thus, the raw location of the SV may not be accurate, so we are searching the full chromosome for occurrences of the resulting sequence.
 - This evaluation is usually correct, but it can be wrong in a few circumstances
     - The resulting sequence is in the sample by coincidence, not because of an SV. This likely happens in highly repetitive regions.
@@ -111,5 +116,5 @@ that disagrees, it is a genuine `miss`.
   - It expects a fasta file to be located in a sibling folder of the .bam file, which typically only occurs for synthetic training data.
   - It expects the call file to be `groovi.vcf` in the config file's results directory
   - Each of these parameters should be overrided if these conditions aren't met. 
-- The tool expects a `logs` directory in the working directory.
+- The tool writes to a `logs` directory in the working directory, creating it if absent.
 - If the tool doesn't find a `.mmi` index file attached to the `.fa` sample assembly, it creates one as a cache and stores it in temporary space
