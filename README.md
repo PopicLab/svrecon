@@ -2,11 +2,23 @@
 
 **svrecon** — structural-variant reconstruction scoring. Validate called SVs by rebuilding each variant's alt allele and checking whether real sequence supports it, against a sample assembly (`assembly`), long reads (`reads`), or reads-first with assembly fallback (`both`).
 
+## Installation
+
+svrecon is a Python package (Python ≥ 3.9). Install it and its dependencies from a clone:
+
+```bash
+pip install -e .                                    # editable/dev install
+# or straight from the source repo:
+pip install git+https://github.com/PopicLab/svrecon.git
+```
+
+This puts an `svrecon` command on your `PATH` (equivalently `python -m svrecon`). The C-extension dependencies (`mappy`, `pysam`, `edlib`) ship prebuilt wheels for common Linux/Python combinations; on an unusual platform they build from source and need a C toolchain.
+
 ## Instructions for running:
 
 There are two ways to supply parameters:
 
-- **`--config <experiment>.yaml`** (recommended): an svrecon YAML config whose keys mirror the flags below (e.g. `reference:`, `sample:`, `calls:`, `eval_mode:`, `report:`). **Logs and reports are written to the config file's directory**, so each run is self-contained — create `experiments/hg002_max_support/config.yaml`, then `score_alignments.py --config experiments/hg002_max_support/config.yaml` writes `reconstruction.log` (and `reconstruction.eval.jsonl` when `report: json`) right beside it.
+- **`--config <experiment>.yaml`** (recommended): an svrecon YAML config whose keys mirror the flags below (e.g. `reference:`, `sample:`, `calls:`, `eval_mode:`, `report:`). **Logs and reports are written to the config file's directory**, so each run is self-contained — create `experiments/hg002_max_support/config.yaml`, then `svrecon --config experiments/hg002_max_support/config.yaml` writes `svrecon.log` (and `svrecon.report.jsonl` when `report: json`) right beside it. Re-running in the same directory overwrites those outputs; use a separate config/directory to keep runs side by side.
 - **Explicit flags** (below): usable on their own, or to override individual config values. Precedence is **CLI flag > `--config` value > `--groovi_config` inference > default**. Without `--config`, outputs go to `./logs/`.
 
 Run with the following parameters.
@@ -36,8 +48,9 @@ Optionally include the following parameters to generate IGV session xmls to visu
 Path resolution when inferring from a `--groovi_config` file is sensitive to how those files are organized internally, so it may not work in other environments. It is just a shortcut for supplying each parameter manually (or in an svrecon `--config`), so it can be worked around.
 
 ## Example calls 
-- `python score_alignments.py --reference ./data/genome.chr21.fa --sample ./sim_data/sim.combined.fa --calls ./sim_data/sim.vcf --buffer 500`
-- `python score_alignments.py --reference /data/refs/refdata-hg19-2.1.0/fasta/genome.fa --sample /data/refs/HG002/hg002v1.1.fasta --calls /data/bert/groovi/vcf_export_debug/results/groovi.vcf --gap_file /data/bert/datasets/hg19.gap.txt`
+- `svrecon --config experiments/hg002_max_support/config.yaml`
+- `svrecon --reference ./data/genome.chr21.fa --sample ./sim_data/sim.combined.fa --calls ./sim_data/sim.vcf --buffer 500`
+- `svrecon --reference /data/refs/refdata-hg19-2.1.0/fasta/genome.fa --sample /data/refs/HG002/hg002v1.1.fasta --calls /data/bert/groovi/vcf_export_debug/results/groovi.vcf --gap_file /data/bert/datasets/hg19.gap.txt`
 
 
 
@@ -121,9 +134,9 @@ that disagrees, it is a genuine `miss`.
 The score table and log summarize the run; the log's per-SV lines give one outcome
 (plus tier or a compact diagnostic) per call. For deeper inspection — *which checks
 ran, which passed, and the local errors at each breakpoint* — pass `--report json`.
-It writes a JSONL sidecar next to the log (`logs/<logbasename>.eval.jsonl`), one
-record per SV. This is additive: the log and score table are byte-for-byte identical
-whether or not it is enabled.
+It writes a JSONL sidecar next to the log (`svrecon.report.jsonl` beside a `--config`,
+else `logs/<name>.report.jsonl`), one record per SV. This is additive: the log and
+score table are byte-for-byte identical whether or not it is enabled.
 
 Each record holds only what the *evaluation* concluded; join back to the call VCF on
 `svid` for coordinates, types, and operations (which are not duplicated here):

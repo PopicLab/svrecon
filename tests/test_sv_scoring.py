@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """Unit tests for the reconstruction scorer's pure helpers.
 
-Run:  python -m unittest test_sv_scoring      (from this directory)
-  or: python test_sv_scoring.py
+Run:  python -m pytest tests/      (from the repo root)
+  or: python -m unittest discover tests
 
 Scope: the functions that can be exercised without VCF/BAM/aligner fixtures --
-`reverse_complement`, `edlib_score`, `run_read_edlib` (sv_scoring_utils) and
-`get_changed_subsequences` (score_alignments). Several cases are regression tests
-for bugs fixed while building read-based evaluation; those carry a "regression"
-note. The reason/tier classification inside `score_sv` is intentionally not
-covered here -- it is inlined and would require full VCF/BAM/aligner fixtures.
+`reverse_complement` (svrecon.util), `edlib_score`/`validate_junctions_from_cigar`
+(svrecon.align), `run_read_edlib` (svrecon.reads) and `get_changed_subsequences`
+(svrecon.reconstruct). Several cases are regression tests for bugs fixed while
+building read-based evaluation; those carry a "regression" note. The reason/tier
+classification inside `score_sv` is intentionally not covered here -- it is
+inlined and would require full VCF/BAM/aligner fixtures.
 """
 import unittest
 
-from sv_scoring_utils import reverse_complement, edlib_score, run_read_edlib, validate_junctions_from_cigar
-import score_alignments as SA
+from svrecon.util import reverse_complement
+from svrecon.align import edlib_score, validate_junctions_from_cigar
+from svrecon.reads import run_read_edlib
+from svrecon.reconstruct import get_changed_subsequences
 
 # BAM CIGAR op codes used to build fixtures below.
 SEQ_MATCH, SEQ_MISMATCH = 7, 8
@@ -123,7 +126,7 @@ class TestGetChangedSubsequences(unittest.TestCase):
         changed = [False] * 3 + [True] * 3 + [False] * 3
         junc = [False] * 9
         junc[3] = junc[5] = True
-        q = SA.get_changed_subsequences(new_seq, changed, junc, 5, 100, 2, 'sv1', 'chr1', 'INV')
+        q = get_changed_subsequences(new_seq, changed, junc, 5, 100, 2, 'sv1', 'chr1', 'INV')
         self.assertEqual(len(q), 1)
         self.assertEqual(q[0]['result_len'], 9)
         self.assertEqual(q[0]['sequence'], 'AACGTAAA')  # region +/- buffer, stop+buffer+1
@@ -135,7 +138,7 @@ class TestGetChangedSubsequences(unittest.TestCase):
         changed = [False] * 3 + [True] * 2 + [False] * 3
         junc = [False] * 8
         junc[3] = True
-        q = SA.get_changed_subsequences(new_seq, changed, junc, 5, 0, 1, 'sv2', 'chr1', 'DEL')
+        q = get_changed_subsequences(new_seq, changed, junc, 5, 0, 1, 'sv2', 'chr1', 'DEL')
         self.assertEqual(q[0]['result_len'], 6)
         self.assertEqual(q[0]['sequence'], 'AGG')  # slice [2:7] = [A,'','',G,G]; '' skipped
 
@@ -145,7 +148,7 @@ class TestGetChangedSubsequences(unittest.TestCase):
         changed = [False] * 2 + [True] + [False] * 2
         junc = [False] * 5
         junc[2] = True
-        q = SA.get_changed_subsequences(new_seq, changed, junc, 5, 0, 5, 'sv3', 'chr1', 'DUP')
+        q = get_changed_subsequences(new_seq, changed, junc, 5, 0, 5, 'sv3', 'chr1', 'DUP')
         self.assertEqual(q[0]['result_len'], 8)
 
 
