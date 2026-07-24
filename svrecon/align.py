@@ -20,17 +20,33 @@ def edlib_to_cigartuples(cigar_str: str) -> List[Tuple[int, int]]:
 
 
 def validate_junctions_from_cigar(cigartuples: List[Tuple[int, int]], junctions: List[int], q_st: int = 0,
+                                  q_en: int = None, query_len: int = None, strand: int = 1,
                                   window: int = 150, error_threshold: float = 0.1) -> List[Dict]:
     """
-    Calculates the local error rate within a specified window around structural variant junctions.
-    Uses q_st to synchronize absolute junction indices with the relative CIGAR string.
+    Calculates the local error rate within a window around each structural-variant junction.
+
+    The window is defined in FORWARD-QUERY coordinates ``[j - window, j + window]`` (clamped to
+    ``[0, query_len]``). Two subtleties the aligner introduces are handled explicitly:
+
+    * Soft-clipped flanks. mappy's CIGAR covers only the aligned region ``[q_st, q_en)``; any
+      query base in the window that the aligner clipped (outside that region) is a base where the
+      junction adjacency is NOT actually spanned, so it is counted as an error. Without this a
+      novel junction sitting at the clip boundary (e.g. dupINVdup's outer ``A|c`` / ``a|C``, where
+      only the inverted core matches the reference) would read as clean 0.0 error.
+    * Reverse-strand orientation. A reverse hit's CIGAR walks ``RC(query)``, so forward-query
+      offset ``p`` sits at CIGAR-query cursor ``q_en - 1 - p``. The forward slice of the window is
+      therefore mapped to the mirrored cursor slice before the CIGAR is crawled.
+
+    ``q_en`` / ``query_len`` / ``strand`` default to the forward, fully-consumed case
+    (``q_en = q_st + cigar_q_len``, ``query_len = q_en``, ``strand = 1``) so edlib callers -- which
+    consume the whole query on the forward strand -- can omit them.
 
     Returns an ordered list of per-junction results, one ``{'error', 'passed'}`` dict per
     in-scope junction in the order checked. Evaluation short-circuits on the first junction
     whose local error exceeds ``error_threshold``: that failing junction is the last entry and
-    later in-scope junctions are not checked. A junction whose window contains no assessable
-    bases is recorded as ``{'error': None, 'passed': True}``. Callers derive the overall verdict
-    as ``all(j['passed'] for j in results)`` (an empty list -- no in-scope junctions -- passes).
+    later in-scope junctions are not checked. A junction whose window collapses to no bases is
+    recorded as ``{'error': None, 'passed': True}``. Callers derive the overall verdict as
+    ``all(j['passed'] for j in results)`` (an empty list -- no in-scope junctions -- passes).
 
     Official SAM/BAM CIGAR Specification: https://samtools.github.io/hts-specs/SAMv1.pdf
     """
@@ -45,16 +61,19 @@ def validate_junctions_from_cigar(cigartuples: List[Tuple[int, int]], junctions:
     SEQ_MATCH = 7  # =: Exact sequence match
     SEQ_MISMATCH = 8  # X: Exact sequence mismatch
 
-    # Conceptually group the operations
     # Operations that consume space in the simulated query sequence
     QUERY_CONSUMING_OPS = {MATCH, INS, SOFT_CLIP, SEQ_MATCH, SEQ_MISMATCH}
-
     # Operations that only represent gaps in the target assembly
     TARGET_ONLY_OPS = {DEL, REF_SKIP}
+    # Query-consuming operations that constitute local error
+    ERROR_OPS = {INS, SOFT_CLIP, SEQ_MISMATCH}
 
     # Calculate total query length consumed by this specific CIGAR
     cigar_q_len = sum(length for length, op in cigartuples if op in QUERY_CONSUMING_OPS)
-    q_en = q_st + cigar_q_len
+    if q_en is None:
+        q_en = q_st + cigar_q_len
+    if query_len is None:
+        query_len = q_en
 
     results = []
     for j_idx in junctions:
@@ -63,62 +82,56 @@ def validate_junctions_from_cigar(cigartuples: List[Tuple[int, int]], junctions:
         if j_idx < q_st - window or j_idx > q_en + window:
             continue
 
-        # Translate the absolute query junction index to a relative position within this CIGAR
-        relative_j_idx = j_idx - q_st
-
-        window_start = max(0, relative_j_idx - window)
-        window_end = min(cigar_q_len, relative_j_idx + window)
-
-        query_cursor = 0
-        errors = 0
-        total_bases = 0
-
-        for length, op in cigartuples:
-            # Stop processing if the cursor has moved past the evaluation window
-            if query_cursor > window_end and op not in TARGET_ONLY_OPS:
-                break
-
-            # --- TARGET-ONLY OPERATIONS (Deletions / Skips) ---
-            if op in TARGET_ONLY_OPS:
-                # If a deletion occurs while the cursor is inside the window, it is recorded as an error.
-                if window_start <= query_cursor < window_end:
-                    errors += length
-                    total_bases += length
-                continue
-
-            # --- QUERY-CONSUMING OPERATIONS ---
-            op_start = query_cursor
-            op_end = query_cursor + length
-
-            # Calculate the overlap between this CIGAR operation and the evaluation window
-            overlap_start = max(window_start, op_start)
-            overlap_end = min(window_end, op_end)
-            overlap_len = max(0, overlap_end - overlap_start)
-
-            if overlap_len > 0:
-                if op in (MATCH, SEQ_MATCH):
-                    total_bases += overlap_len
-                elif op in (INS, SOFT_CLIP, SEQ_MISMATCH):
-                    errors += overlap_len
-                    total_bases += overlap_len
-
-            # Advance the query cursor
-            if op in QUERY_CONSUMING_OPS:
-                query_cursor += length
-
-        # Record the per-junction result. Windows with no assessable bases cannot be
-        # judged, so they are treated as passing (matching the original skip behavior).
-        if total_bases > 0:
-            err_rate = errors / total_bases
-            passed = err_rate <= error_threshold
-            # Store as a native JSON number at 4 sig figs; small rates keep precision and
-            # serialize in exponent form (e.g. 8.6e-06) rather than flattening to 0.
-            results.append({'error': float(f'{err_rate:.4g}'), 'passed': passed})
-            # Short-circuit on the first failing junction (original return-False behavior).
-            if not passed:
-                break
-        else:
+        # Window in FORWARD-QUERY coordinates, clamped to the real query.
+        w_lo = max(0, j_idx - window)
+        w_hi = min(query_len, j_idx + window)
+        if w_hi <= w_lo:
             results.append({'error': None, 'passed': True})
+            continue
+
+        total_bases = w_hi - w_lo
+        # Clipped query bases inside the window: the adjacency is not spanned there -> error.
+        errors = max(0, min(w_hi, q_st) - w_lo) + max(0, w_hi - max(w_lo, q_en))
+
+        # Aligned slice of the window, mapped from forward-query into CIGAR-cursor coordinates.
+        a_lo = max(w_lo, q_st)
+        a_hi = min(w_hi, q_en)
+        if a_hi > a_lo:
+            if strand == -1:
+                # Reverse hit: CIGAR walks RC(query); mirror the forward slice.
+                c_lo = q_en - a_hi
+                c_hi = q_en - a_lo
+            else:
+                c_lo = a_lo - q_st
+                c_hi = a_hi - q_st
+
+            query_cursor = 0
+            for length, op in cigartuples:
+                # Stop once the cursor has moved past the evaluation window.
+                if query_cursor >= c_hi and op not in TARGET_ONLY_OPS:
+                    break
+
+                if op in TARGET_ONLY_OPS:
+                    # A deletion inside the window is recorded as error.
+                    if c_lo <= query_cursor < c_hi:
+                        errors += length
+                        total_bases += length
+                    continue
+
+                if op in QUERY_CONSUMING_OPS:
+                    if op in ERROR_OPS:
+                        overlap = max(0, min(c_hi, query_cursor + length) - max(c_lo, query_cursor))
+                        errors += overlap
+                    query_cursor += length
+
+        err_rate = errors / total_bases
+        passed = err_rate <= error_threshold
+        # Store as a native JSON number at 4 sig figs; small rates keep precision and
+        # serialize in exponent form (e.g. 8.6e-06) rather than flattening to 0.
+        results.append({'error': float(f'{err_rate:.4g}'), 'passed': passed})
+        # Short-circuit on the first failing junction (original return-False behavior).
+        if not passed:
+            break
 
     return results
 

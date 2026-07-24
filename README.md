@@ -30,6 +30,7 @@ Run with the following parameters.
 - `--location_tolerance`: (Optional) Max bp between a mappy hit's reference start and the expected SV locus for the hit to count; default **unbounded**. Bounding it is only safe for well-scaffolded assemblies — for per-contig/unscaffolded assemblies, whose hit coordinates are contig-local rather than genomic, a bounded tolerance rejects valid matches. In a `--config` YAML, write infinity as `.inf` (bare `inf` is parsed as a string).
 - `--chrom_cache`: (Optional) Directory to save/load the per-chromosome `.mmi` indices (defaults to temporary space).
 - `--report`: (Optional) `none` (default) or `json`. `json` writes a per-SV evaluation sidecar (see "Per-SV evaluation report" below) alongside the log. Off by default; the log and score table are identical either way.
+- `--check_reference`: (Optional) flag. Also align each passing reconstructed allele to the **reference** (which lacks the SV); if it maps within the error threshold, the match is not specific to the SV — common in repetitive / segmental-dup regions — so the call is marked **inconclusive** (`reference_match`) instead of a hit. Off by default. See "Reference-ambiguity check" below.
 
 Read-based evaluation parameters (see "Read-based evaluation" below):
 - `--eval_mode`: `assembly` (default), `reads`, or `both`. `reads` validates each call against the long reads in `--bam` instead of the assembly; `both` is **reads-first** — it consults the reads (Tier 1) and only falls back to the assembly (Tier 2) for events no single read can span.
@@ -163,6 +164,24 @@ Each record holds only what the *evaluation* concluded; join back to the call VC
 Note the `ref_start` is the window anchor (≈ breakpoint − buffer), not an exact
 breakpoint, and a multi-operation complex SV produces one `segments` entry per
 reconstructed subsequence, not per VCF record.
+
+**Reference-ambiguity check (`--check_reference`)**
+
+Assembly/read validation confirms the reconstructed allele exists in the sample —
+but in repetitive or segmental-duplication regions the allele can exist in the
+**reference** too, in which case finding it in the sample says nothing about whether
+the SV occurred. With `--check_reference`, each passing allele is also aligned to the
+reference; if it matches within the same error threshold, the call is not SV-specific
+and is downgraded from a hit to **inconclusive** with reason `reference_match`.
+
+The check aligns with **mappy** (the same aligner as the assembly validation), because
+a large or compound allele needs chained alignment — plain edlib cannot align a
+multi-junction allele and would spuriously report "absent" (edlib is used only as the
+short-allele fallback, `< 5000 bp`). Enabling it therefore builds a second per-chromosome
+aligner set over the reference (extra build time + memory), so it is best used
+deliberately (e.g. auditing suspicious large calls) rather than on every routine run.
+It caught, for example, a 29 kb chr16 dupINVdup whose allele maps to the reference at
+0.019 error — below the 0.034 assembly match — i.e. a coincidental, non-SV-specific hit.
 
 **Notes**
 

@@ -64,6 +64,18 @@ class AlignScorer(object):
         self.read_error_threshold = 0.1
         self.min_read_support = 1
         self.max_reads_per_site = 1000
+        # Optional ambiguity check: also search the REFERENCE for the reconstructed allele;
+        # a hit there means the match isn't specific to the SV -> inconclusive. Off by default.
+        self.check_reference = False
+        self.reference_aligners = None                 # mappy aligners over the reference
+        self.reference_search_tolerance = EDLIB_FALLBACK_MAX_TOLERANCE
+        # Junction-validation window, scaled to SV size and clamped: window = clamp(factor*span,
+        # min, max). Applies to ALL junction checks (reads, assembly, edlib, reference) so the
+        # junction test measures the SV's actual change rather than the surrounding context --
+        # otherwise a small SV's signal is diluted below threshold and passes on flanks alone.
+        self.junction_window_factor = 1.5
+        self.junction_window_min = 150
+        self.junction_window_max = JUNCTION_VALIDATION_WINDOW
 
     def load_exclude_list(self, gap_file):
         exclude_list = defaultdict(IntervalTree)
@@ -208,6 +220,16 @@ class AlignScorer(object):
             svid = records[0].info['SVID']
             sv_type = records[0].info['SVTYPE']
 
+            # Junction-validation window scaled to this SV's change magnitude (its reference
+            # footprint incl. any TARGET) and clamped. Used by every junction check below so a
+            # small SV's junction signal isn't diluted by the surrounding context window.
+            span_pts = [p for r in records for p in (r.start, r.stop)]
+            span_pts += [int(r.info['TARGET']) for r in records if 'TARGET' in r.info]
+            sv_span = (max(span_pts) - min(span_pts)) if span_pts else 0
+            junction_window = int(min(self.junction_window_max,
+                                      max(self.junction_window_min,
+                                          round(self.junction_window_factor * sv_span))))
+
             sequences = simulate_subsequences(records, buffer, self.ref)
             match_scores = []
             subseq_diagnostics = []
@@ -253,6 +275,7 @@ class AlignScorer(object):
                 seq_source = None  # which tier validated this subsequence: assembly | edlib | reads
                 seq_passed = False  # a tier validated it within ITS OWN threshold (+ junctions)
                 seq_junctions = []  # per-junction results from the tier whose check we report
+                seq_strand = None  # strand of the assembly match (meaningful only there; None for reads/edlib)
 
                 # Read-based evaluation
                 if self.eval_mode in ('reads', 'both'):
@@ -274,7 +297,7 @@ class AlignScorer(object):
                             if read_res['error'] <= self.read_error_threshold:
                                 cigartuples = edlib_to_cigartuples(read_res['cigar'])
                                 junc = validate_junctions_from_cigar(cigartuples, query.get('junctions', []),
-                                                                 window=JUNCTION_VALIDATION_WINDOW,
+                                                                 window=junction_window,
                                                                  error_threshold=self.read_error_threshold)
                                 if not seq_passed:
                                     seq_junctions = junc
@@ -308,13 +331,16 @@ class AlignScorer(object):
                             err = check_match(a, sequence)
                             if err <= error_threshold:
                                 junc = validate_junctions_from_cigar(a.cigar, query.get('junctions', []),
-                                                                 window=JUNCTION_VALIDATION_WINDOW,
-                                                                 q_st=a.q_st,
+                                                                 window=junction_window,
+                                                                 q_st=a.q_st, q_en=a.q_en,
+                                                                 query_len=len(sequence), strand=a.strand,
                                                                  error_threshold=error_threshold)
                                 if not seq_passed:
                                     seq_junctions = junc
                                 if all(j['passed'] for j in junc):
-                                    best_score = min(best_score, err)
+                                    if err < best_score:
+                                        best_score = err
+                                        seq_strand = a.strand   # record the best passing match's strand
                                     mappy_matched = True
                                     seq_source = 'assembly'
                                     seq_passed = True
@@ -346,7 +372,7 @@ class AlignScorer(object):
                             if edlib_res['error'] <= error_threshold:
                                 cigartuples = edlib_to_cigartuples(edlib_res['cigar'])
                                 junc = validate_junctions_from_cigar(cigartuples, query.get('junctions', []),
-                                                                 window=JUNCTION_VALIDATION_WINDOW,
+                                                                 window=junction_window,
                                                                  error_threshold=error_threshold)
                                 if not seq_passed:
                                     seq_junctions = junc
@@ -363,6 +389,44 @@ class AlignScorer(object):
 
                 match_scores.append(best_score)
 
+                # Optional ambiguity check: does the reconstructed allele ALSO validate against the
+                # REFERENCE (which lacks the SV) under the SAME requirements as the assembly check --
+                # bulk error AND junction validation (flanking context)? If so, the SV's full
+                # structure exists in the reference too, so the assembly/read hit is not specific to
+                # the SV (common in repetitive / segmental-dup / inverted-repeat regions) -> the call
+                # is ambiguous, not a hit. mappy is both-strand + genome-wide; edlib is the
+                # short-allele fallback only (and forward-only). Records the reference match strand.
+                seq_reference_match = False
+                seq_reference_err = None
+                seq_reference_strand = None
+                if seq_passed and self.check_reference:
+                    if self.reference_aligners:
+                        for aligner in self.reference_aligners.get(chrom, []):
+                            for a in aligner.map(sequence):
+                                err = check_match(a, sequence)
+                                if err <= error_threshold and (seq_reference_err is None or err < seq_reference_err):
+                                    junc = validate_junctions_from_cigar(a.cigar, query.get('junctions', []),
+                                                                     window=junction_window,
+                                                                     q_st=a.q_st, q_en=a.q_en,
+                                                                     query_len=len(sequence), strand=a.strand,
+                                                                     error_threshold=error_threshold)
+                                    if all(j['passed'] for j in junc):
+                                        seq_reference_match = True
+                                        seq_reference_err = err
+                                        seq_reference_strand = a.strand
+                    if not seq_reference_match and len(sequence) < MIN_EDLIB_QUERY:
+                        ref_res = run_edlib_fallback(sequence, chrom, query['location'], int(buffer),
+                                                     self.reference_search_tolerance, error_threshold, self.ref)
+                        if ref_res is not None and ref_res['error'] <= error_threshold:
+                            junc = validate_junctions_from_cigar(edlib_to_cigartuples(ref_res['cigar']),
+                                                             query.get('junctions', []),
+                                                             window=junction_window,
+                                                             error_threshold=error_threshold)
+                            if all(j['passed'] for j in junc):
+                                seq_reference_match = True
+                                seq_reference_err = ref_res['error']
+                                seq_reference_strand = 1  # edlib aligns forward only
+
                 # Classify the subsequence from the evidence gathered above. It falls
                 # into exactly one category, and the category fixes both the scoring
                 # status and the diagnostic reason. Checked in priority order:
@@ -375,7 +439,9 @@ class AlignScorer(object):
                 #                   absence of a read is not evidence against the call.
                 #   NOT_FOUND    -- assembly tier produced nothing to compare against.
                 #                   In assembly mode absence IS the verdict -> fail.
-                if seq_passed:
+                if seq_passed and seq_reference_match:
+                    status, reason = 'inconclusive', 'reference_match'
+                elif seq_passed:
                     status, reason = 'pass', 'pass'
                 elif seq_had_junction_rejection or seq_saw_candidate or seq_reads_aborted:
                     status = 'fail'
@@ -387,7 +453,9 @@ class AlignScorer(object):
                     status = 'fail'
                     reason = 'no_aligner' if not seq_has_aligner else 'no_alignment_in_window'
 
-                if seq_best_fail_err is not None:
+                if reason == 'reference_match':
+                    err_str = f'{seq_reference_err:.4f}'  # error of the coincidental reference match
+                elif seq_best_fail_err is not None:
                     err_str = f'{seq_best_fail_err:.4f}'
                 elif reason == 'over_error_threshold':
                     err_str = 'aborted'  # spanning reads exceeded the 2x-threshold edlib bound
@@ -402,6 +470,8 @@ class AlignScorer(object):
                 # (nothing testable produced a number).
                 if status == 'pass':
                     seg_error = float(f'{best_score:.4g}')
+                elif reason == 'reference_match':
+                    seg_error = float(f'{seq_reference_err:.4g}')
                 elif seq_best_fail_err is not None:
                     seg_error = float(f'{seq_best_fail_err:.4g}')
                 else:
@@ -413,6 +483,10 @@ class AlignScorer(object):
                     'reason': reason,
                     'source': seq_source,
                     'error': seg_error,
+                    # Strand of the decisive alignment where meaningful: the reference match for a
+                    # reference_match, else the assembly match. null for read/edlib confirmations
+                    # (reads are randomly oriented; strand carries no signal there).
+                    'strand': seq_reference_strand if reason == 'reference_match' else seq_strand,
                     'junctions': seq_junctions,
                 })
 

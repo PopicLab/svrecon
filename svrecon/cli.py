@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 def main():
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H%M%S')
 
-    parser = argparse.ArgumentParser(description='Score VCF SV calls against a reference and sample genome')
+    parser = argparse.ArgumentParser(prog='svrecon',
+                                     description='Score VCF SV calls against a reference and sample genome')
     # An svrecon config (YAML whose keys mirror these flags) supplies any of the params below;
     # logs and reports are written to that config's directory. Explicit CLI flags override the
     # config. Mergeable params default to None so we can tell "unset" from an explicit value.
@@ -65,12 +66,28 @@ def main():
                              "<logbasename>.eval.jsonl next to the log (one JSON record per SV: "
                              "svid, outcome, tier, and per-segment status/reason/source/error/"
                              "junctions). Default 'none' (log and score table are unchanged).")
+    parser.add_argument('--check_reference', action='store_true', default=None,
+                        help="Also validate each passing allele against the reference (bulk + junctions); "
+                             "if it also validates there (the match isn't specific to the SV -- common "
+                             "in repetitive / segmental-dup regions), mark the call inconclusive "
+                             "(reason 'reference_match'). Off by default; builds a reference aligner set.")
+    parser.add_argument('--junction_window_factor', type=float, default=None,
+                        help="Junction-validation window as a multiple of SV size (default 1.5), applied "
+                             "to ALL junction checks. Scaling to SV size keeps a real SV's junction signal "
+                             "above threshold instead of diluting it in a fixed wide context window.")
+    parser.add_argument('--junction_window_min', type=int, default=None,
+                        help="Min junction window in bp (default 150). Sets the resolution floor: SVs "
+                             "larger than ~2*min*T/(1-T) are resolvable against the reference.")
+    parser.add_argument('--junction_window_max', type=int, default=None,
+                        help="Max junction window in bp (default 300); caps the window for large SVs.")
     args = parser.parse_args()
 
     # --- Resolve the effective config: CLI flag > svrecon --config value > groovi inference > default ---
     MERGE_KEYS = ['reference', 'sample', 'calls', 'bam', 'classified', 'gap_file', 'chrom_cache',
                   'igv_prefix', 'eval_mode', 'buffer', 'location_tolerance', 'read_error_threshold',
-                  'min_read_support', 'max_reads_per_site', 'report', 'groovi_config']
+                  'min_read_support', 'max_reads_per_site', 'report', 'check_reference',
+                  'junction_window_factor', 'junction_window_min',
+                  'junction_window_max', 'groovi_config']
     cfg, unknown_keys = {}, []
     if args.config:
         with open(args.config) as f:
@@ -85,7 +102,9 @@ def main():
 
     defaults = {'eval_mode': 'assembly', 'buffer': 500, 'location_tolerance': float('inf'),
                 'igv_prefix': '', 'read_error_threshold': 0.1, 'min_read_support': 1,
-                'max_reads_per_site': 1000, 'report': 'none'}
+                'max_reads_per_site': 1000, 'report': 'none', 'check_reference': False,
+                'junction_window_factor': 1.5, 'junction_window_min': 150,
+                'junction_window_max': 300}
     for k, v in defaults.items():
         if getattr(args, k) is None:
             setattr(args, k, v)
@@ -143,6 +162,10 @@ def main():
     scorer.read_error_threshold = args.read_error_threshold
     scorer.min_read_support = args.min_read_support
     scorer.max_reads_per_site = args.max_reads_per_site
+    scorer.check_reference = args.check_reference
+    scorer.junction_window_factor = args.junction_window_factor
+    scorer.junction_window_min = args.junction_window_min
+    scorer.junction_window_max = args.junction_window_max
 
     logger.info('Finding relevant chromosomes')
     chroms = set()
@@ -159,47 +182,55 @@ def main():
 
     scorer.sample = []
     scorer.aligners = defaultdict(list)
+    scorer.reference_aligners = None
+
+    # Aligner build params + cache dir, shared by the assembly aligners and (when
+    # --check_reference is on) the reference aligners.
+    align_params = {
+        'preset': 'map-hifi',
+        'k': 15,
+        'w': 5,
+        'best_n': 100,
+        'min_cnt': 1,
+        'min_dp_score': 10,
+        'min_chain_score': 1,
+    }
+    if args.chrom_cache:
+        cache_dir = args.chrom_cache
+        logger.info(f'Using persistent cache directory: {cache_dir}')
+    else:
+        cache_dir = os.path.join(tempfile.gettempdir(), 'mappy_chrom_cache')
+        logger.info(f'Using temporary cache directory: {cache_dir}')
+    os.makedirs(cache_dir, exist_ok=True)
+
+    def build_chrom_aligners(fasta, into, label):
+        """Build/load per-chromosome mappy aligners for `fasta` into the `into` dict."""
+        path_hash = hashlib.md5(os.path.abspath(fasta).encode('utf-8')).hexdigest()[:8]
+        fa_cache = os.path.join(cache_dir, f'{os.path.basename(fasta)}_{path_hash}')
+        os.makedirs(fa_cache, exist_ok=True)
+        for chrom in chroms:
+            aligner = get_chrom_aligner(fasta, chrom, fa_cache, align_params, threads=32)
+            if aligner:
+                into[chrom].append(aligner)
+            else:
+                logger.warning(f'No sequences found for {chrom} in {label} FASTA {fasta}.')
 
     if eval_mode in ('assembly', 'both'):
         logger.info('Loading sample assembly bytearrays')
         scorer.sample = [load_fasta_to_bytes(samp, chroms) for samp in args.sample]
         logger.info(f'Initialized {len(scorer.sample)} sample assembly file(s).')
-
-        align_params = {
-            'preset': 'map-hifi',
-            'k': 15,
-            'w': 5,
-            'best_n': 100,
-            'min_cnt': 1,
-            'min_dp_score': 10,
-            'min_chain_score': 1,
-        }
-
-        if args.chrom_cache:
-            cache_dir = args.chrom_cache
-            logger.info(f'Using persistent cache directory: {cache_dir}')
-        else:
-            cache_dir = os.path.join(tempfile.gettempdir(), 'mappy_chrom_cache')
-            logger.info(f'Using temporary cache directory: {cache_dir}')
-
-        os.makedirs(cache_dir, exist_ok=True)
-
         logger.info('Building/loading per-chromosome aligners...')
         for samp in args.sample:
-            samp_path_hash = hashlib.md5(os.path.abspath(samp).encode('utf-8')).hexdigest()[:8]
-            samp_cache_dir = os.path.join(cache_dir, f'{os.path.basename(samp)}_{samp_path_hash}')
-            os.makedirs(samp_cache_dir, exist_ok=True)
-
-            for chrom in chroms:
-                aligner = get_chrom_aligner(samp, chrom, samp_cache_dir, align_params, threads=32)
-                if aligner:
-                    scorer.aligners[chrom].append(aligner)
-                else:
-                    logger.warning(f'No sequences found for {chrom} in sample FASTA {samp}.')
-
+            build_chrom_aligners(samp, scorer.aligners, 'sample')
         logger.info('Aligners ready')
     else:
         logger.info('Read-only eval mode: skipping sample assembly load and aligner build.')
+
+    if args.check_reference:
+        logger.info('Building/loading reference aligner(s) for --check_reference (mappy)...')
+        scorer.reference_aligners = defaultdict(list)
+        build_chrom_aligners(args.reference, scorer.reference_aligners, 'reference')
+        logger.info('Reference aligners ready')
 
     if eval_mode in ('reads', 'both'):
         if not args.bam:
