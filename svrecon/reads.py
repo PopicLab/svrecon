@@ -2,7 +2,8 @@
 import logging
 import os
 import threading
-from typing import Dict, List, Tuple, Union
+from dataclasses import dataclass
+from typing import List, Optional
 
 import pysam
 
@@ -10,6 +11,20 @@ from svrecon.align import edlib_score
 from svrecon.util import reverse_complement
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ReadEdlibResult:
+    """Outcome of aligning a query sequence against a pool of candidate reads,
+    keeping whichever read produced the lowest error. ``error`` starts at the
+    worst possible value (1.0) and is only ever improved on, so it is never
+    ``None``; ``cigar``/``matched_read_sequence`` stay ``None`` together --
+    exactly when no candidate ever produced a result -- and are the signal to
+    check for "did anything match at all"."""
+    n_tried: int
+    error: float = 1.0
+    cigar: Optional[str] = None
+    matched_read_sequence: Optional[str] = None
 
 
 class BamReader:
@@ -81,20 +96,20 @@ class BamReader:
 
 
 def run_read_edlib(query_seq: str, read_seqs: List[str], error_threshold: float,
-                   min_support: int = 1) -> Tuple[Union[Dict, None], int]:
+                   min_support: int = 1) -> ReadEdlibResult:
     """Align ``query_seq`` against each candidate read with the shared
     ``edlib_score`` primitive.
 
-    Returns ``(best_res, n_tried)``:
-      * ``best_res`` -- the best ``{'error', 'cigar'}`` once ``min_support`` reads
-        clear ``error_threshold`` (early exit), else the best within the 2x bound,
-        else ``None``.
-      * ``n_tried`` -- number of reads actually aligned (i.e. long enough to pass
-        the length pre-filter). ``n_tried == 0`` means every candidate read was
-        too short to host the alt -- distinct from "reads aligned but failed",
-        so the caller can report it differently."""
-    best_res = None
+    Returns a ``ReadEdlibResult`` holding the best candidate's error/cigar/read
+    sequence once ``min_support`` reads clear ``error_threshold`` (early exit),
+    else the best within the 2x bound, else none found (see the dataclass
+    docstring). ``n_tried`` is the number of reads actually aligned (i.e. long
+    enough to pass the length pre-filter) -- ``n_tried == 0`` means every
+    candidate read was too short to host the alt, distinct from "reads aligned
+    but failed", so the caller can report it differently."""
     best_error = 1.0
+    best_cigar = None
+    matched_read_sequence = None
     support = 0
     n_tried = 0
     # A read can't contain the alt under HW alignment if it is shorter than the
@@ -113,17 +128,21 @@ def run_read_edlib(query_seq: str, read_seqs: List[str], error_threshold: float,
         n_tried += 1
         # A read molecule can be sequenced from either strand relative to the
         # reference-oriented alt, so try BOTH orientations and keep the better.
-        candidates = [r for r in (edlib_score(query_seq, target_seq, k=k),
-                                   edlib_score(query_seq, reverse_complement(target_seq), k=k))
+        rev_seq = reverse_complement(target_seq)
+        candidates = [(r, s) for r, s in ((edlib_score(query_seq, target_seq, k=k), target_seq),
+                                          (edlib_score(query_seq, rev_seq, k=k), rev_seq))
                       if r is not None]
         if not candidates:
             continue
-        res = min(candidates, key=lambda r: r['error'])
+        res, matched_seq = min(candidates, key=lambda pair: pair[0]['error'])
         if res['error'] < best_error:
             best_error = res['error']
-            best_res = res
+            best_cigar = res['cigar']
+            matched_read_sequence = matched_seq
         if res['error'] <= error_threshold:
             support += 1
             if support >= min_support:
-                return best_res, n_tried
-    return best_res, n_tried
+                return ReadEdlibResult(n_tried=n_tried, error=best_error, cigar=best_cigar,
+                                       matched_read_sequence=matched_read_sequence)
+    return ReadEdlibResult(n_tried=n_tried, error=best_error, cigar=best_cigar,
+                           matched_read_sequence=matched_read_sequence)

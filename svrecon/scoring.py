@@ -299,27 +299,27 @@ class AlignScorer(object):
                     elif not spanning:
                         seq_inconclusive = True
                     else:
-                        read_res, _ = run_read_edlib(sequence, spanning,
-                                                     self.read_error_threshold, self.min_read_support)
-                        if read_res:
+                        read_res = run_read_edlib(sequence, spanning,
+                                                  self.read_error_threshold, self.min_read_support)
+                        if read_res.cigar is not None: # If there is a valid read
                             seq_saw_candidate = True
-                            if read_res['error'] <= self.read_error_threshold:
-                                cigartuples = edlib_to_cigartuples(read_res['cigar'])
+                            if read_res.error <= self.read_error_threshold:
+                                cigartuples = edlib_to_cigartuples(read_res.cigar)
                                 junctions_validation_results = validate_junctions_from_cigar(cigartuples, query.junctions,
                                                                  window=junction_window,
                                                                  error_threshold=self.read_error_threshold)
                                 if not seq_passed:
                                     seq_junctions = junctions_validation_results
                                 if all(j.passed for j in junctions_validation_results):
-                                    best_score = min(best_score, read_res['error'])
+                                    best_score = min(best_score, read_res.error)
                                     seq_source = 'reads'
                                     seq_passed = True
                                 else:
                                     seq_had_junction_rejection = True
-                                    seq_best_rejected_err = min(seq_best_rejected_err, read_res['error'])
-                                    seq_best_fail_err = read_res['error'] if seq_best_fail_err is None else min(seq_best_fail_err, read_res['error'])
+                                    seq_best_rejected_err = min(seq_best_rejected_err, read_res.error)
+                                    seq_best_fail_err = read_res.error if seq_best_fail_err is None else min(seq_best_fail_err, read_res.error)
                             else:
-                                seq_best_fail_err = read_res['error'] if seq_best_fail_err is None else min(seq_best_fail_err, read_res['error'])
+                                seq_best_fail_err = read_res.error if seq_best_fail_err is None else min(seq_best_fail_err, read_res.error)
                         else:
                             # spanning reads existed but all exceeded the 2x edlib bound
                             seq_reads_aborted = True
