@@ -51,7 +51,7 @@ def one(recs):
     (e.g. cut+paste) yield identical full-allele queries; assert they agree and
     return the first."""
     qs = simulate_subsequences(recs, BUF, ref())
-    seqs = {q['sequence'] for q in qs}
+    seqs = {q.sequence for q in qs}
     assert len(seqs) == 1, f'queries disagree on the allele ({len(seqs)} distinct): {qs}'
     return qs[0]
 
@@ -59,41 +59,41 @@ def one(recs):
 class TestFundamentalOps(unittest.TestCase):
     def test_deletion(self):
         q = one([_Rec(60, 80, 'CUT', 'DEL')])
-        self.assertEqual(q['sequence'], REF_S[:60] + REF_S[80:])
+        self.assertEqual(q.sequence, REF_S[:60] + REF_S[80:])
 
     def test_inversion(self):
         q = one([_Rec(60, 80, 'INV', 'INV')])
-        self.assertEqual(q['sequence'], REF_S[:60] + reverse_complement(REF_S[60:80]) + REF_S[80:])
+        self.assertEqual(q.sequence, REF_S[:60] + reverse_complement(REF_S[60:80]) + REF_S[80:])
         # INV marks the first and last base of the inverted block.
-        self.assertEqual(q['junctions'], [60, 79])
+        self.assertEqual(q.junctions, [60, 79])
 
     def test_tandem_dup(self):
         # DUP sets TARGET=rec.stop -> copy inserted right after the source (tandem).
         q = one([_Rec(60, 80, 'COPY-PASTE', 'DUP')])
-        self.assertEqual(q['sequence'], REF_S[:80] + REF_S[60:80] + REF_S[80:])
-        self.assertEqual(q['junctions'], [80, 99])  # endpoints of the inserted copy
+        self.assertEqual(q.sequence, REF_S[:80] + REF_S[60:80] + REF_S[80:])
+        self.assertEqual(q.junctions, [80, 99])  # endpoints of the inserted copy
 
     def test_dispersed_copy_paste(self):
         # Copy [60,80) forward to index 120 (downstream); source stays in place.
         q = one([_Rec(60, 80, 'COPY-PASTE', 'dDUP', target=120)])
-        self.assertEqual(q['sequence'], REF_S[:120] + REF_S[60:80] + REF_S[120:])
-        self.assertEqual(q['junctions'], [120, 139])
+        self.assertEqual(q.sequence, REF_S[:120] + REF_S[60:80] + REF_S[120:])
+        self.assertEqual(q.junctions, [120, 139])
 
     def test_dispersed_copyinv_paste(self):
         # Copy reverse-complement of [60,80) to index 120.
         q = one([_Rec(60, 80, 'COPYinv-PASTE', 'INV_dDUP', target=120)])
-        self.assertEqual(q['sequence'], REF_S[:120] + reverse_complement(REF_S[60:80]) + REF_S[120:])
-        self.assertEqual(q['junctions'], [120, 139])
+        self.assertEqual(q.sequence, REF_S[:120] + reverse_complement(REF_S[60:80]) + REF_S[120:])
+        self.assertEqual(q.junctions, [120, 139])
 
     def test_cut_paste(self):
         # Cut [60,80) and paste forward at index 120.
         q = one([_Rec(60, 80, 'CUT-PASTE', 'nrTRA', target=120)])
         # source removed; copy inserted before original index 120 (indices unaffected: 120>80).
-        self.assertEqual(q['sequence'], REF_S[:60] + REF_S[80:120] + REF_S[60:80] + REF_S[120:])
+        self.assertEqual(q.sequence, REF_S[:60] + REF_S[80:120] + REF_S[60:80] + REF_S[120:])
 
     def test_cutinv_paste(self):
         q = one([_Rec(60, 80, 'CUTinv-PASTE', 'INV_nrTRA', target=120)])
-        self.assertEqual(q['sequence'], REF_S[:60] + REF_S[80:120] + reverse_complement(REF_S[60:80]) + REF_S[120:])
+        self.assertEqual(q.sequence, REF_S[:60] + REF_S[80:120] + reverse_complement(REF_S[60:80]) + REF_S[120:])
 
 
 class TestOperationOrdering(unittest.TestCase):
@@ -106,7 +106,7 @@ class TestOperationOrdering(unittest.TestCase):
         # Apply right-to-left so earlier splices don't shift later (lower) targets.
         expected = REF_S[:150] + REF_S[50:60] + REF_S[150:]
         expected = expected[:90] + REF_S[20:40] + expected[90:]
-        self.assertEqual(q['sequence'], expected)
+        self.assertEqual(q.sequence, expected)
 
     def test_inversion_plus_downstream_dup(self):
         inv = _Rec(60, 80, 'INV', 'INV', svid='svY')
@@ -114,7 +114,7 @@ class TestOperationOrdering(unittest.TestCase):
         q = one([inv, dup])
         expected = REF_S[:60] + reverse_complement(REF_S[60:80]) + REF_S[80:]
         expected = expected[:140] + REF_S[100:110] + expected[140:]
-        self.assertEqual(q['sequence'], expected)
+        self.assertEqual(q.sequence, expected)
 
 
 class TestDupINVdupGrammar(unittest.TestCase):
@@ -139,10 +139,10 @@ class TestDupINVdupGrammar(unittest.TestCase):
         A, B, C = REF_S[40:70], REF_S[70:130], REF_S[130:170]
         expected = (REF_S[:40] + A + reverse_complement(C) + reverse_complement(B)
                     + reverse_complement(A) + C + REF_S[170:])
-        self.assertEqual(q['sequence'], expected)
+        self.assertEqual(q.sequence, expected)
         # Novel junctions land at the A|c and a|C boundaries.
-        self.assertIn(70, q['junctions'])
-        self.assertIn(70 + len(C), q['junctions'])  # start of a-block (a|C is at its far end)
+        self.assertIn(70, q.junctions)
+        self.assertIn(70 + len(C), q.junctions)  # start of a-block (a|C is at its far end)
 
     @unittest.expectedFailure
     def test_groovi_fragment_coords_leave_stray_junction_bases(self):
@@ -155,7 +155,7 @@ class TestDupINVdupGrammar(unittest.TestCase):
         A, B, C = REF_S[40:70], REF_S[70:130], REF_S[130:170]
         expected = (REF_S[:40] + A + reverse_complement(C) + reverse_complement(B)
                     + reverse_complement(A) + C + REF_S[170:])
-        self.assertEqual(q['sequence'], expected)
+        self.assertEqual(q.sequence, expected)
 
 
 if __name__ == '__main__':

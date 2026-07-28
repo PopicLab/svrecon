@@ -1,4 +1,5 @@
 """Alt-allele reconstruction: build the changed subsequences (with junction masks) that scoring aligns against the assembly/reads."""
+from dataclasses import dataclass
 from itertools import groupby
 from typing import Dict, List
 
@@ -7,7 +8,19 @@ from pysam import VariantRecord
 from svrecon.util import get_start_stop, reverse_complement
 
 
-def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[str, bytearray]) -> List[Dict]:
+@dataclass
+class QueryReconSubsequence:
+    chrom: str
+    svtype: str
+    svid: str
+    sequence: str
+    location: int
+    length: int
+    junctions: List[int]
+    result_len: int
+
+
+def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[str, bytearray]) -> List[QueryReconSubsequence]:
 
     sv_type = records[0].info['SVTYPE']
     svid = records[0].info['SVID']
@@ -172,7 +185,7 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
 
 
 def get_changed_subsequences(new_sequence, changed_mask, junction_mask, tolerance, offset, buffer, svid, chrom,
-                             sv_type):
+                             sv_type) -> List[QueryReconSubsequence]:
     changed_intervals = []
     queries = []
     # Length of the FULL resulting allele these subsequences are carved from -- a
@@ -215,16 +228,16 @@ def get_changed_subsequences(new_sequence, changed_mask, junction_mask, toleranc
 
         junctions = sorted(list(set(junctions)))
 
-        query = {
-            'chrom': chrom,
-            'svtype': sv_type,
-            'svid': svid,
-            'sequence': sequence,
-            'location': adjusted_start + offset,
-            'length': len(sequence),
-            'junctions': junctions,
-            'result_len': result_len,
-        }
+        query = QueryReconSubsequence(
+            chrom=chrom,
+            svtype=sv_type,
+            svid=svid,
+            sequence=sequence,
+            location=adjusted_start + offset,
+            length=len(sequence),
+            junctions=junctions,
+            result_len=result_len,
+        )
         queries.append(query)
 
     return queries

@@ -128,8 +128,8 @@ class TestGetChangedSubsequences(unittest.TestCase):
         junc[3] = junc[5] = True
         q = get_changed_subsequences(new_seq, changed, junc, 5, 100, 2, 'sv1', 'chr1', 'INV')
         self.assertEqual(len(q), 1)
-        self.assertEqual(q[0]['result_len'], 9)
-        self.assertEqual(q[0]['sequence'], 'AACGTAAA')  # region +/- buffer, stop+buffer+1
+        self.assertEqual(q[0].result_len, 9)
+        self.assertEqual(q[0].sequence, 'AACGTAAA')  # region +/- buffer, stop+buffer+1
 
     def test_result_len_deletion_counts_bp_not_elements(self):
         # Regression: deletions leave empty '' placeholder elements. Element count
@@ -139,8 +139,8 @@ class TestGetChangedSubsequences(unittest.TestCase):
         junc = [False] * 8
         junc[3] = True
         q = get_changed_subsequences(new_seq, changed, junc, 5, 0, 1, 'sv2', 'chr1', 'DEL')
-        self.assertEqual(q[0]['result_len'], 6)
-        self.assertEqual(q[0]['sequence'], 'AGG')  # slice [2:7] = [A,'','',G,G]; '' skipped
+        self.assertEqual(q[0].result_len, 6)
+        self.assertEqual(q[0].sequence, 'AGG')  # slice [2:7] = [A,'','',G,G]; '' skipped
 
     def test_result_len_multichar_clip_counts_bp(self):
         # An inserted clip stored as one multi-char element contributes its bp, not 1.
@@ -149,48 +149,48 @@ class TestGetChangedSubsequences(unittest.TestCase):
         junc = [False] * 5
         junc[2] = True
         q = get_changed_subsequences(new_seq, changed, junc, 5, 0, 5, 'sv3', 'chr1', 'DUP')
-        self.assertEqual(q[0]['result_len'], 8)
+        self.assertEqual(q[0].result_len, 8)
 
 
 class TestValidateJunctionsFromCigar(unittest.TestCase):
-    """The validator returns an ordered list of per-junction {'error','passed'} dicts
-    (not a bool). Overall verdict is all(j['passed'] for j in results); an empty list
+    """The validator returns an ordered list of per-junction SeqJunctionsValidationResult
+    objects (not a bool). Overall verdict is all(j.passed for j in results); an empty list
     (no in-scope junction) passes. It short-circuits on the first failing junction."""
 
     def test_clean_match_passes(self):
         # 200 exact matches; a junction mid-alignment sees zero local error.
         results = validate_junctions_from_cigar([(200, SEQ_MATCH)], [100], window=50, error_threshold=0.1)
         self.assertEqual(len(results), 1)
-        self.assertTrue(results[0]['passed'])
-        self.assertEqual(results[0]['error'], 0.0)  # native number
-        self.assertTrue(all(j['passed'] for j in results))
+        self.assertTrue(results[0].passed)
+        self.assertEqual(results[0].error, 0.0)  # native number
+        self.assertTrue(all(j.passed for j in results))
 
     def test_mismatch_cluster_at_junction_fails(self):
         # 20 mismatches inside a 100bp window (err 0.2 > 0.1) -> the junction fails.
         cig = [(50, SEQ_MATCH), (20, SEQ_MISMATCH), (130, SEQ_MATCH)]
         results = validate_junctions_from_cigar(cig, [60], window=50, error_threshold=0.1)
         self.assertEqual(len(results), 1)
-        self.assertFalse(results[0]['passed'])
-        self.assertAlmostEqual(results[0]['error'], 0.2, places=6)  # native number
-        self.assertFalse(all(j['passed'] for j in results))
+        self.assertFalse(results[0].passed)
+        self.assertAlmostEqual(results[0].error, 0.2, places=6)  # native number
+        self.assertFalse(all(j.passed for j in results))
 
     def test_short_circuits_on_first_failure(self):
         # Two junctions, the first fails -> the list ends at it; the second is not checked.
         cig = [(50, SEQ_MATCH), (20, SEQ_MISMATCH), (130, SEQ_MATCH)]
         results = validate_junctions_from_cigar(cig, [60, 500], window=50, error_threshold=0.1)
         self.assertEqual(len(results), 1)
-        self.assertFalse(results[0]['passed'])
+        self.assertFalse(results[0].passed)
 
     def test_out_of_scope_junction_skipped(self):
         # A junction beyond this alignment segment is not counted (empty -> passes).
         results = validate_junctions_from_cigar([(200, SEQ_MATCH)], [10000], window=50)
         self.assertEqual(results, [])
-        self.assertTrue(all(j['passed'] for j in results))
+        self.assertTrue(all(j.passed for j in results))
 
     def test_no_junctions_returns_empty_and_passes(self):
         results = validate_junctions_from_cigar([(200, SEQ_MATCH)], [], window=50)
         self.assertEqual(results, [])
-        self.assertTrue(all(j['passed'] for j in results))
+        self.assertTrue(all(j.passed for j in results))
 
 
 if __name__ == '__main__':

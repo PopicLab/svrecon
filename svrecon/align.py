@@ -2,6 +2,7 @@
 import logging
 import os
 import re
+from dataclasses import dataclass
 from typing import Dict, List, Tuple, Union
 
 import edlib
@@ -19,9 +20,18 @@ def edlib_to_cigartuples(cigar_str: str) -> List[Tuple[int, int]]:
     return [(int(m.group(1)), op_map[m.group(2)]) for m in re.finditer(r'(\d+)([=XID])', cigar_str)]
 
 
+@dataclass
+class SeqJunctionsValidationResult:
+    error: float
+    passed: bool
+
+    def jsonify(self) -> dict:
+        return {'error': self.error, 'passed': self.passed}
+
+
 def validate_junctions_from_cigar(cigartuples: List[Tuple[int, int]], junctions: List[int], q_st: int = 0,
                                   q_en: int = None, query_len: int = None, strand: int = 1,
-                                  window: int = 150, error_threshold: float = 0.1) -> List[Dict]:
+                                  window: int = 150, error_threshold: float = 0.1) -> List[SeqJunctionsValidationResult]:
     """
     Calculates the local error rate within a window around each structural-variant junction.
 
@@ -41,12 +51,13 @@ def validate_junctions_from_cigar(cigartuples: List[Tuple[int, int]], junctions:
     (``q_en = q_st + cigar_q_len``, ``query_len = q_en``, ``strand = 1``) so edlib callers -- which
     consume the whole query on the forward strand -- can omit them.
 
-    Returns an ordered list of per-junction results, one ``{'error', 'passed'}`` dict per
+    Returns an ordered list of per-junction results, one ``SeqJunctionsValidationResult`` per
     in-scope junction in the order checked. Evaluation short-circuits on the first junction
     whose local error exceeds ``error_threshold``: that failing junction is the last entry and
     later in-scope junctions are not checked. A junction whose window collapses to no bases is
-    recorded as ``{'error': None, 'passed': True}``. Callers derive the overall verdict as
-    ``all(j['passed'] for j in results)`` (an empty list -- no in-scope junctions -- passes).
+    recorded as ``SeqJunctionsValidationResult(error=0.0, passed=True)``. Callers derive the
+    overall verdict as ``all(j.passed for j in results)`` (an empty list -- no in-scope
+    junctions -- passes).
 
     Official SAM/BAM CIGAR Specification: https://samtools.github.io/hts-specs/SAMv1.pdf
     """
@@ -86,7 +97,7 @@ def validate_junctions_from_cigar(cigartuples: List[Tuple[int, int]], junctions:
         w_lo = max(0, j_idx - window)
         w_hi = min(query_len, j_idx + window)
         if w_hi <= w_lo:
-            results.append({'error': None, 'passed': True})
+            results.append(SeqJunctionsValidationResult(error=0.0, passed=True))
             continue
 
         total_bases = w_hi - w_lo
@@ -128,7 +139,7 @@ def validate_junctions_from_cigar(cigartuples: List[Tuple[int, int]], junctions:
         passed = err_rate <= error_threshold
         # Store as a native JSON number at 4 sig figs; small rates keep precision and
         # serialize in exponent form (e.g. 8.6e-06) rather than flattening to 0.
-        results.append({'error': float(f'{err_rate:.4g}'), 'passed': passed})
+        results.append(SeqJunctionsValidationResult(error=float(f'{err_rate:.4g}'), passed=passed))
         # Short-circuit on the first failing junction (original return-False behavior).
         if not passed:
             break
