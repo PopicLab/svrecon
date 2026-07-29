@@ -242,7 +242,7 @@ def main():
         logger.info(f'Initializing thread-safe BAM reader: {args.bam}')
         scorer.bam_reader = BamReader(args.bam)
 
-    img_dir = Path(output_dir) / 'img'
+    img_dir = Path(output_dir) / 'sv_recon_img'
 
     precision, correct_calls, total_calls, inconclusive_calls, assembly_hits, read_hits = scorer.score_all(
         location_tolerance=args.location_tolerance, report_path=report_path,
