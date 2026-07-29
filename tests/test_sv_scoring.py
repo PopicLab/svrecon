@@ -16,7 +16,7 @@ import unittest
 
 from svrecon.util import reverse_complement
 from svrecon.align import edlib_score, validate_junctions_from_cigar
-from svrecon.reads import run_read_edlib
+from svrecon.reads import run_read_edlib, ReadEdlibResult
 from svrecon.reconstruct import get_changed_subsequences
 
 # BAM CIGAR op codes used to build fixtures below.
@@ -58,18 +58,18 @@ class TestReverseComplement(unittest.TestCase):
 
 
 class TestEdlibScore(unittest.TestCase):
-    """Shared HW (infix) edlib primitive returning {'error','cigar'} or None."""
+    """Shared HW (infix) edlib primitive returning an EdlibScoreResult or None."""
 
     def test_exact_infix_match(self):
         res = edlib_score('ACGTACGT', 'GGGACGTACGTGGG')
         self.assertIsNotNone(res)
-        self.assertEqual(res['error'], 0.0)
-        self.assertIn('cigar', res)
+        self.assertEqual(res.error, 0.0)
+        self.assertIsNotNone(res.cigar)
 
     def test_single_mismatch_has_small_error(self):
         res = edlib_score('ACGTACGT', 'ACGTTCGT')  # one substitution
         self.assertIsNotNone(res)
-        self.assertTrue(0.0 < res['error'] < 0.2)
+        self.assertTrue(0.0 < res.error < 0.2)
 
     def test_k_bound_aborts_to_none(self):
         # editDistance beyond k -> edlib reports -1 -> None (the bound that keeps
@@ -80,41 +80,40 @@ class TestEdlibScore(unittest.TestCase):
 class TestRunReadEdlib(unittest.TestCase):
     ALT = 'A' * 40 + 'C' * 20  # non-palindromic; revcomp is clearly different
 
-    def test_returns_tuple(self):
+    def test_returns_dataclass(self):
         out = run_read_edlib(self.ALT, [self.ALT], 0.1)
-        self.assertIsInstance(out, tuple)
-        self.assertEqual(len(out), 2)
+        self.assertIsInstance(out, ReadEdlibResult)
 
     def test_forward_exact_match(self):
-        res, n_tried = run_read_edlib(self.ALT, [self.ALT], 0.1)
-        self.assertIsNotNone(res)
-        self.assertEqual(res['error'], 0.0)
-        self.assertEqual(n_tried, 1)
+        res = run_read_edlib(self.ALT, [self.ALT], 0.1)
+        self.assertIsNotNone(res.cigar)
+        self.assertEqual(res.error, 0.0)
+        self.assertEqual(res.n_tried, 1)
 
     def test_reverse_strand_read_matches(self):
         # Regression (sv1427): a read sequenced from the opposite strand is the
         # reverse complement of the reference-oriented alt. Forward-only alignment
         # scored it ~1.0 and the call missed; run_read_edlib must try both strands.
         rc_read = reverse_complement(self.ALT)
-        self.assertEqual(edlib_score(self.ALT, rc_read)['error'], 1.0)  # forward alone: miss
-        res, n_tried = run_read_edlib(self.ALT, [rc_read], 0.1)
-        self.assertIsNotNone(res)
-        self.assertLessEqual(res['error'], 0.1)
-        self.assertEqual(n_tried, 1)
+        self.assertEqual(edlib_score(self.ALT, rc_read).error, 1.0)  # forward alone: miss
+        res = run_read_edlib(self.ALT, [rc_read], 0.1)
+        self.assertIsNotNone(res.cigar)
+        self.assertLessEqual(res.error, 0.1)
+        self.assertEqual(res.n_tried, 1)
 
     def test_short_read_is_length_filtered(self):
         # A read too short to host the whole alt can't contain it; it's skipped
         # before alignment, so n_tried stays 0 (distinct from "aligned but failed").
-        res, n_tried = run_read_edlib(self.ALT, ['A' * 20], 0.1)
-        self.assertIsNone(res)
-        self.assertEqual(n_tried, 0)
+        res = run_read_edlib(self.ALT, ['A' * 20], 0.1)
+        self.assertIsNone(res.cigar)
+        self.assertEqual(res.n_tried, 0)
 
     def test_min_support_controls_early_exit(self):
         # min_support only gates the early return, not whether a result comes back.
-        _, n1 = run_read_edlib(self.ALT, [self.ALT, self.ALT], 0.1, min_support=1)
-        _, n2 = run_read_edlib(self.ALT, [self.ALT, self.ALT], 0.1, min_support=2)
-        self.assertEqual(n1, 1)
-        self.assertEqual(n2, 2)
+        res1 = run_read_edlib(self.ALT, [self.ALT, self.ALT], 0.1, min_support=1)
+        res2 = run_read_edlib(self.ALT, [self.ALT, self.ALT], 0.1, min_support=2)
+        self.assertEqual(res1.n_tried, 1)
+        self.assertEqual(res2.n_tried, 2)
 
 
 class TestGetChangedSubsequences(unittest.TestCase):

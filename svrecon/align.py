@@ -193,10 +193,17 @@ def check_match(alignment, query):
     return nm_total / len_norm if len_norm > 0 else 1.0
 
 
-def edlib_score(query_seq: str, target_seq: str, k: int = -1) -> Union[Dict, None]:
+@dataclass
+class EdlibScoreResult:
+    error: float
+    cigar: str
+    matched_target_sequence: str
+
+
+def edlib_score(query_seq: str, target_seq: str, k: int = -1) -> Union[EdlibScoreResult, None]:
     """HW-align ``query_seq`` against a single ``target_seq`` and normalize to an
     error rate. Shared primitive for both assembly-window and read-based scoring;
-    returns ``{'error', 'cigar'}`` or ``None`` if no alignment was produced.
+    returns an ``EdlibScoreResult`` or ``None`` if no alignment was produced.
 
     ``k`` is edlib's max edit distance: alignments worse than ``k`` abort early
     and return ``None`` (edlib editDistance = -1). ``k=-1`` (default) is
@@ -212,15 +219,17 @@ def edlib_score(query_seq: str, target_seq: str, k: int = -1) -> Union[Dict, Non
         loc = result['locations'][0]
         target_match_len = loc[1] - loc[0] + 1
         denominator = max(len(query_seq), target_match_len)
+        matched_target_sequence = target_seq[loc[0]:loc[1] + 1]
     else:
         denominator = len(query_seq)
+        matched_target_sequence = target_seq # TODO: check for correctness
 
     error_rate = edit_dist / denominator if denominator > 0 else 1.0
-    return {'error': error_rate, 'cigar': result['cigar']}
+    return EdlibScoreResult(error=error_rate, cigar=result['cigar'], matched_target_sequence=matched_target_sequence)
 
 
 def run_edlib_fallback(query_seq: str, chrom: str, location: int, initial_buffer: int, max_tolerance: int,
-                       error_threshold: float, sample_dict: Dict[str, bytearray]) -> Union[Dict, None]:
+                       error_threshold: float, sample_dict: Dict[str, bytearray]) -> Union[EdlibScoreResult, None]:
     if sample_dict is None:
         return None
 
@@ -252,8 +261,8 @@ def run_edlib_fallback(query_seq: str, chrom: str, location: int, initial_buffer
             target_seq = sample_dict[target_key][search_start:search_end].decode('ascii')
 
             res = edlib_score(query_seq, target_seq)
-            if res is not None and res['error'] < best_error:
-                best_error = res['error']
+            if res is not None and res.error < best_error:
+                best_error = res.error
                 best_res = res
 
             if best_error <= error_threshold:

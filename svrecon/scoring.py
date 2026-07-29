@@ -4,6 +4,7 @@ import logging
 import traceback
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Dict, List, Union
 
 import mappy
@@ -14,8 +15,10 @@ from tqdm import tqdm
 
 from svrecon.align import (check_match, edlib_to_cigartuples,
                            run_edlib_fallback, validate_junctions_from_cigar, SeqJunctionsValidationResult)
+from svrecon.plot import plot_dot_plot
 from svrecon.reads import run_read_edlib
 from svrecon.reconstruct import simulate_subsequences, QueryReconSubsequence
+from svrecon.util import reverse_complement
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +102,8 @@ class AlignScorer(object):
         self.variants = grouped_variants
         self.vcf_header = vcf_in.header
 
-    def score_all(self, location_tolerance=float('inf'), error_threshold=0.1, n_threads=40, report_path=None):
+    def score_all(self, location_tolerance=float('inf'), error_threshold=0.1, n_threads=40, report_path=None,
+                 plot_first_n=0, plot_out_dir=None):
         total_calls = Counter()
         correct_calls = Counter()
         inconclusive_calls = Counter()  # reads mode: no read spans the full resulting allele
@@ -115,6 +119,11 @@ class AlignScorer(object):
         # Optional per-SV JSON sidecar (one record per line). Additive: it does not affect the
         # log output or the score table. Written from this single consumer thread, so no lock.
         report_fh = open(report_path, 'w') if report_path else None
+
+        # Optional dot-plot PNGs (recon subsequence vs. its validating real-data sequence),
+        # up to plot_first_n per SV type. Off by default (plot_first_n=0).
+        if plot_first_n:
+            Path(plot_out_dir).mkdir(parents=True, exist_ok=True)
 
         with ThreadPoolExecutor(max_workers=n_threads) as executor:
             futures = {
@@ -139,7 +148,7 @@ class AlignScorer(object):
                     coords = result['coords']
                     outcome = result.get('outcome', 'hit' if result['is_correct'] else 'miss')
                     match_scores = result['match_scores']
-                    line = f'{svid}\t{sv_type}\t{recon_sequences[0]["chrom"]}:{coords[0]}-{coords[1]}\t{outcome}\t{match_scores}'
+                    line = f'{svid}\t{sv_type}\t{recon_sequences[0].chrom}:{coords[0]}-{coords[1]}\t{outcome}\t{match_scores}'
                     if outcome == 'hit':
                         # Tier 1 (read) vs Tier 2 (assembly), plus the detailed source.
                         line += f'\t{result.get("tier", "")}\t{result.get("validation_source", "")}'
@@ -158,6 +167,24 @@ class AlignScorer(object):
 
                     total_calls[sv_type] += 1
                     overall_count += 1
+
+                    if plot_first_n and total_calls[sv_type] <= plot_first_n:
+                        # TODO: extend to cover every subsequence of a compound SV
+                        validating_sequences = result.get('validating_sequences', [])
+                        segments = result.get('segments', [])
+                        first_recon_seq = recon_sequences[0].sequence if recon_sequences else None
+                        first_validating_seq = validating_sequences[0] if validating_sequences else None
+                        first_source = segments[0]['source'] if segments else None
+                        if first_recon_seq is not None and first_validating_seq is not None:
+                            plot_path = Path(plot_out_dir) / f'{sv_type}_{svid}_{first_source}.png'
+
+                            logger.info(f'Producing dotplot for SV {svid} ({sv_type}, source={first_source})')
+                            plot_dot_plot(first_recon_seq, first_validating_seq,
+                                         f'{sv_type} {svid}', str(plot_path),
+                                         s1_name='reconstructed', s2_name=f'validating ({first_source})')
+
+                        else:
+                            logger.warning(f'Skipping dot plot for {svid} ({sv_type}): no validating sequence available.')
 
                     if outcome == 'hit':
                         correct_calls[sv_type] += 1
@@ -222,8 +249,8 @@ class AlignScorer(object):
         subsequence passed, 'miss' if any was contradicted, else 'inconclusive').
 
         Returns a dict with svid, sv_type, outcome, is_correct, tier, validation_source,
-        rescued_by_edlib, coords, match_scores, recon_sequences, subseq_diagnostics, and segments
-        (the last for the optional `--report json` sidecar).
+        rescued_by_edlib, coords, match_scores, validating_sequences, recon_sequences,
+        subseq_diagnostics, and segments (the last for the optional `--report json` sidecar).
         """
         try:
             svid = records[0].info['SVID']
@@ -241,6 +268,7 @@ class AlignScorer(object):
 
             recon_sequences: List[QueryReconSubsequence] = simulate_subsequences(records, buffer, self.ref)
             match_scores = []
+            validating_sequences = []
             subseq_diagnostics = []
             subseq_sources = []
             subseq_status = []   # per-subsequence: 'pass' | 'fail' | 'inconclusive'
@@ -285,6 +313,7 @@ class AlignScorer(object):
                 seq_passed = False  # a tier validated it within ITS OWN threshold (+ junctions)
                 seq_junctions = []  # per-junction results from the tier whose check we report
                 seq_strand = None  # strand of the assembly match (meaningful only there; None for reads/edlib)
+                seq_validating_sequence = None  # the real-data sequence (read/assembly span/edlib span) that validated this subsequence
 
                 # Read-based evaluation
                 if self.eval_mode in ('reads', 'both'):
@@ -305,7 +334,8 @@ class AlignScorer(object):
                             seq_saw_candidate = True
                             if read_res.error <= self.read_error_threshold:
                                 cigartuples = edlib_to_cigartuples(read_res.cigar)
-                                junctions_validation_results = validate_junctions_from_cigar(cigartuples, query.junctions,
+                                junctions_validation_results: List[SeqJunctionsValidationResult] = \
+                                    validate_junctions_from_cigar(cigartuples, query.junctions,
                                                                  window=junction_window,
                                                                  error_threshold=self.read_error_threshold)
                                 if not seq_passed:
@@ -314,6 +344,7 @@ class AlignScorer(object):
                                     best_score = min(best_score, read_res.error)
                                     seq_source = 'reads'
                                     seq_passed = True
+                                    seq_validating_sequence = read_res.matched_read_sequence
                                 else:
                                     seq_had_junction_rejection = True
                                     seq_best_rejected_err = min(seq_best_rejected_err, read_res.error)
@@ -352,6 +383,8 @@ class AlignScorer(object):
                                     if err < best_score:
                                         best_score = err
                                         seq_strand = a.strand   # record the best passing match's strand
+                                        matched = aligner.seq(a.ctg, a.r_st, a.r_en)
+                                        seq_validating_sequence = reverse_complement(matched) if a.strand == -1 else matched
                                     mappy_matched = True
                                     seq_source = 'assembly'
                                     seq_passed = True
@@ -380,25 +413,29 @@ class AlignScorer(object):
                         )
                         if edlib_res:
                             seq_saw_candidate = True
-                            if edlib_res['error'] <= error_threshold:
-                                cigartuples = edlib_to_cigartuples(edlib_res['cigar'])
-                                junctions_validation_results = validate_junctions_from_cigar(cigartuples, query.junctions,
+                            if edlib_res.error <= error_threshold:
+                                cigartuples = edlib_to_cigartuples(edlib_res.cigar)
+                                junctions_validation_results: List[SeqJunctionsValidationResult] = \
+                                    validate_junctions_from_cigar(cigartuples, query.junctions,
                                                                  window=junction_window,
                                                                  error_threshold=error_threshold)
                                 if not seq_passed:
                                     seq_junctions = junctions_validation_results
                                 if all(j.passed for j in junctions_validation_results):
-                                    best_score = min(best_score, edlib_res['error'])
+                                    if edlib_res.error < best_score:
+                                        best_score = edlib_res.error
+                                        seq_validating_sequence = edlib_res.matched_target_sequence
                                     seq_source = 'edlib'
                                     seq_passed = True
                                 else:
                                     seq_had_junction_rejection = True
-                                    seq_best_rejected_err = min(seq_best_rejected_err, edlib_res['error'])
-                                    seq_best_fail_err = edlib_res['error'] if seq_best_fail_err is None else min(seq_best_fail_err, edlib_res['error'])
+                                    seq_best_rejected_err = min(seq_best_rejected_err, edlib_res.error)
+                                    seq_best_fail_err = edlib_res.error if seq_best_fail_err is None else min(seq_best_fail_err, edlib_res.error)
                             else:
-                                seq_best_fail_err = edlib_res['error'] if seq_best_fail_err is None else min(seq_best_fail_err, edlib_res['error'])
+                                seq_best_fail_err = edlib_res.error if seq_best_fail_err is None else min(seq_best_fail_err, edlib_res.error)
 
                 match_scores.append(best_score)
+                validating_sequences.append(seq_validating_sequence)
 
                 # Optional ambiguity check: does the reconstructed allele ALSO validate against the
                 # REFERENCE (which lacks the SV) under the SAME requirements as the assembly check --
@@ -416,7 +453,8 @@ class AlignScorer(object):
                             for a in aligner.map(sequence):
                                 err = check_match(a, sequence)
                                 if err <= error_threshold and (seq_reference_err is None or err < seq_reference_err):
-                                    junctions_validation_results = validate_junctions_from_cigar(a.cigar, query.junctions,
+                                    junctions_validation_results: List[SeqJunctionsValidationResult] = \
+                                        validate_junctions_from_cigar(a.cigar, query.junctions,
                                                                      window=junction_window,
                                                                      q_st=a.q_st, q_en=a.q_en,
                                                                      query_len=len(sequence), strand=a.strand,
@@ -428,14 +466,15 @@ class AlignScorer(object):
                     if not seq_reference_match and len(sequence) < MIN_EDLIB_QUERY:
                         ref_res = run_edlib_fallback(sequence, chrom, query.location, int(buffer),
                                                      self.reference_search_tolerance, error_threshold, self.ref)
-                        if ref_res is not None and ref_res['error'] <= error_threshold:
-                            junctions_validation_results = validate_junctions_from_cigar(edlib_to_cigartuples(ref_res['cigar']),
+                        if ref_res is not None and ref_res.error <= error_threshold:
+                            junctions_validation_results: List[SeqJunctionsValidationResult] = \
+                                validate_junctions_from_cigar(edlib_to_cigartuples(ref_res.cigar),
                                                              query.junctions,
                                                              window=junction_window,
                                                              error_threshold=error_threshold)
                             if all(j.passed for j in junctions_validation_results):
                                 seq_reference_match = True
-                                seq_reference_err = ref_res['error']
+                                seq_reference_err = ref_res.error
                                 seq_reference_strand = 1  # edlib aligns forward only
 
                 # Classify the subsequence from the evidence gathered above. It falls
@@ -499,6 +538,7 @@ class AlignScorer(object):
                     # (reads are randomly oriented; strand carries no signal there).
                     'strand': seq_reference_strand if reason == 'reference_match' else seq_strand,
                     'junctions': [j.jsonify() for j in seq_junctions],
+                    'validating_sequence': seq_validating_sequence,
                 })
 
                 if best_score > error_threshold and seq_had_junction_rejection:
@@ -569,6 +609,7 @@ class AlignScorer(object):
                 'tier': tier,   # 'read' (Tier 1) | 'assembly' (Tier 2) | None
                 'coords': coords,
                 'match_scores': match_scores,
+                'validating_sequences': validating_sequences,
                 'recon_sequences': recon_sequences,
                 'subseq_diagnostics': subseq_diagnostics,
                 'segments': segments,

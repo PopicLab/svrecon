@@ -134,12 +134,12 @@ def run_read_edlib(query_seq: str, read_seqs: List[str], error_threshold: float,
                       if r is not None]
         if not candidates:
             continue
-        res, matched_seq = min(candidates, key=lambda pair: pair[0]['error'])
-        if res['error'] < best_error:
-            best_error = res['error']
-            best_cigar = res['cigar']
+        res, matched_seq = min(candidates, key=lambda pair: pair[0].error)
+        if res.error < best_error:
+            best_error = res.error
+            best_cigar = res.cigar
             matched_read_sequence = matched_seq
-        if res['error'] <= error_threshold:
+        if res.error <= error_threshold:
             support += 1
             if support >= min_support:
                 return ReadEdlibResult(n_tried=n_tried, error=best_error, cigar=best_cigar,

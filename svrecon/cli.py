@@ -1,12 +1,11 @@
-"""svrecon command-line entry point."""
 import argparse
 import datetime
 import hashlib
 import logging
-import os
 import sys
 import tempfile
 from collections import defaultdict
+from pathlib import Path
 
 import pandas as pd
 import yaml
@@ -80,6 +79,10 @@ def main():
                              "larger than ~2*min*T/(1-T) are resolvable against the reference.")
     parser.add_argument('--junction_window_max', type=int, default=None,
                         help="Max junction window in bp (default 300); caps the window for large SVs.")
+    parser.add_argument('--plot_first_n', type=int, default=None,
+                        help="Write a dot-plot PNG (reconstructed subsequence vs. the validating real-data "
+                             "sequence) for the first N SV calls of each SV type, into <output_dir>/img/ "
+                             "(default 0 -- no plots).")
     args = parser.parse_args()
 
     # --- Resolve the effective config: CLI flag > svrecon --config value > groovi inference > default ---
@@ -87,7 +90,7 @@ def main():
                   'igv_prefix', 'eval_mode', 'buffer', 'location_tolerance', 'read_error_threshold',
                   'min_read_support', 'max_reads_per_site', 'report', 'check_reference',
                   'junction_window_factor', 'junction_window_min',
-                  'junction_window_max', 'groovi_config']
+                  'junction_window_max', 'groovi_config', 'plot_first_n']
     cfg, unknown_keys = {}, []
     if args.config:
         with open(args.config) as f:
@@ -104,7 +107,7 @@ def main():
                 'igv_prefix': '', 'read_error_threshold': 0.1, 'min_read_support': 1,
                 'max_reads_per_site': 1000, 'report': 'none', 'check_reference': False,
                 'junction_window_factor': 1.5, 'junction_window_min': 150,
-                'junction_window_max': 300}
+                'junction_window_max': 300, 'plot_first_n': 0}
     for k, v in defaults.items():
         if getattr(args, k) is None:
             setattr(args, k, v)
@@ -239,8 +242,11 @@ def main():
         logger.info(f'Initializing thread-safe BAM reader: {args.bam}')
         scorer.bam_reader = BamReader(args.bam)
 
+    img_dir = Path(output_dir) / 'img'
+
     precision, correct_calls, total_calls, inconclusive_calls, assembly_hits, read_hits = scorer.score_all(
-        location_tolerance=args.location_tolerance, report_path=report_path)
+        location_tolerance=args.location_tolerance, report_path=report_path,
+        plot_first_n=args.plot_first_n, plot_out_dir=img_dir)
 
     df = pd.DataFrame({
         'correct_calls': correct_calls,
