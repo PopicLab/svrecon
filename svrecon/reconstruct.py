@@ -1,11 +1,26 @@
-"""Alt-allele reconstruction: build the changed subsequences (with junction masks) that scoring aligns against the assembly/reads."""
+"""Alt-allele reconstruction: transform the reference window into the SV's alt allele and record,
+for each piece of the result, a ``(start, end)`` segment (in alt-allele coordinates) for scoring's
+``validate_segments_from_cigar`` to check locally.
+
+Segments cover the whole allele: inserted and inverted pieces, and the untouched reference runs
+between them (including the left/right context buffer). A deletion is simply a zero-length segment
+at its join. Segments are independent ranges, so pieces that overlap because of imprecise caller
+coordinates are representable and reconciled by clipping the earlier piece (a clip larger than
+``SEGMENT_CLIP_WARN_THRESHOLD`` bp is logged, since that signals a real coordinate error).
+"""
+import logging
 from dataclasses import dataclass
-from itertools import groupby
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from pysam import VariantRecord
 
 from svrecon.util import get_start_stop, reverse_complement
+
+logger = logging.getLogger(__name__)
+
+# A reconstructed piece clipped by more than this many bp to resolve an overlap probably reflects a
+# real coordinate error rather than 1-2 bp of caller rounding -> warn.
+SEGMENT_CLIP_WARN_THRESHOLD = 10
 
 
 @dataclass
@@ -16,13 +31,21 @@ class QueryReconSubsequence:
     sequence: str
     location: int
     length: int
-    # junctions: List[int] # TODO: replace with segments
-    ref_start: int # TODO: fill
-    ref_end: int   # TODO: fill
-    segments: List[tuple] # TODO: fill
+    ref_start: int
+    ref_end: int
+    segments: List[Tuple[int, int]]
 
     def __len__(self):
         return self.length
+
+
+@dataclass
+class _Segment:
+    """A piece of the allele while it is being built; coordinates are mutable so operations can
+    shift them in-place and overlaps can be clipped. A deletion is just a segment whose bases become ''
+    placeholders, so it collapses to zero length once the placeholders are dropped."""
+    start: int
+    end: int
 
 
 def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[str, bytearray]) -> List[QueryReconSubsequence]:
@@ -61,186 +84,148 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
 
     orig_sequence = list(ref[chrom][offset:sequence_end].decode('ascii'))
     new_sequence = orig_sequence.copy()
-    changed_mask = [False] * len(new_sequence)
-    junction_mask = [False] * len(new_sequence)
+    # Per-window segments, in that window's LIST-index coordinates. A deletion keeps its bases as ''
+    # placeholders (so later ops' reference coordinates stay valid) and collapses to a zero-length
+    # segment once the placeholders are dropped in _finalize_window.
+    main_segments: List[_Segment] = []
 
     if not merged_target_sequence:
         new_target_sequence = list(ref[chrom][target_offset:target_sequence_end].decode('ascii'))
-        target_changed_mask = [False] * len(new_target_sequence)
-        target_junction_mask = [False] * len(new_target_sequence)
+        target_segments: List[_Segment] = []
 
     delete_placeholder = ''
     queries = []
 
-    def mark_junction(mask, idx):
-        if 0 <= idx < len(mask):
-            mask[idx] = True
+    def shift_after(segments, position, amount):
+        """An insertion of `amount` bases at `position` pushes everything at/after it to the right."""
+        for segment in segments:
+            if segment.start >= position:
+                segment.start += amount
+            if segment.end > position:
+                segment.end += amount
 
+    # Pass 1: every operation's SOURCE region is a segment, in original (pre-transform) coordinates.
+    # Creating them up front means the pastes in pass 2 shift them along with everything else after
+    # the insertion point, so a source that ends up after an insertion still lands at the right place.
+    for rec in records:
+        if rec.info.get('TARGET_CHROM', chrom) != chrom:
+            logger.warning(
+                f'Skipping record: {rec.id}-{sv_type} because interchromosome target. Interchromosome checks not implemented yet.')
+            return []
+        start, stop = get_start_stop(rec)
+        main_segments.append(_Segment(start - offset, stop - offset))
+
+    # Pass 2: apply the transformations. In-place ops (DEL/INV) only rewrite bases -- their segment
+    # already exists. A paste inserts its copy, shifts every segment after the insertion (sources
+    # included), and records the copy.
     for rec in records:
         start, stop = get_start_stop(rec)
         target = rec.info.get('TARGET', stop + 1) - target_offset
         start -= offset
         stop -= offset
 
-        if rec.info.get('TARGET_CHROM', chrom) != chrom:
-            logger.warning(
-                f'Skipping record: {rec.id}-{sv_type} because interchromosome target. Interchromosome checks not implemented yet.')
-            return []
-
         if rec.info['OP_TYPE'] == 'CUT' or rec.info['SVTYPE'] == 'DEL':
             new_sequence[start:stop] = [delete_placeholder] * (stop - start)
-            changed_mask[start:stop] = [True] * (stop - start)
-            mark_junction(junction_mask, start)
-            mark_junction(junction_mask, stop - 1)
         elif rec.info['OP_TYPE'] == 'INV' or rec.info['SVTYPE'] == 'INV':
             new_sequence[start:stop] = reverse_complement(orig_sequence[start:stop])
-            changed_mask[start:stop] = [True] * (stop - start)
-            mark_junction(junction_mask, start)
-            mark_junction(junction_mask, stop - 1)
         elif rec.info['OP_TYPE'] == 'COPY-PASTE' or rec.info['SVTYPE'] in ['DUP', 'dDUP']:
             clip = orig_sequence[start:stop]
             if merged_target_sequence:
                 new_sequence = new_sequence[:target] + clip + new_sequence[target:]
-                changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
-                junction_mask = junction_mask[:target] + [False] * len(clip) + junction_mask[target:]
-                mark_junction(junction_mask, target)
-                mark_junction(junction_mask, target + len(clip) - 1)
+                shift_after(main_segments, target, len(clip))
+                main_segments.append(_Segment(target, target + len(clip)))
             else:
                 new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
-                target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
-                target_junction_mask = target_junction_mask[:target] + [False] * len(clip) + target_junction_mask[
-                    target:]
-                mark_junction(target_junction_mask, target)
-                mark_junction(target_junction_mask, target + len(clip) - 1)
+                shift_after(target_segments, target, len(clip))
+                target_segments.append(_Segment(target, target + len(clip)))
         elif rec.info['OP_TYPE'] in ['CUT-PASTE'] or rec.info['SVTYPE'] == 'nrTRA':
             clip = orig_sequence[start:stop]
             new_sequence[start:stop] = [delete_placeholder] * (stop - start)
-            changed_mask[start:stop] = [True] * len(clip)
-            mark_junction(junction_mask, start)
-            mark_junction(junction_mask, stop - 1)
-
             if merged_target_sequence:
                 new_sequence = new_sequence[:target] + clip + new_sequence[target:]
-                changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
-                junction_mask = junction_mask[:target] + [False] * len(clip) + junction_mask[target:]
-                mark_junction(junction_mask, target)
-                mark_junction(junction_mask, target + len(clip) - 1)
+                shift_after(main_segments, target, len(clip))
+                main_segments.append(_Segment(target, target + len(clip)))
             else:
                 new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
-                target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
-                target_junction_mask = target_junction_mask[:target] + [False] * len(clip) + target_junction_mask[
-                    target:]
-                mark_junction(target_junction_mask, target)
-                mark_junction(target_junction_mask, target + len(clip) - 1)
+                shift_after(target_segments, target, len(clip))
+                target_segments.append(_Segment(target, target + len(clip)))
         elif rec.info['OP_TYPE'] == 'COPYinv-PASTE' or rec.info['SVTYPE'] in ['INV_dDUP']:
             clip = list(reverse_complement(orig_sequence[start:stop]))
-
             if merged_target_sequence:
                 new_sequence = new_sequence[:target] + clip + new_sequence[target:]
-                changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
-                junction_mask = junction_mask[:target] + [False] * len(clip) + junction_mask[target:]
-                mark_junction(junction_mask, target)
-                mark_junction(junction_mask, target + len(clip) - 1)
+                shift_after(main_segments, target, len(clip))
+                main_segments.append(_Segment(target, target + len(clip)))
             else:
                 new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
-                target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
-                target_junction_mask = target_junction_mask[:target] + [False] * len(clip) + target_junction_mask[
-                    target:]
-                mark_junction(target_junction_mask, target)
-                mark_junction(target_junction_mask, target + len(clip) - 1)
+                shift_after(target_segments, target, len(clip))
+                target_segments.append(_Segment(target, target + len(clip)))
         elif rec.info['OP_TYPE'] == 'CUTinv-PASTE' or rec.info['SVTYPE'] in ['INV_nrTRA']:
             clip = list(reverse_complement(orig_sequence[start:stop]))
             new_sequence[start:stop] = [delete_placeholder] * (stop - start)
-            changed_mask[start:stop] = [True] * len(clip)
-            mark_junction(junction_mask, start)
-            mark_junction(junction_mask, stop - 1)
-
             if merged_target_sequence:
                 new_sequence = new_sequence[:target] + clip + new_sequence[target:]
-                changed_mask = changed_mask[:target] + [True] * len(clip) + changed_mask[target:]
-                junction_mask = junction_mask[:target] + [False] * len(clip) + junction_mask[target:]
-                mark_junction(junction_mask, target)
-                mark_junction(junction_mask, target + len(clip) - 1)
+                shift_after(main_segments, target, len(clip))
+                main_segments.append(_Segment(target, target + len(clip)))
             else:
                 new_target_sequence = new_target_sequence[:target] + clip + new_target_sequence[target:]
-                target_changed_mask = target_changed_mask[:target] + [True] * len(clip) + target_changed_mask[target:]
-                target_junction_mask = target_junction_mask[:target] + [False] * len(clip) + target_junction_mask[
-                    target:]
-                mark_junction(target_junction_mask, target)
-                mark_junction(target_junction_mask, target + len(clip) - 1)
+                shift_after(target_segments, target, len(clip))
+                target_segments.append(_Segment(target, target + len(clip)))
         else:
             logger.warning(f'Unknown OP_TYPE: {rec.info["OP_TYPE"]}')
 
-    if len(changed_mask) == 0:
-        logger.warning(f'No changed intervals found for {svid}-{sv_type}')
-        return []
-
-    MERGE_TOLERANCE = 5
-
-    queries.extend(
-        get_changed_subsequences(new_sequence, changed_mask, junction_mask, MERGE_TOLERANCE, offset, buffer, svid,
-                                 chrom, sv_type))
+    queries.append(_finalize_window(new_sequence, main_segments, offset, sequence_end, svid, chrom, sv_type))
     if not merged_target_sequence:
-        queries.extend(
-            get_changed_subsequences(new_target_sequence, target_changed_mask, target_junction_mask, MERGE_TOLERANCE,
-                                     target_offset, buffer,
-                                     svid, chrom, sv_type))
+        queries.append(_finalize_window(new_target_sequence, target_segments, target_offset, target_sequence_end,
+                                        svid, chrom, sv_type))
 
     return queries
 
 
-def get_changed_subsequences(new_sequence, changed_mask, junction_mask, tolerance, offset, buffer, svid, chrom,
-                             sv_type) -> List[QueryReconSubsequence]:
-    changed_intervals = []
-    queries = []
-    # Length of the FULL resulting allele these subsequences are carved from -- a
-    # read must be at least this long to contain the whole variant (read mode).
-    # Sum the element lengths rather than len(new_sequence): deletions leave empty
-    # '' placeholders (and inserted clips can be multi-char), so element count
-    # over-estimates the true bp length for deletion-containing alleles.
+def _finalize_window(window_chars, segments, offset, ref_end, svid, chrom, sv_type) -> QueryReconSubsequence:
+    """Assemble one transformed window into a QueryReconSubsequence: the reconstructed pieces plus
+    the SV's two outer flanks, in allele-string coordinates."""
+    # Join the transformed characters into the allele and translate each segment from LIST indices to
+    # allele-string positions. Deletion placeholders ('') contribute no characters, so a deleted run
+    # collapses to a zero-length segment at its join.
+    string_position_at = []          # string_position_at[list_index] -> allele-string offset
+    string_position = 0
+    for base in window_chars:
+        string_position_at.append(string_position)
+        string_position += len(base)  # '' placeholder -> 0
+    string_position_at.append(string_position)  # end sentinel
+    sequence = ''.join(window_chars)
+    segments = [_Segment(string_position_at[s.start], string_position_at[s.end]) for s in segments]
 
-    current_index = 0
-    for value, group in groupby(changed_mask):
-        group_len = len(list(group))
-        if value:
-            interval_start = current_index
-            prev_interval = changed_intervals[-1] if changed_intervals else None
+    # Reconcile overlaps: pieces should be disjoint, but imprecise caller coordinates can make two
+    # overlap; keep the later-created piece's boundary and clip the earlier one.
+    placed = []
+    for segment in segments:  # in creation order
+        for earlier in placed:
+            _clip_out_overlap(earlier, segment, svid, sv_type)
+        placed.append(segment)
 
-            if prev_interval and current_index - prev_interval[1] <= tolerance:
-                prev_interval = changed_intervals.pop()
-                interval_start = prev_interval[0]
+    # Cover the allele with the pieces plus the SV's outer flanks. 
+    pieces = [(seg.start, seg.end) for seg in placed]
+    sv_start = min(start for start, _ in pieces)
+    sv_end = max(end for _, end in pieces)
+    flanks = [flank for flank in [(0, sv_start), (sv_end, len(sequence))] if flank[1] > flank[0]]
+    covering_segments = sorted(set(pieces + flanks))
 
-            changed_intervals.append((interval_start, current_index + group_len))
-        current_index += group_len
+    return QueryReconSubsequence(
+        chrom=chrom, svtype=sv_type, svid=svid, sequence=sequence,
+        location=offset, length=len(sequence), ref_start=offset, ref_end=ref_end,
+        segments=covering_segments)
 
-    for start, stop in changed_intervals:
-        adjusted_start = max(0, start - buffer)
-        adjusted_stop = min(stop + buffer + 1, len(new_sequence))
 
-        seq_slice = new_sequence[adjusted_start:adjusted_stop]
-        junc_slice = junction_mask[adjusted_start:adjusted_stop]
-
-        sequence_str = ''
-        junctions = []
-        current_str_idx = 0
-
-        for seq_char, is_junc in zip(seq_slice, junc_slice):
-            if is_junc:
-                junctions.append(current_str_idx)
-            sequence_str += seq_char
-            current_str_idx += len(seq_char)
-
-        junctions = sorted(list(set(junctions)))
-
-        query = QueryReconSubsequence(
-            chrom=chrom,
-            svtype=sv_type,
-            svid=svid,
-            sequence=sequence_str,
-            location=adjusted_start + offset,
-            length=len(sequence_str),
-            junctions=junctions,
-        )
-        queries.append(query)
-
-    return queries
+def _clip_out_overlap(earlier: _Segment, newer: _Segment, svid, sv_type):
+    """Trim `earlier` so it no longer overlaps `newer` (which owns the boundary)."""
+    overlap = min(earlier.end, newer.end) - max(earlier.start, newer.start)
+    if overlap <= 0:
+        return
+    if overlap > SEGMENT_CLIP_WARN_THRESHOLD:
+        logger.warning(f'{svid}-{sv_type}: reconstructed segment [{earlier.start},{earlier.end}] clipped '
+                       f'{overlap} bp by [{newer.start},{newer.end}] (imprecise caller coordinates?)')
+    if earlier.start < newer.start:
+        earlier.end = min(earlier.end, newer.start)
+    else:
+        earlier.start = max(earlier.start, newer.end)

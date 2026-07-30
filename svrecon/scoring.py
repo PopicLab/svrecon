@@ -15,7 +15,7 @@ from pysam import VariantRecord
 from tqdm import tqdm
 
 from svrecon.align import (check_match, edlib_to_cigartuples,
-                           run_edlib_fallback, validate_junctions_from_cigar, SeqJunctionsValidationResult)
+                           run_edlib_fallback, validate_segments_from_cigar, SeqSegmentValidationResult)
 from svrecon.constants import Outcome, SubseqReason, SubseqStatus
 from svrecon.plot import plot_dot_plot
 from svrecon.reads import run_read_edlib, ReadEdlibResult
@@ -39,7 +39,7 @@ class ScorerRecord:
     lowest_error: float = 1.0
     passed: bool = False
     validating_seq: Optional[str] = None
-    junction_results: List[SeqJunctionsValidationResult] = field(default_factory=list)
+    junction_results: List[SeqSegmentValidationResult] = field(default_factory=list)
     source: Optional[str] = None
     best_strand_match: Optional[int] = None
 
@@ -398,9 +398,9 @@ class AlignScorer(object):
                 #             seq_saw_candidate = True
                 #             if read_res.error <= self.read_error_threshold:
                 #                 cigartuples = edlib_to_cigartuples(read_res.cigar)
-                #                 junctions_validation_results: List[SeqJunctionsValidationResult] = \
-                #                     validate_junctions_from_cigar(cigartuples, query.junctions,
-                #                                                  window=junction_window_size,
+                #                 junctions_validation_results: List[SeqSegmentValidationResult] = \
+                #                     validate_segments_from_cigar(cigartuples, query.segments,
+                #                                                  radius=junction_window_size,
                 #                                                  error_threshold=self.read_error_threshold)
                 #                 if not seq_passed:
                 #                     seq_junctions = junctions_validation_results
@@ -435,9 +435,9 @@ class AlignScorer(object):
                             seq_saw_candidate = True
                             err = check_match(a, sequence)
                             if err <= match_error_threshold:
-                                junctions_validation_results: List[SeqJunctionsValidationResult] = \
-                                    validate_junctions_from_cigar(a.cigar, query.junctions,
-                                    window=junction_window_size,
+                                junctions_validation_results: List[SeqSegmentValidationResult] = \
+                                    validate_segments_from_cigar(a.cigar, query.segments,
+                                    radius=junction_window_size,
                                     q_st=a.q_st, q_en=a.q_en,
                                     query_len=len(sequence), strand=a.strand,
                                     error_threshold=match_error_threshold)
@@ -482,9 +482,9 @@ class AlignScorer(object):
                 #             seq_saw_candidate = True
                 #             if edlib_res.error <= match_error_threshold:
                 #                 cigartuples = edlib_to_cigartuples(edlib_res.cigar)
-                #                 junctions_validation_results: List[SeqJunctionsValidationResult] = \
-                #                     validate_junctions_from_cigar(cigartuples, query.junctions,
-                #                                                  window=junction_window_size,
+                #                 junctions_validation_results: List[SeqSegmentValidationResult] = \
+                #                     validate_segments_from_cigar(cigartuples, query.segments,
+                #                                                  radius=junction_window_size,
                 #                                                  error_threshold=match_error_threshold)
                 #                 if not seq_passed:
                 #                     seq_junctions = junctions_validation_results
@@ -521,9 +521,9 @@ class AlignScorer(object):
                 #             for a in aligner.map(sequence):
                 #                 err = check_match(a, sequence)
                 #                 if err <= match_error_threshold and (seq_reference_err is None or err < seq_reference_err):
-                #                     junctions_validation_results: List[SeqJunctionsValidationResult] = \
-                #                         validate_junctions_from_cigar(a.cigar, query.junctions,
-                #                                                      window=junction_window_size,
+                #                     junctions_validation_results: List[SeqSegmentValidationResult] = \
+                #                         validate_segments_from_cigar(a.cigar, query.segments,
+                #                                                      radius=junction_window_size,
                 #                                                      q_st=a.q_st, q_en=a.q_en,
                 #                                                      query_len=len(sequence), strand=a.strand,
                 #                                                      error_threshold=match_error_threshold)
@@ -535,10 +535,10 @@ class AlignScorer(object):
                 #         ref_res = run_edlib_fallback(sequence, chrom, query.location, int(buffer),
                 #                                      self.reference_search_tolerance, match_error_threshold, self.ref)
                 #         if ref_res is not None and ref_res.error <= match_error_threshold:
-                #             junctions_validation_results: List[SeqJunctionsValidationResult] = \
-                #                 validate_junctions_from_cigar(edlib_to_cigartuples(ref_res.cigar),
-                #                                              query.junctions,
-                #                                              window=junction_window_size,
+                #             junctions_validation_results: List[SeqSegmentValidationResult] = \
+                #                 validate_segments_from_cigar(edlib_to_cigartuples(ref_res.cigar),
+                #                                              query.segments,
+                #                                              radius=junction_window_size,
                 #                                              error_threshold=match_error_threshold)
                 #             if all(j.passed for j in junctions_validation_results):
                 #                 seq_reference_match = True
@@ -717,8 +717,8 @@ class AlignScorer(object):
             if read_res.is_read_found():
                 if read_res.error <= self.read_error_threshold:
                     cigartuples = edlib_to_cigartuples(read_res.cigar)
-                    junctions_validation_results: List[SeqJunctionsValidationResult] = \
-                                                                        validate_junctions_from_cigar(cigartuples, query.junctions,
+                    junctions_validation_results: List[SeqSegmentValidationResult] = \
+                                                                        validate_segments_from_cigar(cigartuples, query.segments,
                                                                                                 radius=junction_validation_radius,
                                                                                                 error_threshold=self.read_error_threshold)
                     if all(j.passed for j in junctions_validation_results):
@@ -763,8 +763,8 @@ class AlignScorer(object):
             for alignment in alignments:
                 match_err = check_match(alignment, query.sequence)
                 if match_err <= match_error_threshold:
-                    junctions_validation_results: List[SeqJunctionsValidationResult] = \
-                                                        validate_junctions_from_cigar(alignment.cigar, query.junctions,
+                    junctions_validation_results: List[SeqSegmentValidationResult] = \
+                                                        validate_segments_from_cigar(alignment.cigar, query.segments,
                                                         radius=junction_validation_radius,
                                                         q_st=alignment.q_st, q_en=alignment.q_en,
                                                         query_len=len(query.sequence), strand=alignment.strand,
@@ -815,8 +815,8 @@ class AlignScorer(object):
             )
             if edlib_res and edlib_res.error <= match_error_threshold:
                 cigartuples = edlib_to_cigartuples(edlib_res.cigar)
-                junctions_validation_results: List[SeqJunctionsValidationResult] = \
-                    validate_junctions_from_cigar(cigartuples, query.junctions,
+                junctions_validation_results: List[SeqSegmentValidationResult] = \
+                    validate_segments_from_cigar(cigartuples, query.segments,
                                                     radius=junction_validation_radius,
                                                     error_threshold=match_error_threshold)
                 if all(j.passed for j in junctions_validation_results):
@@ -849,8 +849,8 @@ class AlignScorer(object):
                 for a in aligner.map(query.sequence):
                     err = check_match(a, query.sequence)
                     if err <= match_error_threshold and (seq_reference_err is None or err < seq_reference_err):
-                        junctions_validation_results: List[SeqJunctionsValidationResult] = \
-                            validate_junctions_from_cigar(a.cigar, query.junctions,
+                        junctions_validation_results: List[SeqSegmentValidationResult] = \
+                            validate_segments_from_cigar(a.cigar, query.segments,
                                                             radius=junction_window_size,
                                                             q_st=a.q_st, q_en=a.q_en,
                                                             query_len=len(query.sequence), strand=a.strand,
@@ -863,9 +863,9 @@ class AlignScorer(object):
             ref_res = run_edlib_fallback(query.sequence, query.chrom, query.location, int(buffer),
                                             self.reference_search_tolerance, match_error_threshold, self.ref)
             if ref_res is not None and ref_res.error <= match_error_threshold:
-                junctions_validation_results: List[SeqJunctionsValidationResult] = \
-                    validate_junctions_from_cigar(edlib_to_cigartuples(ref_res.cigar),
-                                                    query.junctions,
+                junctions_validation_results: List[SeqSegmentValidationResult] = \
+                    validate_segments_from_cigar(edlib_to_cigartuples(ref_res.cigar),
+                                                    query.segments,
                                                     radius=junction_window_size,
                                                     error_threshold=match_error_threshold)
                 if all(j.passed for j in junctions_validation_results):

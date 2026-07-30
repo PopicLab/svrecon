@@ -11,6 +11,13 @@ import pysam
 
 logger = logging.getLogger(__name__)
 
+# CIGAR operation codes (SAM/BAM spec), in code order.
+_MATCH, _INS, _DEL, _REF_SKIP, _SOFT_CLIP, _HARD_CLIP, _PAD, _SEQ_MATCH, _SEQ_MISMATCH = range(9)
+# Op groupings used when scanning a CIGAR window.
+_QUERY_CONSUMING_OPS = {_MATCH, _INS, _SOFT_CLIP, _SEQ_MATCH, _SEQ_MISMATCH}  # advance the query cursor
+_TARGET_ONLY_OPS = {_DEL, _REF_SKIP}                                          # query gaps (deletions)
+_ERROR_OPS = {_INS, _SOFT_CLIP, _SEQ_MISMATCH}                                # query bases that aren't clean matches
+
 
 def edlib_to_cigartuples(cigar_str: str) -> List[Tuple[int, int]]:
     """
@@ -21,7 +28,7 @@ def edlib_to_cigartuples(cigar_str: str) -> List[Tuple[int, int]]:
 
 
 @dataclass
-class SeqJunctionsValidationResult:
+class SeqSegmentValidationResult:
     error: float
     passed: bool
 
@@ -29,122 +36,103 @@ class SeqJunctionsValidationResult:
         return {'error': self.error, 'passed': self.passed}
 
 
-def validate_junctions_from_cigar(cigartuples: List[Tuple[int, int]], junctions: List[int], q_st: int = 0,
+def validate_segments_from_cigar(cigartuples: List[Tuple[int, int]], segments: List[Tuple[int, int]], q_st: int = 0,
                                   q_en: int = None, query_len: int = None, strand: int = 1,
-                                  radius: int = 150, error_threshold: float = 0.1) -> List[SeqJunctionsValidationResult]:
+                                  radius: int = 150, error_threshold: float = 0.1) -> List[SeqSegmentValidationResult]:
     """
-    Calculates the local error rate within a window around each structural-variant junction.
+    Using the cigar summary of an alignment, verify the error rate for each of the provided segments is within tolerance.
 
-    The window is defined in FORWARD-QUERY coordinates ``[j - window, j + window]`` (clamped to
-    ``[0, query_len]``). Two subtleties the aligner introduces are handled explicitly:
+    Each segment is a forward-query range ``[start, end)`` checked over the window
+    ``[start - radius, end + radius]`` (clamped to ``[0, query_len]``). Any length works, so a pure
+    deletion, which has no query extent, is just a zero-length segment ``(i, i)`` whose window is
+    the ``radius`` context around its join. Two aligner subtleties are handled explicitly:
 
-    * Soft-clipped flanks. mappy's CIGAR covers only the aligned region ``[q_st, q_en)``; any
-      query base in the window that the aligner clipped (outside that region) is a base where the
-      junction adjacency is NOT actually spanned, so it is counted as an error. Without this a
-      novel junction sitting at the clip boundary (e.g. dupINVdup's outer ``A|c`` / ``a|C``, where
-      only the inverted core matches the reference) would read as clean 0.0 error.
-    * Reverse-strand orientation. A reverse hit's CIGAR walks ``RC(query)``, so forward-query
-      offset ``p`` sits at CIGAR-query cursor ``q_en - 1 - p``. The forward slice of the window is
-      therefore mapped to the mirrored cursor slice before the CIGAR is crawled.
+    * Soft-clipped flanks: query bases in the window outside the aligned region ``[q_st, q_en)`` are
+      not spanned by the alignment and count as error (so a segment sitting at a clip boundary does
+      not read as clean 0.0).
+    * Reverse-strand orientation: a reverse hit's CIGAR walks ``RC(query)``, so the forward-query
+      window is mirrored to CIGAR-cursor coordinates before the CIGAR is crawled.
 
-    ``q_en`` / ``query_len`` / ``strand`` default to the forward, fully-consumed case
-    (``q_en = q_st + cigar_q_len``, ``query_len = q_en``, ``strand = 1``) so edlib callers -- which
-    consume the whole query on the forward strand -- can omit them.
+    ``q_en`` / ``query_len`` / ``strand`` default to the forward, fully-consumed case so edlib
+    callers (which consume the whole query on the forward strand) can omit them.
 
-    Returns an ordered list of per-junction results, one ``SeqJunctionsValidationResult`` per
-    in-scope junction in the order checked. Evaluation short-circuits on the first junction
-    whose local error exceeds ``error_threshold``: that failing junction is the last entry and
-    later in-scope junctions are not checked. A junction whose window collapses to no bases is
-    recorded as ``SeqJunctionsValidationResult(error=0.0, passed=True)``. Callers derive the
-    overall verdict as ``all(j.passed for j in results)`` (an empty list -- no in-scope
-    junctions -- passes).
+    :param cigartuples: BAM-style ``(length, op)`` tuples for the alignment.
+    :param segments: List of ``(start, end)`` forward-query ranges to validate. A deletion is a
+        zero-length ``(i, i)`` range.
+    :param radius: context buffer window extended left and right of the segment range.
+
+    Returns an ordered list of :class:`SeqSegmentValidationResult`, one per in-scope segment,
+    short-circuiting on the first segment whose local error exceeds ``error_threshold``. A segment
+    whose window collapses to no bases is recorded as ``error=0.0, passed=True``. Callers derive the
+    overall verdict as ``all(s.passed for s in results)`` (an empty list passes).
 
     Official SAM/BAM CIGAR Specification: https://samtools.github.io/hts-specs/SAMv1.pdf
     """
-    # Define CIGAR operation constants for readability
-    MATCH = 0  # M: Alignment match (can be sequence match or mismatch)
-    INS = 1  # I: Insertion to the reference
-    DEL = 2  # D: Deletion from the reference
-    REF_SKIP = 3  # N: Skipped region from the reference
-    SOFT_CLIP = 4  # S: Soft clipping (clipped sequences present in query)
-    HARD_CLIP = 5  # H: Hard clipping (clipped sequences NOT present in query)
-    PAD = 6  # P: Padding (silent deletion from padded reference)
-    SEQ_MATCH = 7  # =: Exact sequence match
-    SEQ_MISMATCH = 8  # X: Exact sequence mismatch
-
-    # Operations that consume space in the simulated query sequence
-    QUERY_CONSUMING_OPS = {MATCH, INS, SOFT_CLIP, SEQ_MATCH, SEQ_MISMATCH}
-    # Operations that only represent gaps in the target assembly
-    TARGET_ONLY_OPS = {DEL, REF_SKIP}
-    # Query-consuming operations that constitute local error
-    ERROR_OPS = {INS, SOFT_CLIP, SEQ_MISMATCH}
-
-    # Calculate total query length consumed by this specific CIGAR
-    cigar_q_len = sum(length for length, op in cigartuples if op in QUERY_CONSUMING_OPS)
+    cigar_query_length = sum(length for length, op in cigartuples if op in _QUERY_CONSUMING_OPS)
     if q_en is None:
-        q_en = q_st + cigar_q_len
+        q_en = q_st + cigar_query_length
     if query_len is None:
         query_len = q_en
 
     results = []
-    for j_idx in junctions:
-        # Only validate junctions that fall within the scope of this alignment segment.
-        # This prevents "False Misses" when Mappy splits chimeric alignments.
-        if j_idx < q_st - radius or j_idx > q_en + radius:
+    for seg_start, seg_end in segments:
+        # Skip segments outside this alignment's scope (a chimeric split can land one elsewhere).
+        if seg_end < q_st - radius or seg_start > q_en + radius:
             continue
 
-        # Window in FORWARD-QUERY coordinates, clamped to the real query.
-        w_lo = max(0, j_idx - radius)
-        w_hi = min(query_len, j_idx + radius)
-        if w_hi <= w_lo:
-            results.append(SeqJunctionsValidationResult(error=0.0, passed=True))
+        # The segment plus `radius` of context, in forward-query coordinates, clamped to the query.
+        window_start = max(0, seg_start - radius)
+        window_end = min(query_len, seg_end + radius)
+        if window_end <= window_start:
+            results.append(SeqSegmentValidationResult(error=0.0, passed=True))
             continue
 
-        total_bases = w_hi - w_lo
-        # Clipped query bases inside the window: the adjacency is not spanned there -> error.
-        errors = max(0, min(w_hi, q_st) - w_lo) + max(0, w_hi - max(w_lo, q_en))
-
-        # Aligned slice of the window, mapped from forward-query into CIGAR-cursor coordinates.
-        a_lo = max(w_lo, q_st)
-        a_hi = min(w_hi, q_en)
-        if a_hi > a_lo:
-            if strand == -1:
-                # Reverse hit: CIGAR walks RC(query); mirror the forward slice.
-                c_lo = q_en - a_hi
-                c_hi = q_en - a_lo
-            else:
-                c_lo = a_lo - q_st
-                c_hi = a_hi - q_st
-
-            query_cursor = 0
-            for length, op in cigartuples:
-                # Stop once the cursor has moved past the evaluation window.
-                if query_cursor >= c_hi and op not in TARGET_ONLY_OPS:
-                    break
-
-                if op in TARGET_ONLY_OPS:
-                    # A deletion inside the window is recorded as error.
-                    if c_lo <= query_cursor < c_hi:
-                        errors += length
-                        total_bases += length
-                    continue
-
-                if op in QUERY_CONSUMING_OPS:
-                    if op in ERROR_OPS:
-                        overlap = max(0, min(c_hi, query_cursor + length) - max(c_lo, query_cursor))
-                        errors += overlap
-                    query_cursor += length
-
-        err_rate = errors / total_bases
-        passed = err_rate <= error_threshold
-        # Store as a native JSON number at 4 sig figs; small rates keep precision and
-        # serialize in exponent form (e.g. 8.6e-06) rather than flattening to 0.
-        results.append(SeqJunctionsValidationResult(error=float(f'{err_rate:.4g}'), passed=passed))
-        # Short-circuit on the first failing junction (original return-False behavior).
-        if not passed:
+        error_rate = _window_error_rate(cigartuples, window_start, window_end, q_st, q_en, strand)
+        passed = error_rate <= error_threshold
+        results.append(SeqSegmentValidationResult(error=float(f'{error_rate:.4g}'), passed=passed))
+        if not passed:  # short-circuit on the first failing segment
             break
 
     return results
+
+
+def _window_error_rate(cigartuples: List[Tuple[int, int]], window_start: int, window_end: int,
+                       q_st: int, q_en: int, strand: int) -> float:
+    """Fraction of the forward-query window ``[window_start, window_end)`` that is not a clean
+    aligned match. Two sources of error: query bases the aligner clipped (outside ``[q_st, q_en)``),
+    and mismatch / insertion / deletion bases the CIGAR reports inside the window. A reverse hit's
+    CIGAR walks ``RC(query)``, so the window is mirrored into CIGAR-cursor coordinates before it is
+    scanned."""
+    window_bases = window_end - window_start
+    # Bases in the window the alignment never spanned (soft-clipped flanks).
+    error_bases = max(0, min(window_end, q_st) - window_start) + max(0, window_end - max(window_start, q_en))
+
+    aligned_start = max(window_start, q_st)
+    aligned_end = min(window_end, q_en)
+    if aligned_end > aligned_start:
+        if strand == -1:
+            cursor_start, cursor_end = q_en - aligned_end, q_en - aligned_start
+        else:
+            cursor_start, cursor_end = aligned_start - q_st, aligned_end - q_st
+
+        query_cursor = 0
+        for length, op in cigartuples:
+            if query_cursor >= cursor_end and op not in _TARGET_ONLY_OPS:
+                break  # past the window
+
+            if op in _TARGET_ONLY_OPS:
+                # A deletion inside the window is error and widens the assessed span.
+                if cursor_start <= query_cursor < cursor_end:
+                    error_bases += length
+                    window_bases += length
+                continue
+
+            if op in _QUERY_CONSUMING_OPS:
+                if op in _ERROR_OPS:
+                    error_bases += max(0, min(cursor_end, query_cursor + length) - max(cursor_start, query_cursor))
+                query_cursor += length
+
+    return error_bases / window_bases
 
 
 def get_chrom_aligner(sample_fasta: str, chrom: str, cache_dir: str, align_params: dict,

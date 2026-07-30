@@ -5,9 +5,8 @@ Run:  python -m pytest tests/      (from the repo root)
   or: python -m unittest discover tests
 
 Scope: the functions that can be exercised without VCF/BAM/aligner fixtures --
-`reverse_complement` (svrecon.util), `edlib_score`/`validate_junctions_from_cigar`
-(svrecon.align), `run_read_edlib` (svrecon.reads) and `get_changed_subsequences`
-(svrecon.reconstruct). Several cases are regression tests for bugs fixed while
+`reverse_complement` (svrecon.util), `edlib_score`/`validate_segments_from_cigar`
+(svrecon.align) and `run_read_edlib` (svrecon.reads). Several cases are regression tests for bugs fixed while
 building read-based evaluation; those carry a "regression" note. The reason/tier
 classification inside `score_sv` is intentionally not covered here -- it is
 inlined and would require full VCF/BAM/aligner fixtures.
@@ -15,9 +14,8 @@ inlined and would require full VCF/BAM/aligner fixtures.
 import unittest
 
 from svrecon.util import reverse_complement
-from svrecon.align import edlib_score, validate_junctions_from_cigar
+from svrecon.align import edlib_score, validate_segments_from_cigar
 from svrecon.reads import run_read_edlib, ReadEdlibResult
-from svrecon.reconstruct import get_changed_subsequences
 
 # BAM CIGAR op codes used to build fixtures below.
 SEQ_MATCH, SEQ_MISMATCH = 7, 8
@@ -116,80 +114,57 @@ class TestRunReadEdlib(unittest.TestCase):
         self.assertEqual(res2.n_tried, 2)
 
 
-class TestGetChangedSubsequences(unittest.TestCase):
-    """result_len is computed internally (no longer a parameter) as the true bp
-    length of the resulting allele: sum of element lengths, not element count."""
-
-    def test_result_len_no_deletion(self):
-        new_seq = list('AAACGTAAA')
-        changed = [False] * 3 + [True] * 3 + [False] * 3
-        junc = [False] * 9
-        junc[3] = junc[5] = True
-        q = get_changed_subsequences(new_seq, changed, junc, 5, 100, 2, 'sv1', 'chr1', 'INV')
-        self.assertEqual(len(q), 1)
-        self.assertEqual(q[0].result_len, 9)
-        self.assertEqual(q[0].sequence, 'AACGTAAA')  # region +/- buffer, stop+buffer+1
-
-    def test_result_len_deletion_counts_bp_not_elements(self):
-        # Regression: deletions leave empty '' placeholder elements. Element count
-        # (8) over-estimated the allele; the true bp length is 6.
-        new_seq = list('AAA') + ['', ''] + list('GGG')  # 8 elements, 6 bp
-        changed = [False] * 3 + [True] * 2 + [False] * 3
-        junc = [False] * 8
-        junc[3] = True
-        q = get_changed_subsequences(new_seq, changed, junc, 5, 0, 1, 'sv2', 'chr1', 'DEL')
-        self.assertEqual(q[0].result_len, 6)
-        self.assertEqual(q[0].sequence, 'AGG')  # slice [2:7] = [A,'','',G,G]; '' skipped
-
-    def test_result_len_multichar_clip_counts_bp(self):
-        # An inserted clip stored as one multi-char element contributes its bp, not 1.
-        new_seq = list('AA') + ['CCCC'] + list('AA')  # 5 elements, 8 bp
-        changed = [False] * 2 + [True] + [False] * 2
-        junc = [False] * 5
-        junc[2] = True
-        q = get_changed_subsequences(new_seq, changed, junc, 5, 0, 5, 'sv3', 'chr1', 'DUP')
-        self.assertEqual(q[0].result_len, 8)
-
-
-class TestValidateJunctionsFromCigar(unittest.TestCase):
-    """The validator returns an ordered list of per-junction SeqJunctionsValidationResult
-    objects (not a bool). Overall verdict is all(j.passed for j in results); an empty list
-    (no in-scope junction) passes. It short-circuits on the first failing junction."""
+class TestValidateSegmentsFromCigar(unittest.TestCase):
+    """The validator returns an ordered list of per-segment SeqSegmentValidationResult objects
+    (not a bool). Overall verdict is all(s.passed for s in results); an empty list (no in-scope
+    segment) passes. It short-circuits on the first failing segment. A zero-width segment (i, i)
+    is the junction-style point case, checked over the window [i - radius, i + radius]; a
+    (start, end) segment extends the window to [start - radius, end + radius]."""
 
     def test_clean_match_passes(self):
-        # 200 exact matches; a junction mid-alignment sees zero local error.
-        results = validate_junctions_from_cigar([(200, SEQ_MATCH)], [100], radius=50, error_threshold=0.1)
+        # 200 exact matches; a point segment mid-alignment sees zero local error.
+        results = validate_segments_from_cigar([(200, SEQ_MATCH)], [(100, 100)], radius=50, error_threshold=0.1)
         self.assertEqual(len(results), 1)
         self.assertTrue(results[0].passed)
         self.assertEqual(results[0].error, 0.0)  # native number
-        self.assertTrue(all(j.passed for j in results))
+        self.assertTrue(all(s.passed for s in results))
 
-    def test_mismatch_cluster_at_junction_fails(self):
-        # 20 mismatches inside a 100bp window (err 0.2 > 0.1) -> the junction fails.
+    def test_mismatch_cluster_at_segment_fails(self):
+        # 20 mismatches inside a 100bp window (err 0.2 > 0.1) -> the point segment fails.
         cig = [(50, SEQ_MATCH), (20, SEQ_MISMATCH), (130, SEQ_MATCH)]
-        results = validate_junctions_from_cigar(cig, [60], radius=50, error_threshold=0.1)
+        results = validate_segments_from_cigar(cig, [(60, 60)], radius=50, error_threshold=0.1)
         self.assertEqual(len(results), 1)
         self.assertFalse(results[0].passed)
         self.assertAlmostEqual(results[0].error, 0.2, places=6)  # native number
-        self.assertFalse(all(j.passed for j in results))
+        self.assertFalse(all(s.passed for s in results))
+
+    def test_range_segment_pools_error_over_window(self):
+        # A real (non-point) segment [50,150) with radius 25 -> window [25,175], 150 bases; the
+        # 30 mismatches inside it give 30/150 = 0.2 > 0.1 -> the segment fails. Exercises the
+        # range window that a point junction could not.
+        cig = [(60, SEQ_MATCH), (30, SEQ_MISMATCH), (110, SEQ_MATCH)]
+        results = validate_segments_from_cigar(cig, [(50, 150)], radius=25, error_threshold=0.1)
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0].passed)
+        self.assertAlmostEqual(results[0].error, 30 / 150, places=6)
 
     def test_short_circuits_on_first_failure(self):
-        # Two junctions, the first fails -> the list ends at it; the second is not checked.
+        # Two segments, the first fails -> the list ends at it; the second is not checked.
         cig = [(50, SEQ_MATCH), (20, SEQ_MISMATCH), (130, SEQ_MATCH)]
-        results = validate_junctions_from_cigar(cig, [60, 500], radius=50, error_threshold=0.1)
+        results = validate_segments_from_cigar(cig, [(60, 60), (500, 500)], radius=50, error_threshold=0.1)
         self.assertEqual(len(results), 1)
         self.assertFalse(results[0].passed)
 
-    def test_out_of_scope_junction_skipped(self):
-        # A junction beyond this alignment segment is not counted (empty -> passes).
-        results = validate_junctions_from_cigar([(200, SEQ_MATCH)], [10000], radius=50)
+    def test_out_of_scope_segment_skipped(self):
+        # A segment beyond this alignment span is not counted (empty -> passes).
+        results = validate_segments_from_cigar([(200, SEQ_MATCH)], [(10000, 10000)], radius=50)
         self.assertEqual(results, [])
-        self.assertTrue(all(j.passed for j in results))
+        self.assertTrue(all(s.passed for s in results))
 
-    def test_no_junctions_returns_empty_and_passes(self):
-        results = validate_junctions_from_cigar([(200, SEQ_MATCH)], [], radius=50)
+    def test_no_segments_returns_empty_and_passes(self):
+        results = validate_segments_from_cigar([(200, SEQ_MATCH)], [], radius=50)
         self.assertEqual(results, [])
-        self.assertTrue(all(j.passed for j in results))
+        self.assertTrue(all(s.passed for s in results))
 
 
 if __name__ == '__main__':
