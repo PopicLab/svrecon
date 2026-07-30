@@ -158,7 +158,7 @@ class TestValidateJunctionsFromCigar(unittest.TestCase):
 
     def test_clean_match_passes(self):
         # 200 exact matches; a junction mid-alignment sees zero local error.
-        results = validate_junctions_from_cigar([(200, SEQ_MATCH)], [100], window=50, error_threshold=0.1)
+        results = validate_junctions_from_cigar([(200, SEQ_MATCH)], [100], radius=50, error_threshold=0.1)
         self.assertEqual(len(results), 1)
         self.assertTrue(results[0].passed)
         self.assertEqual(results[0].error, 0.0)  # native number
@@ -167,7 +167,7 @@ class TestValidateJunctionsFromCigar(unittest.TestCase):
     def test_mismatch_cluster_at_junction_fails(self):
         # 20 mismatches inside a 100bp window (err 0.2 > 0.1) -> the junction fails.
         cig = [(50, SEQ_MATCH), (20, SEQ_MISMATCH), (130, SEQ_MATCH)]
-        results = validate_junctions_from_cigar(cig, [60], window=50, error_threshold=0.1)
+        results = validate_junctions_from_cigar(cig, [60], radius=50, error_threshold=0.1)
         self.assertEqual(len(results), 1)
         self.assertFalse(results[0].passed)
         self.assertAlmostEqual(results[0].error, 0.2, places=6)  # native number
@@ -176,18 +176,18 @@ class TestValidateJunctionsFromCigar(unittest.TestCase):
     def test_short_circuits_on_first_failure(self):
         # Two junctions, the first fails -> the list ends at it; the second is not checked.
         cig = [(50, SEQ_MATCH), (20, SEQ_MISMATCH), (130, SEQ_MATCH)]
-        results = validate_junctions_from_cigar(cig, [60, 500], window=50, error_threshold=0.1)
+        results = validate_junctions_from_cigar(cig, [60, 500], radius=50, error_threshold=0.1)
         self.assertEqual(len(results), 1)
         self.assertFalse(results[0].passed)
 
     def test_out_of_scope_junction_skipped(self):
         # A junction beyond this alignment segment is not counted (empty -> passes).
-        results = validate_junctions_from_cigar([(200, SEQ_MATCH)], [10000], window=50)
+        results = validate_junctions_from_cigar([(200, SEQ_MATCH)], [10000], radius=50)
         self.assertEqual(results, [])
         self.assertTrue(all(j.passed for j in results))
 
     def test_no_junctions_returns_empty_and_passes(self):
-        results = validate_junctions_from_cigar([(200, SEQ_MATCH)], [], window=50)
+        results = validate_junctions_from_cigar([(200, SEQ_MATCH)], [], radius=50)
         self.assertEqual(results, [])
         self.assertTrue(all(j.passed for j in results))
 

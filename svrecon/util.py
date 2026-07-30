@@ -5,16 +5,31 @@ from typing import Dict, List, Tuple, Union
 import pysam
 from pysam import VariantRecord
 
-
 _RC_TRANS = str.maketrans('ACGTNacgtn', 'TGCANtgcan')
 
+
+
+def clamp(x: float, lo: float, hi: float) -> float:
+    """Clamps x to the closed interval [lo, hi]."""
+    return max(lo, min(hi, x))
+
+
+def merge_intervals(intervals: List[List[int]]) -> List[List[int]]:
+    """Merges overlapping [start, end] intervals into their union."""
+    merged = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return merged
 
 def reverse_complement(seq: Union[str, List[str]]) -> str:
     """Reverse complement of a DNA sequence (unknown bases -> N). Accepts a str or
     a list of single-character strings; always returns a str."""
     if not isinstance(seq, str):
         seq = ''.join(seq)
-    return seq.translate(_RC_TRANS)[::-1]
+    return seq.translate(_RC_TRANS)[::-1] # TODO: why is this RC, then reversed?
 
 
 def load_fasta_to_bytes(filename: str, chroms) -> Dict[str, bytearray]:

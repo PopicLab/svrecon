@@ -3,8 +3,7 @@ import logging
 import os
 import threading
 from dataclasses import dataclass
-from typing import List, Optional
-
+from typing import List, Optional, Dict
 import pysam
 
 from svrecon.align import edlib_score
@@ -26,6 +25,9 @@ class ReadEdlibResult:
     cigar: Optional[str] = None
     matched_read_sequence: Optional[str] = None
 
+    def is_read_found(self):
+        return self.cigar is not None
+
 
 class BamReader:
     """Process-wide, thread-safe BAM reader for read-based evaluation.
@@ -44,6 +46,13 @@ class BamReader:
             pysam.index(bam_path)
         self._bam = pysam.AlignmentFile(bam_path, 'rb')
         self._lock = threading.Lock()
+
+    def candidate_reads_from_records(self, records: List[pysam.VariantRecord]) -> Dict[str, List[str]]:
+        """
+        Merges intervals sharing chroms and returns a dictionary of candidate read sequences for each merged interval.
+        """
+        # TODO implement
+        pass
 
     def candidate_read_seqs(self, chrom: str, start: int, end: int, flank: int,
                             max_reads: int) -> List[str]:

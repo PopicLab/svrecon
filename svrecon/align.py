@@ -31,7 +31,7 @@ class SeqJunctionsValidationResult:
 
 def validate_junctions_from_cigar(cigartuples: List[Tuple[int, int]], junctions: List[int], q_st: int = 0,
                                   q_en: int = None, query_len: int = None, strand: int = 1,
-                                  window: int = 150, error_threshold: float = 0.1) -> List[SeqJunctionsValidationResult]:
+                                  radius: int = 150, error_threshold: float = 0.1) -> List[SeqJunctionsValidationResult]:
     """
     Calculates the local error rate within a window around each structural-variant junction.
 
@@ -90,12 +90,12 @@ def validate_junctions_from_cigar(cigartuples: List[Tuple[int, int]], junctions:
     for j_idx in junctions:
         # Only validate junctions that fall within the scope of this alignment segment.
         # This prevents "False Misses" when Mappy splits chimeric alignments.
-        if j_idx < q_st - window or j_idx > q_en + window:
+        if j_idx < q_st - radius or j_idx > q_en + radius:
             continue
 
         # Window in FORWARD-QUERY coordinates, clamped to the real query.
-        w_lo = max(0, j_idx - window)
-        w_hi = min(query_len, j_idx + window)
+        w_lo = max(0, j_idx - radius)
+        w_hi = min(query_len, j_idx + radius)
         if w_hi <= w_lo:
             results.append(SeqJunctionsValidationResult(error=0.0, passed=True))
             continue

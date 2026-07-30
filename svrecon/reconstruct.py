@@ -16,8 +16,13 @@ class QueryReconSubsequence:
     sequence: str
     location: int
     length: int
-    junctions: List[int]
-    result_len: int
+    # junctions: List[int] # TODO: replace with segments
+    ref_start: int # TODO: fill
+    ref_end: int   # TODO: fill
+    segments: List[tuple] # TODO: fill
+
+    def __len__(self):
+        return self.length
 
 
 def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[str, bytearray]) -> List[QueryReconSubsequence]:
@@ -193,7 +198,6 @@ def get_changed_subsequences(new_sequence, changed_mask, junction_mask, toleranc
     # Sum the element lengths rather than len(new_sequence): deletions leave empty
     # '' placeholders (and inserted clips can be multi-char), so element count
     # over-estimates the true bp length for deletion-containing alleles.
-    result_len = sum(len(s) for s in new_sequence)
 
     current_index = 0
     for value, group in groupby(changed_mask):
@@ -216,14 +220,14 @@ def get_changed_subsequences(new_sequence, changed_mask, junction_mask, toleranc
         seq_slice = new_sequence[adjusted_start:adjusted_stop]
         junc_slice = junction_mask[adjusted_start:adjusted_stop]
 
-        sequence = ''
+        sequence_str = ''
         junctions = []
         current_str_idx = 0
 
         for seq_char, is_junc in zip(seq_slice, junc_slice):
             if is_junc:
                 junctions.append(current_str_idx)
-            sequence += seq_char
+            sequence_str += seq_char
             current_str_idx += len(seq_char)
 
         junctions = sorted(list(set(junctions)))
@@ -232,11 +236,10 @@ def get_changed_subsequences(new_sequence, changed_mask, junction_mask, toleranc
             chrom=chrom,
             svtype=sv_type,
             svid=svid,
-            sequence=sequence,
+            sequence=sequence_str,
             location=adjusted_start + offset,
-            length=len(sequence),
+            length=len(sequence_str),
             junctions=junctions,
-            result_len=result_len,
         )
         queries.append(query)
 
