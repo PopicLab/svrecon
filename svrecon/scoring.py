@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 from svrecon.align import (check_match, edlib_to_cigartuples,
                            run_edlib_fallback, validate_segments_from_cigar, SeqSegmentValidationResult)
-from svrecon.constants import Outcome, SubseqReason, SubseqStatus
+from svrecon.constants import *
 from svrecon.plot import plot_dot_plot
 from svrecon.reads import run_read_edlib, ReadEdlibResult
 from svrecon.reconstruct import simulate_subsequences, QueryReconSubsequence
@@ -35,7 +35,7 @@ EDLIB_FALLBACK_MAX_TOLERANCE = 10_000_000
 JUNCTION_VALIDATION_WINDOW_MAX = 5000
 
 @dataclass
-class ScorerRecord:
+class SeqValidationRecord:
     query: QueryReconSubsequence
 
     # Pass Diagnostics
@@ -44,7 +44,7 @@ class ScorerRecord:
     passed: bool = False
     validating_seq: Optional[str] = None
     junction_results: List[SeqSegmentValidationResult] = field(default_factory=list)
-    source: Optional[str] = None
+    source: Optional[ValidationSource] = None
     # Pass Diagnostics, Optional
     best_strand_match: Optional[int] = None
 
@@ -68,6 +68,7 @@ class ScorerRecord:
     error: Optional[float] = None
 
     def update(self, **kwargs) -> None:
+        # Field update based on pass / no pass on validation methods
         self.lowest_error = min(self.lowest_error, kwargs.get('lowest_error', 1.0))
         if kwargs.get('passed'):
             if kwargs.get('lowest_pass_error', self.lowest_pass_error) >= self.lowest_pass_error:
@@ -78,15 +79,41 @@ class ScorerRecord:
             self.junction_results = kwargs.get('junction_results') or []
             self.source = kwargs.get('source')
             self.best_strand_match = kwargs.get('best_strand_match')
+
         elif not self.passed:
-            if kwargs.get('inconclusive'):
+            if not kwargs.get('overlapping_spanning_reads_found', True):
                 self.seq_inconclusive = True
-            if kwargs.get('reads_aborted'):
+            elif not kwargs.get('candidate_read_found', True):
                 self.seq_reads_aborted = True
             if kwargs.get('had_junction_rejection'):
                 self.seq_had_junction_rejection = True
             if kwargs.get('junction_results'):
                 self.junction_results = kwargs['junction_results']
+
+        # Status / reason diagnostic updates based on new fields
+        if self.source:
+            if self.reference_match:
+                self.status = SubseqStatus.INCONCLUSIVE
+                self.reason = SubseqReason.REFERENCE_MATCH
+            else:
+                self.status = SubseqStatus.PASS
+                self.reason = SubseqReason.PASS
+
+        # Read based validation failure diagnostics
+        elif not self.overlapping_spanning_reads_found:
+            self.status = SubseqStatus.INCONCLUSIVE
+            self.reason = SubseqReason.INCONCLUSIVE
+        elif not self.candidate_read_found:
+            self.status = SubseqStatus.FAIL
+            self.reason = SubseqReason.OVER_ERROR_THRESHOLD
+
+        # Assembly based validation failure diagnostics
+        elif self.junction_results:
+            self.status = SubseqStatus.FAIL
+            self.reason = SubseqReason.JUNCTION_FAILED
+        else:
+            self.status = SubseqStatus.FAIL
+            self.reason = SubseqReason.OTHER
 
     def apply_ambiguity(self, ambiguity: Optional['AmbiguityResult']) -> None:
         if ambiguity is not None and ambiguity.reference_match:
@@ -95,27 +122,11 @@ class ScorerRecord:
             self.reference_strand = ambiguity.reference_strand
 
     def populate_and_get_summary(self) -> Dict:
-        if self.source is not None and self.reference_match:
-            self.status, self.reason, self.error = SubseqStatus.INCONCLUSIVE, SubseqReason.REFERENCE_MATCH, self.reference_err
-        elif self.source is not None:
-            self.status, self.reason, self.error = SubseqStatus.PASS, SubseqReason.PASS, self.lowest_pass_error
-        elif self.seq_had_junction_rejection or self.seq_reads_aborted:
-            self.status = SubseqStatus.FAIL
-            self.reason = SubseqReason.JUNCTION_FAILED if self.seq_had_junction_rejection else SubseqReason.OVER_ERROR_THRESHOLD
-            self.error = self.lowest_error if self.lowest_error < 1.0 else None
-        elif self.seq_inconclusive:
-            self.status, self.reason = SubseqStatus.INCONCLUSIVE, SubseqReason.INCONCLUSIVE
-            self.error = self.lowest_error if self.lowest_error < 1.0 else None
-        else:
-            self.status = SubseqStatus.FAIL
-            self.reason = SubseqReason.NO_ALIGNMENT_IN_WINDOW
-            self.error = self.lowest_error if self.lowest_error < 1.0 else None
-
         return {
             'chrom': self.query.chrom,
             'ref_start': self.query.location,
-            'status': self.status.value,
-            'reason': self.reason.value,
+            'status': self.status,
+            'reason': self.reason,
             'source': self.source,
             'error': self.error,
             'strand': self.decisive_strand,
@@ -139,12 +150,10 @@ class ScorerRecord:
         return self.reference_strand if self.reason == SubseqReason.REFERENCE_MATCH else self.best_strand_match
 
      
-
-
 @dataclass
 class AmbiguityResult:
     reference_match: bool = False
-    reference_err: Optional[float] = None
+    reference_err: float = 1.0
     reference_strand: Optional[int] = None
 
 class AlignScorer(object):
@@ -279,7 +288,7 @@ class AlignScorer(object):
                             'svtype': sv_type,
                             'outcome': outcome,
                             'tier': result.get('tier'),
-                            'segments': [seg.jsonify() for seg in result.get('segments', [])],
+                            'segments': result.get('segments', []),
                         }) + '\n')
 
                     total_calls[sv_type] += 1
@@ -291,7 +300,7 @@ class AlignScorer(object):
                         segments = result.get('segments', [])
                         first_recon_seq = recon_sequences[0].sequence if recon_sequences else None
                         first_validating_seq = validating_sequences[0] if validating_sequences else None
-                        source = segments[0].source if segments else None
+                        source = segments[0]['source'] if segments else None
                         if first_recon_seq is not None and first_validating_seq is not None:
                             plot_path = Path(plot_out_dir) / f'{sv_type}_{svid}_{source}.png'
 
@@ -306,11 +315,11 @@ class AlignScorer(object):
                     if outcome == Outcome.HIT:
                         correct_calls[sv_type] += 1
                         overall_correct += 1
-                        if result.get('rescued_by_edlib'):
+                        src = result.get('validation_source') or ValidationSource.ASSEMBLY
+                        if src == ValidationSource.EDLIB:
                             edlib_rescues += 1
-                        src = result.get('validation_source') or 'assembly'
                         source_counts[src] += 1
-                        if src == 'reads':
+                        if src == ValidationSource.READS:
                             read_hits[sv_type] += 1
                         else:
                             assembly_hits[sv_type] += 1
@@ -392,7 +401,7 @@ class AlignScorer(object):
                 # Window size 
                 junction_validation_radius = int(clamp(round(self.junction_window_factor * len(query.sequence)), self.junction_window_min, self.junction_window_max))
 
-                score_record = ScorerRecord(query=query)
+                score_record = SeqValidationRecord(query=query)
 
                 if eval_reads: 
                     read_based_score = self._score_read_based_eval(query, junction_validation_radius, sv_ref_start_bp, sv_ref_end_bp, buffer)
@@ -451,12 +460,12 @@ class AlignScorer(object):
             # 'reads' implies the SV would have been an assembly-miss without reads.
             if is_correct:
                 srcs = set(s for s in subseq_sources if s)
-                if 'reads' in srcs:
-                    validation_source = 'reads'
-                elif 'edlib' in srcs:
-                    validation_source = 'edlib'
+                if ValidationSource.READS in srcs:
+                    validation_source = ValidationSource.READS
+                elif ValidationSource.EDLIB in srcs:
+                    validation_source = ValidationSource.EDLIB
                 else:
-                    validation_source = 'assembly'
+                    validation_source = ValidationSource.ASSEMBLY
             else:
                 validation_source = None
 
@@ -467,9 +476,9 @@ class AlignScorer(object):
             #   'assembly' (Tier 2) -- confirmed only against the reconstructed
             #              assembly (mappy or the edlib fallback). Supporting evidence
             #              for events too long for any single read to span.
-            if validation_source == 'reads':
+            if validation_source == ValidationSource.READS:
                 tier = 'read'
-            elif validation_source in ('assembly', 'edlib'):
+            elif validation_source in (ValidationSource.ASSEMBLY, ValidationSource.EDLIB):
                 tier = 'assembly'
             else:
                 tier = None
@@ -479,9 +488,6 @@ class AlignScorer(object):
                 'sv_type': sv_type,
                 'is_correct': is_correct,
                 'outcome': outcome,   # 'hit' | 'miss' | 'inconclusive'
-                # TODO: not yet tracked since mappy_passed_all fell out during the
-                # ScorerRecord/tier-method refactor -- always False until reinstated.
-                'rescued_by_edlib': False,
                 'validation_source': validation_source,
                 'tier': tier,   # 'read' (Tier 1) | 'assembly' (Tier 2) | None
                 'coords': coords,
@@ -505,12 +511,14 @@ class AlignScorer(object):
         passed = False
         validating_seq = None
         best_junction_validation_results = None
+        candidate_read_found = False
 
         reads_overlapping = self.bam_reader.candidate_read_seqs(query.chrom, read_bp_start, read_bp_end, int(buffer), self.max_reads_per_site)
         reads_spanning = [r for r in reads_overlapping if len(r) >= (query.result_len or len(query.sequence))] # TODO: I think this is just query.sequence
 
         if reads_spanning:
             read_res: ReadEdlibResult = run_read_edlib(query.sequence, reads_spanning, self.read_error_threshold, self.min_read_support)
+            candidate_read_found = read_res.was_read_found()
             if read_res.was_read_found():
                 lowest_error = min(lowest_error, read_res.error)
                 if read_res.error <= self.read_error_threshold:
@@ -529,16 +537,16 @@ class AlignScorer(object):
                         best_junction_validation_results = junctions_validation_results
 
         return {
-            'source': 'reads',
+            'source': ValidationSource.READS,
             'lowest_pass_error': lowest_pass_error,
             'lowest_error': lowest_error,
             'passed': passed,
             'validating_seq': validating_seq,
             'junction_results': best_junction_validation_results,
             # read assembly specific fields
-            'inconclusive': not reads_spanning,
-            'reads_aborted': not read_res.was_read_found(),
-        }   
+            'overlapping_spanning_reads_found': reads_spanning,
+            'candidate_read_found': candidate_read_found,
+        }
 
     def _score_assembly_based_eval(self, query: QueryReconSubsequence, junction_validation_radius, location_tolerance, match_error_threshold):
         lowest_pass_error = 1.0
@@ -577,7 +585,7 @@ class AlignScorer(object):
                         best_junction_validation_results = junctions_validation_results
 
         return {
-            'source': 'assembly',
+            'source': ValidationSource.ASSEMBLY,
             'lowest_pass_error': lowest_pass_error,
             'lowest_error': lowest_error,
             'passed': passed,
@@ -625,7 +633,7 @@ class AlignScorer(object):
                     best_junction_validation_results = junctions_validation_results
 
         return {
-            'source': 'edlib',
+            'source': ValidationSource.EDLIB,
             'lowest_pass_error': lowest_pass_error,
             'lowest_error': lowest_error,
             'passed': passed,

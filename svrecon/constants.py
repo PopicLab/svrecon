@@ -19,6 +19,7 @@ class SubseqReason(str, Enum):
     INCONCLUSIVE = 'inconclusive'
     NO_ALIGNER = 'no_aligner'
     NO_ALIGNMENT_IN_WINDOW = 'no_alignment_in_window'
+    OTHER = 'other'
 
 
 class Outcome(str, Enum):
@@ -26,3 +27,10 @@ class Outcome(str, Enum):
     HIT = 'hit'
     MISS = 'miss'
     INCONCLUSIVE = 'inconclusive'
+
+
+class ValidationSource(str, Enum):
+    """Which tier ultimately validated (or was attempted for) a subsequence."""
+    READS = 'reads'
+    ASSEMBLY = 'assembly'
+    EDLIB = 'edlib'
