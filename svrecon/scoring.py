@@ -509,7 +509,7 @@ class AlignScorer(object):
             'passed': passed,
             'validating_seq': validating_seq,
             'junction_results': best_junction_validation_results,
-            # read assembly specific fields
+            # read validation specific fields
             'overlapping_spanning_reads_found': reads_spanning,
             'candidate_read_found': candidate_read_found,
         }
