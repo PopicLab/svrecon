@@ -34,3 +34,10 @@ class ValidationSource(str, Enum):
     READS = 'reads'
     ASSEMBLY = 'assembly'
     EDLIB = 'edlib'
+
+
+class Tier(str, Enum):
+    """Coarse evaluation tier for two-tier reporting."""
+    READ = 'read'
+    ASSEMBLY = 'assembly'
+    MISS = 'miss'

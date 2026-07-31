@@ -48,24 +48,21 @@ class SeqValidationRecord:
     # Pass Diagnostics, Optional
     best_strand_match: Optional[int] = None
 
-    # Failure diagnostics -- only meaningful once a tier call did NOT pass; used to
-    # classify WHY a subsequence failed. Only what the eval methods actually emit:
-    # reads emits inconclusive/reads_aborted, edlib emits had_junction_rejection;
-    # assembly emits neither (no 'no_reads' kwarg exists anywhere -- dropped).
-    seq_inconclusive: bool = False
-    seq_reads_aborted: bool = False
-    seq_had_junction_rejection: bool = False
+    # Failure diagnostics -- only meaningful once a tier call did NOT pass. Only the
+    # reads tier emits these; default True ("not applicable/assume satisfied") so an
+    # assembly/edlib-only call never spuriously trips the classification below.
+    overlapping_spanning_reads_found: bool = True
+    candidate_read_found: bool = True
 
     # Populated by apply_ambiguity() -- only meaningful when passed, and only checked
     # when --check_reference is on.
-    reference_match: bool = False
-    reference_err: Optional[float] = None
-    reference_strand: Optional[int] = None
+    reference_check_match: bool = False
+    reference_check_err: Optional[float] = None
+    reference_check_strand: Optional[int] = None
 
     # Populated by get_summary() -- the final per-subsequence verdict.
     status: Optional['SubseqStatus'] = None
     reason: Optional['SubseqReason'] = None
-    error: Optional[float] = None
 
     def update(self, **kwargs) -> None:
         # Field update based on pass / no pass on validation methods
@@ -76,23 +73,21 @@ class SeqValidationRecord:
             self.passed = True
             self.lowest_pass_error = kwargs['lowest_pass_error']
             self.validating_seq = kwargs.get('validating_seq')
-            self.junction_results = kwargs.get('junction_results') or []
+            self.junction_results = kwargs.get('junction_results')
             self.source = kwargs.get('source')
             self.best_strand_match = kwargs.get('best_strand_match')
 
         elif not self.passed:
-            if not kwargs.get('overlapping_spanning_reads_found', True):
-                self.seq_inconclusive = True
-            elif not kwargs.get('candidate_read_found', True):
-                self.seq_reads_aborted = True
-            if kwargs.get('had_junction_rejection'):
-                self.seq_had_junction_rejection = True
+            if 'overlapping_spanning_reads_found' in kwargs:
+                self.overlapping_spanning_reads_found = bool(kwargs['overlapping_spanning_reads_found'])
+            if 'candidate_read_found' in kwargs:
+                self.candidate_read_found = kwargs['candidate_read_found']
             if kwargs.get('junction_results'):
                 self.junction_results = kwargs['junction_results']
 
         # Status / reason diagnostic updates based on new fields
         if self.source:
-            if self.reference_match:
+            if self.reference_check_match:
                 self.status = SubseqStatus.INCONCLUSIVE
                 self.reason = SubseqReason.REFERENCE_MATCH
             else:
@@ -117,37 +112,28 @@ class SeqValidationRecord:
 
     def apply_ambiguity(self, ambiguity: Optional['AmbiguityResult']) -> None:
         if ambiguity is not None and ambiguity.reference_match:
-            self.reference_match = True
-            self.reference_err = ambiguity.reference_err
-            self.reference_strand = ambiguity.reference_strand
+            self.reference_check_match = True
+            self.reference_check_err = ambiguity.reference_err
+            self.reference_check_strand = ambiguity.reference_strand
 
-    def populate_and_get_summary(self) -> Dict:
+    def get_summary(self) -> Dict:
         return {
             'chrom': self.query.chrom,
             'ref_start': self.query.location,
             'status': self.status,
             'reason': self.reason,
             'source': self.source,
-            'error': self.error,
             'strand': self.decisive_strand,
             'junctions': [j.jsonify() for j in self.junction_results],
             'validating_sequence': self.validating_seq,
         }
 
     @property
-    def err_str(self) -> str:
-        if self.error is not None:
-            return f'{self.error:.4f}'
-        if self.reason == SubseqReason.OVER_ERROR_THRESHOLD:
-            return 'aborted'  # spanning reads exceeded the 2x-threshold edlib bound
-        return 'NA'
-
-    @property
     def decisive_strand(self) -> Optional[int]:
         # Strand of the decisive alignment where meaningful: the reference match for a
         # reference_match, else the assembly match. None for read/edlib confirmations
         # (reads are randomly oriented; strand carries no signal there).
-        return self.reference_strand if self.reason == SubseqReason.REFERENCE_MATCH else self.best_strand_match
+        return self.reference_check_strand if self.reason == SubseqReason.REFERENCE_MATCH else self.best_strand_match
 
      
 @dataclass
@@ -384,17 +370,12 @@ class AlignScorer(object):
 
             recon_sequences: List[QueryReconSubsequence] = simulate_subsequences(records, buffer, self.ref)
 
-            match_scores: List[float] = []
-            validating_sequences: List[str] = []
-            subseq_diagnostics = []
-            subseq_sources = []
-            subseq_status = []   # per-subsequence: 'pass' | 'fail' | 'inconclusive'
-            segments = []        # structured per-subsequence detail for the optional JSON report
-            # mappy_passed_all = True
+            score_records: List[SeqValidationRecord] = []  # one per reconstructed subsequence
 
             eval_reads = self.eval_mode in ('reads', 'both')
             eval_assembly = self.eval_mode in ('assembly', 'both')
 
+            # TODO: populate
             candidate_reads: Dict = self.bam_reader.candidate_reads(records) if eval_reads else None # TODO: 
 
             for query in recon_sequences:
@@ -404,6 +385,7 @@ class AlignScorer(object):
                 score_record = SeqValidationRecord(query=query)
 
                 if eval_reads: 
+                    # TODO: populate params
                     read_based_score = self._score_read_based_eval(query, junction_validation_radius, sv_ref_start_bp, sv_ref_end_bp, buffer)
                     score_record.update(**read_based_score)
 
@@ -417,26 +399,8 @@ class AlignScorer(object):
 
                 if score_record.passed and self.check_reference:
                     score_record.apply_ambiguity(self._check_ambiguity(query, junction_validation_radius, match_error_threshold, buffer))
-
-                # Classify the subsequence from the evidence gathered above. It falls
-                # into exactly one category, and the category fixes both the scoring
-                # status and the diagnostic reason. Checked in priority order:
-                #   CONFIRMED    -- some tier matched within threshold -> pass.
-                #   CONTRADICTED -- a candidate (spanning read or assembly alignment)
-                #                   was evaluated and disagreed -> fail. In 'both' mode
-                #                   this means neither tier could confirm it.
-                #   UNTESTABLE   -- the read tier had no read to judge with (no
-                #                   overlapping / no spanning read) -> inconclusive:
-                #                   absence of a read is not evidence against the call.
-                #   NOT_FOUND    -- assembly tier produced nothing to compare against.
-                #                   In assembly mode absence IS the verdict -> fail.
                 
-                segments.append(score_record.populate_and_get_summary())
-                subseq_diagnostics.append(f'{score_record.reason.value}:{score_record.err_str}')
-                subseq_sources.append(score_record.source)
-                subseq_status.append(score_record.status)
-                match_scores.append(score_record.lowest_pass_error)
-                validating_sequences.append(score_record.validating_seq)
+                score_records.append(score_record)
 
             coords = records[0].pos, records[0].stop
 
@@ -446,6 +410,7 @@ class AlignScorer(object):
             #                   reads / assembly aligned but didn't match)
             #   inconclusive -> no contradiction, but at least one subsequence could
             #                   not be tested (reads mode: no read spans the full allele)
+            subseq_status = [r.status for r in score_records]
             if len(subseq_status) > 0 and all(s == SubseqStatus.PASS for s in subseq_status):
                 outcome = Outcome.HIT
             elif SubseqStatus.FAIL in subseq_status:
@@ -454,12 +419,11 @@ class AlignScorer(object):
                 outcome = Outcome.INCONCLUSIVE
             else:
                 outcome = Outcome.MISS
-            is_correct = (outcome == Outcome.HIT)
 
             # Per-SV provenance: the highest tier any passing subsequence needed.
             # 'reads' implies the SV would have been an assembly-miss without reads.
-            if is_correct:
-                srcs = set(s for s in subseq_sources if s)
+            if outcome == Outcome.HIT:
+                srcs = set(r.source for r in score_records if r.source)
                 if ValidationSource.READS in srcs:
                     validation_source = ValidationSource.READS
                 elif ValidationSource.EDLIB in srcs:
@@ -477,26 +441,28 @@ class AlignScorer(object):
             #              assembly (mappy or the edlib fallback). Supporting evidence
             #              for events too long for any single read to span.
             if validation_source == ValidationSource.READS:
-                tier = 'read'
+                tier = Tier.READ
             elif validation_source in (ValidationSource.ASSEMBLY, ValidationSource.EDLIB):
-                tier = 'assembly'
+                tier = Tier.ASSEMBLY
             else:
-                tier = None
+                tier = Tier.MISS
 
             return {
                 'svid': svid,
                 'sv_type': sv_type,
-                'is_correct': is_correct,
+                'is_correct': outcome == Outcome.HIT,
                 'outcome': outcome,   # 'hit' | 'miss' | 'inconclusive'
                 'validation_source': validation_source,
                 'tier': tier,   # 'read' (Tier 1) | 'assembly' (Tier 2) | None
                 'coords': coords,
-                'match_scores': match_scores,
-                'validating_sequences': validating_sequences,
+                'match_scores': [r.lowest_pass_error for r in score_records],
+                'best_scores': [r.lowest_error for r in score_records],
+                'validating_sequences': [r.validating_seq for r in score_records],
                 'recon_sequences': recon_sequences,
-                'subseq_diagnostics': subseq_diagnostics,
-                'segments': segments,
+                'subseq_diagnostics': [r.reason.value for r in score_records],
+                'segments': [r.get_summary() for r in score_records],
             }
+        
         except Exception as e:
             error_msg = f'Worker failed for SVID: {records[0].info.get("SVID", "Unknown")}. Error: {e}\n{traceback.format_exc()}'
             logger.error(error_msg)
@@ -510,7 +476,7 @@ class AlignScorer(object):
         lowest_error = 1.0
         passed = False
         validating_seq = None
-        best_junction_validation_results = None
+        best_junction_validation_results = []
         candidate_read_found = False
 
         reads_overlapping = self.bam_reader.candidate_read_seqs(query.chrom, read_bp_start, read_bp_end, int(buffer), self.max_reads_per_site)
@@ -553,7 +519,7 @@ class AlignScorer(object):
         lowest_error = 1.0
         passed = False
         validating_seq = None
-        best_junction_validation_results = None
+        best_junction_validation_results = []
         # Assembly match specific fields
         best_strand_match = None
 
@@ -600,9 +566,7 @@ class AlignScorer(object):
         lowest_error = 1.0
         passed = False
         validating_seq = None
-        best_junction_validation_results = None
-
-        had_junction_rejection = False
+        best_junction_validation_results = []
 
         for samp_bytes in self.sample:
             edlib_res = run_edlib_fallback(
