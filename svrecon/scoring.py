@@ -17,7 +17,7 @@ from tqdm import tqdm
 from svrecon.align import (check_match, edlib_to_cigartuples,
                            run_edlib_fallback, validate_segments_from_cigar, SeqSegmentValidationResult)
 from svrecon.constants import *
-from svrecon.plot import plot_dot_plot
+from svrecon.plot import plot_query_dot_plots
 from svrecon.reads import run_read_edlib, ReadEdlibResult
 from svrecon.reconstruct import simulate_subsequences, QueryReconSubsequence
 from svrecon.util import clamp, reverse_complement, merge_intervals
@@ -35,7 +35,7 @@ EDLIB_FALLBACK_MAX_TOLERANCE = 10_000_000
 JUNCTION_VALIDATION_WINDOW_MAX = 5000
 
 @dataclass
-class SeqValidationRecord:
+class QueryInfo:
     query: QueryReconSubsequence
 
     # Pass Diagnostics
@@ -43,6 +43,8 @@ class SeqValidationRecord:
     lowest_error: float = 1.0  # lowest error seen overall, pass or fail
     passed: bool = False
     validating_seq: Optional[str] = None
+    ref_sequence: Optional[str] = None
+    
     junction_results: List[SeqSegmentValidationResult] = field(default_factory=list)
     source: Optional[ValidationSource] = None
     # Pass Diagnostics, Optional
@@ -116,7 +118,7 @@ class SeqValidationRecord:
             self.reference_check_err = ambiguity.reference_err
             self.reference_check_strand = ambiguity.reference_strand
 
-    def get_summary(self) -> Dict:
+    def jsonify(self) -> Dict:
         return {
             'chrom': self.query.chrom,
             'ref_start': self.query.location,
@@ -274,29 +276,18 @@ class AlignScorer(object):
                             'svtype': sv_type,
                             'outcome': outcome,
                             'tier': result.get('tier'),
-                            'segments': result.get('segments', []),
+                            'segments': [seg.jsonify() for seg in result.get('segments', [])],
                         }) + '\n')
 
                     total_calls[sv_type] += 1
                     overall_count += 1
 
                     if plot_first_n and total_calls[sv_type] <= plot_first_n:
-                        # TODO: extend to cover every subsequence of a compound SV
-                        validating_sequences = result.get('validating_sequences', [])
-                        segments = result.get('segments', [])
-                        first_recon_seq = recon_sequences[0].sequence if recon_sequences else None
-                        first_validating_seq = validating_sequences[0] if validating_sequences else None
-                        source = segments[0]['source'] if segments else None
-                        if first_recon_seq is not None and first_validating_seq is not None:
-                            plot_path = Path(plot_out_dir) / f'{sv_type}_{svid}_{source}.png'
-
-                            logger.info(f'Producing dotplot for SV {svid} ({sv_type}, source={source})')
-                            plot_dot_plot(first_recon_seq, first_validating_seq,
-                                         f'{sv_type} {svid}', str(plot_path),
-                                         s1_name='reconstructed', s2_name=f'validating ({source})')
-
-                        else:
-                            logger.warning(f'Skipping dot plot for {svid} ({sv_type}): no validating sequence available.')
+                        query_infos = result.get('segments', [])
+                        if query_infos:
+                            logger.info(f'Producing dot plots for SV {svid} ({sv_type}, {len(query_infos)} part(s))')
+                            for part, query_info in enumerate(query_infos):
+                                plot_query_dot_plots(query_info, svid, sv_type, plot_out_dir, part=part)
 
                     if outcome == Outcome.HIT:
                         correct_calls[sv_type] += 1
@@ -369,24 +360,26 @@ class AlignScorer(object):
             sv_type = records[0].info['SVTYPE']
 
             recon_sequences: List[QueryReconSubsequence] = simulate_subsequences(records, buffer, self.ref)
-
-            score_records: List[SeqValidationRecord] = []  # one per reconstructed subsequence
+            score_records: List[QueryInfo] = []  # one per reconstructed subsequence of an SV
 
             eval_reads = self.eval_mode in ('reads', 'both')
             eval_assembly = self.eval_mode in ('assembly', 'both')
 
             # TODO: populate
-            candidate_reads: Dict = self.bam_reader.candidate_reads(records) if eval_reads else None # TODO: 
+            candidate_reads_by_chrom = None
+            if eval_reads:
+                candidate_reads_by_chrom: Dict[str, list] = self.bam_reader.candidate_reads_from_records(records) if eval_reads else None # TODO: 
 
             for query in recon_sequences:
                 # Window size 
                 junction_validation_radius = int(clamp(round(self.junction_window_factor * len(query.sequence)), self.junction_window_min, self.junction_window_max))
 
-                score_record = SeqValidationRecord(query=query)
+                score_record = QueryInfo(query=query)
+                if query.chrom in self.ref:
+                    score_record.ref_sequence = self.ref[query.chrom][query.ref_start:query.ref_end].decode('ascii')
 
-                if eval_reads: 
-                    # TODO: populate params
-                    read_based_score = self._score_read_based_eval(query, junction_validation_radius, sv_ref_start_bp, sv_ref_end_bp, buffer)
+                if eval_reads:
+                    read_based_score = self._score_read_based_eval(query, junction_validation_radius, candidate_reads_by_chrom[query.chrom], buffer)
                     score_record.update(**read_based_score)
 
                 if not score_record.passed and eval_assembly:
@@ -455,12 +448,13 @@ class AlignScorer(object):
                 'validation_source': validation_source,
                 'tier': tier,   # 'read' (Tier 1) | 'assembly' (Tier 2) | None
                 'coords': coords,
+                'queries': [r.query for r in score_records],
                 'match_scores': [r.lowest_pass_error for r in score_records],
                 'best_scores': [r.lowest_error for r in score_records],
                 'validating_sequences': [r.validating_seq for r in score_records],
                 'recon_sequences': recon_sequences,
                 'subseq_diagnostics': [r.reason.value for r in score_records],
-                'segments': [r.get_summary() for r in score_records],
+                'segments': score_records,
             }
         
         except Exception as e:
@@ -468,7 +462,7 @@ class AlignScorer(object):
             logger.error(error_msg)
             raise e
         
-    def _score_read_based_eval(self, query: QueryReconSubsequence, junction_validation_radius, read_bp_start, read_bp_end, buffer) -> Tuple[Dict, bool]:
+    def _score_read_based_eval(self, query: QueryReconSubsequence, junction_validation_radius, candidate_reads) -> Tuple[Dict, bool]:
         '''
         Read based validation,
         '''
@@ -479,14 +473,14 @@ class AlignScorer(object):
         best_junction_validation_results = []
         candidate_read_found = False
 
-        reads_overlapping = self.bam_reader.candidate_read_seqs(query.chrom, read_bp_start, read_bp_end, int(buffer), self.max_reads_per_site)
-        reads_spanning = [r for r in reads_overlapping if len(r) >= (query.result_len or len(query.sequence))] # TODO: I think this is just query.sequence
+        reads_spanning = [r for r in candidate_reads if len(r) >= len(query.sequence)]
 
         if reads_spanning:
             read_res: ReadEdlibResult = run_read_edlib(query.sequence, reads_spanning, self.read_error_threshold, self.min_read_support)
             candidate_read_found = read_res.was_read_found()
             if read_res.was_read_found():
                 lowest_error = min(lowest_error, read_res.error)
+                # TODO: check if this check is necessary
                 if read_res.error <= self.read_error_threshold:
                     cigartuples = edlib_to_cigartuples(read_res.cigar)
                     junctions_validation_results: List[SeqSegmentValidationResult] = \
