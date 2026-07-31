@@ -25,7 +25,7 @@ class ReadEdlibResult:
     cigar: Optional[str] = None
     matched_read_sequence: Optional[str] = None
 
-    def is_read_found(self):
+    def was_read_found(self):
         return self.cigar is not None
 
 

@@ -84,6 +84,10 @@ def main():
                         help="Write a dot-plot PNG (reconstructed subsequence vs. the validating real-data "
                              "sequence) for the first N SV calls of each SV type, into <output_dir>/img/ "
                              "(default 0 -- no plots).")
+    parser.add_argument('--assembly_forward_match_only', action='store_true', default=None,
+                        help="Only accept forward-strand alignments during assembly validation "
+                             "(reverse-strand hits are filtered out before the error/junction checks). "
+                             "Off by default (maps to both strands).")
     args = parser.parse_args()
 
     # --- Resolve the effective config: CLI flag > svrecon --config value > groovi inference > default ---
@@ -91,7 +95,7 @@ def main():
                   'igv_prefix', 'eval_mode', 'buffer', 'location_tolerance', 'read_error_threshold',
                   'min_read_support', 'max_reads_per_site', 'report', 'check_reference',
                   'junction_window_factor', 'junction_window_min',
-                  'junction_window_max', 'groovi_config', 'plot_first_n']
+                  'junction_window_max', 'groovi_config', 'plot_first_n', 'assembly_forward_match_only']
     cfg, unknown_keys = {}, []
     if args.config:
         with open(args.config) as f:
@@ -108,7 +112,7 @@ def main():
                 'igv_prefix': '', 'read_error_threshold': 0.1, 'min_read_support': 1,
                 'max_reads_per_site': 1000, 'report': 'none', 'check_reference': False,
                 'junction_window_factor': 1.5, 'junction_window_min': 150,
-                'junction_window_max': 300, 'plot_first_n': 0}
+                'junction_window_max': 300, 'plot_first_n': 0, 'assembly_forward_match_only': False}
     for k, v in defaults.items():
         if getattr(args, k) is None:
             setattr(args, k, v)
@@ -170,6 +174,7 @@ def main():
     scorer.junction_window_factor = args.junction_window_factor
     scorer.junction_window_min = args.junction_window_min
     scorer.junction_window_max = args.junction_window_max
+    scorer.assembly_forward_match_only = args.assembly_forward_match_only
 
     logger.info('Finding relevant chromosomes')
     chroms = set()
