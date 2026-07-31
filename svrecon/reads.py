@@ -2,12 +2,13 @@
 import logging
 import os
 import threading
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 import pysam
 
 from svrecon.align import edlib_score
-from svrecon.util import reverse_complement
+from svrecon.util import merge_intervals, reverse_complement
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +48,30 @@ class BamReader:
         self._bam = pysam.AlignmentFile(bam_path, 'rb')
         self._lock = threading.Lock()
 
-    def candidate_reads_from_records(self, records: List[pysam.VariantRecord]) -> Dict[str, List[str]]:
-        """
-        Merges intervals sharing chroms and returns a dictionary of candidate read sequences for each merged interval.
-        """
-        # TODO implement
-        pass
+    def candidate_reads_from_records(self, records: List[pysam.VariantRecord], flank: int,
+                                     max_reads: int) -> Dict[str, List[str]]:
+        """Full-chrom read sequences for every genomic locus an SV's records touch, by
+        contig (``{'chr1': [read_seq, ...]}``).
+
+        Each record contributes its in-place interval ``[start, stop)`` on its chrom; a paste record
+        also contributes its insertion ``TARGET`` (on ``TARGET_CHROM``).
+        Per chrom the loci are merged (so overlapping sub-loci are fetched once) and each
+        merged interval's reads from :meth:`candidate_read_seqs` are pooled and de-duplicated
+        into that chrom's list. The caller aligns the reconstruction against each chrom's pool."""
+        loci: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
+        for rec in records:
+            loci[rec.chrom].append((rec.start, rec.stop))
+            if 'TARGET' in rec.info:
+                target = int(rec.info['TARGET'])
+                loci[rec.info.get('TARGET_CHROM', rec.chrom)].append((target, target))
+
+        reads_by_chrom: Dict[str, List[str]] = {}
+        for chrom, intervals in loci.items():
+            pooled = [seq
+                      for start, stop in merge_intervals(intervals)
+                      for seq in self.candidate_read_seqs(chrom, start, stop, flank, max_reads)]
+            reads_by_chrom[chrom] = list(dict.fromkeys(pooled))  # dedup, preserve order
+        return reads_by_chrom
 
     def candidate_read_seqs(self, chrom: str, start: int, end: int, flank: int,
                             max_reads: int) -> List[str]:

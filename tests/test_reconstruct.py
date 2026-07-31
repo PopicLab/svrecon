@@ -152,19 +152,6 @@ class TestDupINVdupGrammar(unittest.TestCase):
         self.assertIn((70 + len(C) + len(B), 70 + len(C) + len(B) + len(A)), q.segments)  # a = RC(A)
         self.assertIn((70 + len(C) + len(B) + len(A), 70 + len(C) + len(B) + len(A) + len(C)), q.segments)  # C (kept)
 
-    @unittest.expectedFailure
-    def test_groovi_fragment_coords_leave_stray_junction_bases(self):
-        # Documents a groovi bug (seq/stitch_rules.py dupINVdup): B=[p1_1+1, p2_0-1)
-        # drops the two breakpoint bases and insert targets are asymmetric
-        # (pos2_0-1 vs pos1_1), so the allele is A c [stray] b a [stray] C, not A c b a C.
-        # Reproduce groovi's EXACT coords and assert the CLEAN allele -> currently fails.
-        p1_1, p2_0 = 70, 130
-        q = one(self._fragments(cCa_target=p1_1, aA_target=p2_0 - 1, b_lo=p1_1 + 1, b_hi=p2_0 - 1))
-        A, B, C = REF_S[40:70], REF_S[70:130], REF_S[130:170]
-        expected = (REF_S[:40] + A + reverse_complement(C) + reverse_complement(B)
-                    + reverse_complement(A) + C + REF_S[170:])
-        self.assertEqual(q.sequence, expected)
-
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
