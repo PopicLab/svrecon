@@ -5,7 +5,7 @@ from typing import Dict, List, Tuple, Union
 import pysam
 from pysam import VariantRecord
 
-_RC_TRANS = str.maketrans('ACGTNacgtn', 'TGCANtgcan')
+_COMPLEMENT_TRANS = str.maketrans('ACGTNacgtn', 'TGCANtgcan')
 
 
 
@@ -29,7 +29,7 @@ def reverse_complement(seq: Union[str, List[str]]) -> str:
     a list of single-character strings; always returns a str."""
     if not isinstance(seq, str):
         seq = ''.join(seq)
-    return seq.translate(_RC_TRANS)[::-1] # TODO: why is this RC, then reversed?
+    return seq.translate(_COMPLEMENT_TRANS)[::-1]
 
 
 def load_fasta_to_bytes(filename: str, chroms) -> Dict[str, bytearray]:

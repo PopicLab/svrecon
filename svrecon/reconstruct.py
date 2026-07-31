@@ -29,7 +29,6 @@ class QueryReconSubsequence:
     svtype: str
     svid: str
     sequence: str
-    location: int
     length: int
     ref_start: int
     ref_end: int
@@ -72,17 +71,17 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
 
     records = in_place_records + target_records
 
-    offset = max(0, min([rec.start for rec in records]) - buffer)
-    sequence_end = max([rec.stop for rec in records]) + buffer
+    ref_start = max(0, min([rec.start for rec in records]) - buffer)
+    ref_end = max([rec.stop for rec in records]) + buffer
 
-    target_offset = max(0, min([rec.info['TARGET'] for rec in target_records]) - buffer) if target_records else 0
-    target_sequence_end = max([rec.info['TARGET'] for rec in target_records]) + buffer if target_records else 0
+    target_ref_start = max(0, min([rec.info['TARGET'] for rec in target_records]) - buffer) if target_records else 0
+    target_ref_end = max([rec.info['TARGET'] for rec in target_records]) + buffer if target_records else 0
 
-    merged_target_sequence = offset <= target_offset + buffer and target_sequence_end - buffer <= sequence_end
+    merged_target_sequence = ref_start <= target_ref_start + buffer and target_ref_end - buffer <= ref_end
     if merged_target_sequence:
-        target_offset = offset
+        target_ref_start = ref_start
 
-    orig_sequence = list(ref[chrom][offset:sequence_end].decode('ascii'))
+    orig_sequence = list(ref[chrom][ref_start:ref_end].decode('ascii'))
     new_sequence = orig_sequence.copy()
     # Per-window segments, in that window's LIST-index coordinates. A deletion keeps its bases as ''
     # placeholders (so later ops' reference coordinates stay valid) and collapses to a zero-length
@@ -90,7 +89,7 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
     main_segments: List[_Segment] = []
 
     if not merged_target_sequence:
-        new_target_sequence = list(ref[chrom][target_offset:target_sequence_end].decode('ascii'))
+        new_target_sequence = list(ref[chrom][target_ref_start:target_ref_end].decode('ascii'))
         target_segments: List[_Segment] = []
 
     delete_placeholder = ''
@@ -98,10 +97,11 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
 
     def shift_after(segments, position, amount):
         """An insertion of `amount` bases at `position` pushes everything at/after it to the right."""
+        # TODO: fix
         for segment in segments:
-            if segment.start >= position:
-                segment.start += amount
             if segment.end > position:
+            # if segment.start >= position:
+                segment.start += amount
                 segment.end += amount
 
     # Pass 1: every operation's SOURCE region is a segment, in original (pre-transform) coordinates.
@@ -113,17 +113,18 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
                 f'Skipping record: {rec.id}-{sv_type} because interchromosome target. Interchromosome checks not implemented yet.')
             return []
         start, stop = get_start_stop(rec)
-        main_segments.append(_Segment(start - offset, stop - offset))
+        main_segments.append(_Segment(start - ref_start, stop - ref_start)) # Segments 0 indexes the new sequence
 
     # Pass 2: apply the transformations. In-place ops (DEL/INV) only rewrite bases -- their segment
     # already exists. A paste inserts its copy, shifts every segment after the insertion (sources
     # included), and records the copy.
     for rec in records:
         start, stop = get_start_stop(rec)
-        target = rec.info.get('TARGET', stop + 1) - target_offset
-        start -= offset
-        stop -= offset
+        target = rec.info.get('TARGET', stop + 1) - target_ref_start
+        start -= ref_start
+        stop -= ref_start
 
+        # OP_TYPE is sometimes NA
         if rec.info['OP_TYPE'] == 'CUT' or rec.info['SVTYPE'] == 'DEL':
             new_sequence[start:stop] = [delete_placeholder] * (stop - start)
         elif rec.info['OP_TYPE'] == 'INV' or rec.info['SVTYPE'] == 'INV':
@@ -173,9 +174,9 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
         else:
             logger.warning(f'Unknown OP_TYPE: {rec.info["OP_TYPE"]}')
 
-    queries.append(_finalize_window(new_sequence, main_segments, offset, sequence_end, svid, chrom, sv_type))
+    queries.append(_finalize_window(new_sequence, main_segments, ref_start, ref_end, svid, chrom, sv_type))
     if not merged_target_sequence:
-        queries.append(_finalize_window(new_target_sequence, target_segments, target_offset, target_sequence_end,
+        queries.append(_finalize_window(new_target_sequence, target_segments, target_ref_start, target_ref_end,
                                         svid, chrom, sv_type))
 
     return queries
@@ -213,7 +214,7 @@ def _finalize_window(window_chars, segments, offset, ref_end, svid, chrom, sv_ty
 
     return QueryReconSubsequence(
         chrom=chrom, svtype=sv_type, svid=svid, sequence=sequence,
-        location=offset, length=len(sequence), ref_start=offset, ref_end=ref_end,
+        length=len(sequence), ref_start=offset, ref_end=ref_end,
         segments=covering_segments)
 
 

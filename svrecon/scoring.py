@@ -121,7 +121,7 @@ class QueryInfo:
     def jsonify(self) -> Dict:
         return {
             'chrom': self.query.chrom,
-            'ref_start': self.query.location,
+            'ref_start': self.query.ref_start,
             'status': self.status,
             'reason': self.reason,
             'source': self.source,
@@ -365,7 +365,6 @@ class AlignScorer(object):
             eval_reads = self.eval_mode in ('reads', 'both')
             eval_assembly = self.eval_mode in ('assembly', 'both')
 
-            # TODO: populate
             candidate_reads_by_chrom = None
             if eval_reads:
                 candidate_reads_by_chrom: Dict[str, list] = self.bam_reader.candidate_reads_from_records(records) if eval_reads else None # TODO: 
@@ -519,7 +518,7 @@ class AlignScorer(object):
 
         for aligner in self.aligners[query.chrom]:
             all_alignments: List[mappy.Alignment] = list(aligner.map(query.sequence))
-            alignments = [a for a in all_alignments if abs(a.r_st - query.location) <= location_tolerance]
+            alignments = [a for a in all_alignments if abs(a.r_st - query.ref_start) <= location_tolerance]
             if self.assembly_forward_match_only:
                 alignments = [a for a in alignments if a.strand == 1]
 
@@ -566,7 +565,7 @@ class AlignScorer(object):
             edlib_res = run_edlib_fallback(
                 query.sequence,
                 query.chrom,
-                query.location,
+                query.ref_start,
                 buffer,
                 EDLIB_FALLBACK_MAX_TOLERANCE,
                 match_error_threshold,
@@ -619,7 +618,7 @@ class AlignScorer(object):
                             seq_reference_err = err
                             seq_reference_strand = a.strand
         if not seq_reference_match and len(query.sequence) < MIN_EDLIB_QUERY:
-            ref_res = run_edlib_fallback(query.sequence, query.chrom, query.location, int(buffer),
+            ref_res = run_edlib_fallback(query.sequence, query.chrom, query.ref_start, int(buffer),
                                             self.reference_search_tolerance, match_error_threshold, self.ref)
             if ref_res is not None and ref_res.error <= match_error_threshold:
                 junctions_validation_results: List[SeqSegmentValidationResult] = \
