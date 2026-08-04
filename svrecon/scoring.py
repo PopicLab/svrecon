@@ -20,7 +20,7 @@ from svrecon.constants import *
 from svrecon.plot import plot_query_dot_plots
 from svrecon.reads import run_read_edlib, ReadEdlibResult
 from svrecon.reconstruct import simulate_subsequences, QueryReconSubsequence
-from svrecon.util import clamp, reverse_complement, merge_intervals
+from svrecon.util import clamp, reverse_complement, get_start_stop
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +216,44 @@ class AlignScorer(object):
         self.variants = grouped_variants
         self.vcf_header = vcf_in.header
 
+    def _assert_sv_records_contiguous_intervals(self, records: List[VariantRecord]) -> None:
+        """
+        Raises ValueError unless records of an sv satisfy:
+        - all [start, stop) intervals are non overlapping and contiguous
+        - all targets are either outside of [min(starts), max(stops)), or land on an existing start or stop
+        """
+        # sort by (start, stop), check for contiguity
+        intervals = sorted(((*get_start_stop(rec), rec) for rec in records), key=lambda t: t[:2])
+        for (prev_start, prev_stop, prev_rec), (start, stop, rec) in zip(intervals, intervals[1:]):
+            if start != prev_stop:
+                interval_error_type = 'overlap' if start < prev_stop else 'gap'
+                raise ValueError(f'{rec.chrom}: record {rec.id} [{start},{stop}) is not contiguous with '
+                                 f'the preceding record {prev_rec.id} [{prev_start},{prev_stop}) '
+                                 f'({interval_error_type} of {abs(prev_stop - start)} bp)')
+
+        # find min/max start, stops, check target pos
+        starts = {start for start, _, _ in intervals}
+        stops = {stop for _, stop, _ in intervals}
+        min_start = intervals[0][0]
+        max_stop = max(stop for _, stop, _ in intervals)
+        for rec in records:
+            target = rec.info.get('TARGET')
+            if target is None:
+                continue
+            if min_start <= target < max_stop and target not in starts and target not in stops:
+                raise ValueError(f'{rec.chrom}: record {rec.id} TARGET={target} falls inside the SV\'s '
+                                 f'span [{min_start},{max_stop}) but does not land on an existing interval boundary')
+
+    def _assert_sv_records_non_interchromosomal(self, records: List[VariantRecord]) -> None:
+        """
+        Raises ValueError if any record's TARGET_CHROM differs from the SV's own chromosome.
+        """
+        chrom = records[0].chrom
+        for rec in records:
+            target_chrom = rec.info.get('TARGET_CHROM', chrom)
+            if target_chrom != chrom:
+                raise ValueError(f'record {rec.id} on {chrom} has an interchromosomal TARGET_CHROM={target_chrom}')
+
     def score_all(self, location_tolerance=float('inf'), error_threshold=0.1, n_threads=40, report_path=None,
                  plot_first_n=0, plot_out_dir=None):
         total_calls = Counter()
@@ -359,11 +397,15 @@ class AlignScorer(object):
             svid = records[0].info['SVID']
             sv_type = records[0].info['SVTYPE']
 
-            recon_sequences: List[QueryReconSubsequence] = simulate_subsequences(records, buffer, self.ref)
-            score_records: List[QueryInfo] = []  # one per reconstructed subsequence of an SV
+            self._assert_sv_records_non_interchromosomal(records)
+            self._assert_sv_records_contiguous_intervals(records)
 
             eval_reads = self.eval_mode in ('reads', 'both')
             eval_assembly = self.eval_mode in ('assembly', 'both')
+            
+            recon_sequences: List[QueryReconSubsequence] = simulate_subsequences(records, buffer, self.ref)
+            score_records: List[QueryInfo] = []  # one per reconstructed subsequence of an SV
+
 
             candidate_reads_by_chrom = None
             if eval_reads:

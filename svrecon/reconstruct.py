@@ -48,7 +48,8 @@ class _Segment:
 
 
 def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[str, bytearray]) -> List[QueryReconSubsequence]:
-
+    # TODO: check records, ensure non overlapping, targets land on record starts
+    
     sv_type = records[0].info['SVTYPE']
     svid = records[0].info['SVID']
     chrom = records[0].chrom
@@ -68,7 +69,7 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
     if len(target_records) > 1:
         target_records = sorted(target_records, key=lambda rec: (rec.info['TARGET'], rec.info.get('INSORD', 0)),
                                 reverse=True)
-
+        
     records = in_place_records + target_records
 
     ref_start = max(0, min([rec.start for rec in records]) - buffer)
@@ -98,9 +99,8 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
     def shift_after(segments, position, amount):
         """An insertion of `amount` bases at `position` pushes everything at/after it to the right."""
         # TODO: fix
-        for segment in segments:
-            if segment.end > position:
-            # if segment.start >= position:
+        for segment in segments: # [pos, pos+segment)
+            if segment.start >= position:
                 segment.start += amount
                 segment.end += amount
 
