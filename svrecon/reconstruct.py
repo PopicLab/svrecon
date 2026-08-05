@@ -8,7 +8,9 @@ at its join. Segments are independent ranges, so pieces that overlap because of 
 coordinates are representable and reconciled by clipping the earlier piece (a clip larger than
 ``SEGMENT_CLIP_WARN_THRESHOLD`` bp is logged, since that signals a real coordinate error).
 """
+import bisect
 import logging
+from collections import namedtuple
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -40,11 +42,91 @@ class QueryReconSubsequence:
 
 @dataclass
 class _Segment:
-    """A piece of the allele while it is being built; coordinates are mutable so operations can
-    shift them in-place and overlaps can be clipped. A deletion is just a segment whose bases become ''
-    placeholders, so it collapses to zero length once the placeholders are dropped."""
-    start: int
-    end: int
+    """
+    Contiguous [start, end) intervals.
+    alt* represents positions of the new sequence
+    ref* represents positions of the original sequence
+    """
+    alt_start: int
+    alt_end: int
+
+    ref_start: int
+    ref_end: int
+    invert: bool
+
+
+@dataclass
+class Operation:
+    op_start: int
+    ref_start: int
+    ref_end: int
+
+    def modify_segments(self, segments: List[_Segment]) -> None:
+        """
+        Modifies segments in place, maintaining [alt_start, alt_end) sort, which represents a sequence.
+        Upon modification, adjust all following segments alt_start and alt_end by the length of the change. 
+        """
+        raise NotImplementedError("Implement in subclass")
+
+@dataclass
+class Insert(Operation):
+    invert: bool = False
+
+    def modify_segments(self, segments: List["_Segment"]) -> None:
+        length = self.ref_end - self.ref_start
+        idx = bisect.bisect_left(segments, self.op_start, key=lambda seg: seg.alt_start)
+        segments.insert(idx, _Segment(self.op_start, self.op_start + length, self.ref_start, self.ref_end, self.invert))
+        for seg in segments[idx + 1:]:
+            seg.alt_start += length
+            seg.alt_end += length
+
+@dataclass
+class Delete(Operation):
+    def modify_segments(self, segments: List["_Segment"]) -> None:
+        length = self.ref_end - self.ref_start
+        idx = bisect.bisect_left(segments, self.op_start, key=lambda seg: seg.alt_start)
+        segments.insert(idx, _Segment(self.op_start, self.op_start, self.ref_start, self.ref_end, False))
+        for seg in segments[idx + 1:]:
+            seg.alt_start -= length
+            seg.alt_end -= length
+
+@dataclass
+class Invert(Operation):
+    def modify_segments(self, segments: List["_Segment"]) -> None:
+        idx = bisect.bisect_left(segments, self.op_start, key=lambda seg: seg.alt_start)
+        segments[idx].invert = not segments[idx].invert
+
+def get_sorted_operations(records: list[VariantRecord]) -> list[Operation]:
+    operations: list[Operation] = []
+
+    for record in records:
+        start, stop = get_start_stop(record)
+        target = record.info.get('TARGET', stop) # NOTE: is there a +1 here?
+
+        if record.info['OP_TYPE'] == 'CUT' or record.info['SVTYPE'] == 'DEL':
+            operations.append(Delete(start, start, stop))
+        elif record.info['OP_TYPE'] == 'INV' or record.info['SVTYPE'] == 'INV':
+            operations.append(Invert(start, start, stop))
+        elif record.info['OP_TYPE'] == 'COPY-PASTE' or record.info['SVTYPE'] in ('DUP', 'dDUP'):
+            operations.append(Insert(target, start, stop))
+        elif record.info['OP_TYPE'] == 'CUT-PASTE' or record.info['SVTYPE'] == 'nrTRA':
+            operations.append(Delete(start, start, stop))
+            operations.append(Insert(target, start, stop))
+        elif record.info['OP_TYPE'] == 'COPYinv-PASTE' or record.info['SVTYPE'] == 'INV_dDUP':
+            operations.append(Insert(target, start, stop, invert=True))
+        elif record.info['OP_TYPE'] == 'CUTinv-PASTE' or record.info['SVTYPE'] == 'INV_nrTRA':
+            operations.append(Delete(start, start, stop))
+            operations.append(Insert(target, start, stop, invert=True))
+        else:
+            logger.warning(f'Unknown OP_TYPE: {record.info["OP_TYPE"]}')
+
+    operations.sort(key=lambda op: op.op_start, reverse=True)
+    return operations
+
+
+        
+# From records, Produce order of operations to modify segments, backwards edit order
+# Modify List of Segments
 
 
 def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[str, bytearray]) -> List[QueryReconSubsequence]:
@@ -69,7 +151,8 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
     if len(target_records) > 1:
         target_records = sorted(target_records, key=lambda rec: (rec.info['TARGET'], rec.info.get('INSORD', 0)),
                                 reverse=True)
-        
+
+    
     records = in_place_records + target_records
 
     ref_start = max(0, min([rec.start for rec in records]) - buffer)
@@ -220,13 +303,13 @@ def _finalize_window(window_chars, segments, offset, ref_end, svid, chrom, sv_ty
 
 def _clip_out_overlap(earlier: _Segment, newer: _Segment, svid, sv_type):
     """Trim `earlier` so it no longer overlaps `newer` (which owns the boundary)."""
-    overlap = min(earlier.end, newer.end) - max(earlier.start, newer.start)
+    overlap = min(earlier.alt_end, newer.alt_end) - max(earlier.alt_start, newer.alt_start)
     if overlap <= 0:
         return
     if overlap > SEGMENT_CLIP_WARN_THRESHOLD:
-        logger.warning(f'{svid}-{sv_type}: reconstructed segment [{earlier.start},{earlier.end}] clipped '
-                       f'{overlap} bp by [{newer.start},{newer.end}] (imprecise caller coordinates?)')
-    if earlier.start < newer.start:
-        earlier.end = min(earlier.end, newer.start)
+        logger.warning(f'{svid}-{sv_type}: reconstructed segment [{earlier.alt_start},{earlier.alt_end}] clipped '
+                       f'{overlap} bp by [{newer.alt_start},{newer.alt_end}] (imprecise caller coordinates?)')
+    if earlier.alt_start < newer.alt_start:
+        earlier.alt_end = min(earlier.alt_end, newer.alt_start)
     else:
-        earlier.start = max(earlier.start, newer.end)
+        earlier.alt_start = max(earlier.alt_start, newer.alt_end)
