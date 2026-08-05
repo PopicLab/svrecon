@@ -219,11 +219,17 @@ class AlignScorer(object):
     def _assert_sv_records_contiguous_intervals(self, records: List[VariantRecord]) -> None:
         """
         Raises ValueError unless records of an sv satisfy:
-        - all [start, stop) intervals are non overlapping and contiguous
+        - all [start, stop) intervals are non overlapping and contiguous (multiple records
+          sharing an identical source span -- e.g. an in-place INV plus a COPY-PASTE from the
+          same source -- count as one interval, not an overlap)
         - all targets are either outside of [min(starts), max(stops)], or land on an existing start or stop
         """
-        # sort by (start, stop), check for contiguity
-        intervals = sorted(((*get_start_stop(rec), rec) for rec in records), key=lambda t: t[:2])
+        # Dedupe identical (start, stop) spans -- multiple records can share one source span
+        # for different downstream operations -- before sorting for contiguity.
+        by_interval: Dict[Tuple[int, int], VariantRecord] = {}
+        for rec in records:
+            by_interval.setdefault(get_start_stop(rec), rec)
+        intervals = sorted((start, stop, rec) for (start, stop), rec in by_interval.items())
         for (prev_start, prev_stop, prev_rec), (start, stop, rec) in zip(intervals, intervals[1:]):
             if start != prev_stop:
                 interval_error_type = 'overlap' if start < prev_stop else 'gap'

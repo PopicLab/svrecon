@@ -136,11 +136,13 @@ def get_operations(records: list[VariantRecord]) -> list[_Operation]:
 
 def create_starting_segments(records: list[VariantRecord], buffer: int) -> list[_Segment]:
     """
-    Seeds one untouched segment per record's own [start, stop), plus buffer flanks around the SV
-    span and around any out-of-span TARGET. Alt coordinates start out equal to ref coordinates.
-    Raises ValueError if any two segments overlap.
+    Seeds one untouched segment per distinct [start, stop) among the records (multiple records
+    sharing an identical source span -- e.g. an in-place INV plus a COPY-PASTE from the same
+    source -- collapse to one segment), plus buffer flanks around the SV span and around any
+    out-of-span TARGET. Alt coordinates start out equal to ref coordinates. Raises ValueError if
+    any two segments overlap.
     """
-    starts_stops = sorted(get_start_stop(rec) for rec in records)
+    starts_stops = sorted({get_start_stop(rec) for rec in records})
     min_start = starts_stops[0][0]
     max_stop = max(stop for _, stop in starts_stops)
 
