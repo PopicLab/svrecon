@@ -220,7 +220,7 @@ class AlignScorer(object):
         """
         Raises ValueError unless records of an sv satisfy:
         - all [start, stop) intervals are non overlapping and contiguous
-        - all targets are either outside of [min(starts), max(stops)), or land on an existing start or stop
+        - all targets are either outside of [min(starts), max(stops)], or land on an existing start or stop
         """
         # sort by (start, stop), check for contiguity
         intervals = sorted(((*get_start_stop(rec), rec) for rec in records), key=lambda t: t[:2])
@@ -240,7 +240,7 @@ class AlignScorer(object):
             target = rec.info.get('TARGET')
             if target is None:
                 continue
-            if min_start <= target < max_stop and target not in starts and target not in stops:
+            if min_start <= target <= max_stop and target not in starts and target not in stops:
                 raise ValueError(f'{rec.chrom}: record {rec.id} TARGET={target} falls inside the SV\'s '
                                  f'span [{min_start},{max_stop}) but does not land on an existing interval boundary')
 
@@ -405,7 +405,6 @@ class AlignScorer(object):
             
             recon_sequences: List[QueryReconSubsequence] = simulate_subsequences(records, buffer, self.ref)
             score_records: List[QueryInfo] = []  # one per reconstructed subsequence of an SV
-
 
             candidate_reads_by_chrom = None
             if eval_reads:
