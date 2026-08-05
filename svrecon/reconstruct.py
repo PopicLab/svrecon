@@ -70,11 +70,13 @@ class _Operation:
 
 @dataclass
 class _Insert(_Operation):
+    invert: bool = False
+
     def modify_segments(self, segments: List["_Segment"]) -> None:
         length = self.ref_end - self.ref_start
         idx = bisect.bisect_right(segments, self.op_start, key=lambda seg: seg.alt_end)
         segments.insert(idx, _Segment(ref_start=self.ref_start, ref_end=self.ref_end, alt_start=self.op_start,
-                                      alt_end=self.op_start + length, invert=False))
+                                      alt_end=self.op_start + length, invert=self.invert))
         for seg in segments[idx + 1:]:
             seg.alt_start += length
             seg.alt_end += length
@@ -123,12 +125,10 @@ def get_operations(records: list[VariantRecord]) -> list[_Operation]:
             operations.append(_Delete(start, start, stop))
             operations.append(_Insert(target, start, stop))
         elif record.info['OP_TYPE'] == 'COPYinv-PASTE' or record.info['SVTYPE'] == 'INV_dDUP':
-            operations.append(_Insert(target, start, stop))
-            operations.append(_Invert(target, start, stop))
+            operations.append(_Insert(target, start, stop, invert=True))
         elif record.info['OP_TYPE'] == 'CUTinv-PASTE' or record.info['SVTYPE'] == 'INV_nrTRA':
             operations.append(_Delete(start, start, stop))
-            operations.append(_Insert(target, start, stop))
-            operations.append(_Invert(target, start, stop))
+            operations.append(_Insert(target, start, stop, invert=True))
         else:
             logger.warning(f'Unknown OP_TYPE: {record.info["OP_TYPE"]}')
 
@@ -169,7 +169,14 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
     Given records of operations, recreate the resulting subsequences and metadata 
     """
 
-    operations: list[_Operation] = sorted(get_operations(records), key=lambda op: op.op_start, reverse=True)
+    # Descending by op_start (so shifts never invalidate a not-yet-processed op's
+    # position), then -- for two operations that land on the same op_start -- a fixed
+    # type order (Invert, Delete, Insert): an in-place Invert/Delete must see its own
+    # untouched segment before an unrelated Insert lands on top of that same position.
+    _OP_TYPE_ORDER = {_Invert: 0, _Delete: 1, _Insert: 2}
+    operations: list[_Operation] = sorted(
+        get_operations(records),
+        key=lambda op: (-op.op_start, _OP_TYPE_ORDER[type(op)]))
     segments: list[_Segment] = create_starting_segments(records, buffer)
 
     for operation in operations:
