@@ -30,6 +30,7 @@ class QueryReconSubsequence:
     ref_start: int
     ref_end: int
     segments: List[Tuple[int, int]] # indicator of segments of interest, 0 indexed to the start of the subsequence,
+    ref_segments: List[Tuple[int, int]] # same pieces, in absolute reference coordinates (parallel to segments)
 
     def __len__(self):
         return self.length
@@ -203,16 +204,19 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
         offset = run[0].alt_start
         pieces = []
         covering_segments = []
+        covering_ref_segments = []
         for seg in run:
             clip = ref[chrom][seg.ref_start:seg.ref_end].decode('ascii')
             if seg.invert:
                 clip = reverse_complement(clip)
             pieces.append(clip)
             covering_segments.append((seg.alt_start - offset, seg.alt_end - offset))
+            covering_ref_segments.append((seg.ref_start, seg.ref_end))
 
         sequence = ''.join(pieces)
         subsequences.append(QueryReconSubsequence(
             chrom=chrom, svtype=sv_type, svid=svid, sequence=sequence, length=len(sequence),
-            ref_start=run[0].ref_start, ref_end=run[-1].ref_end, segments=covering_segments))
+            ref_start=run[0].ref_start, ref_end=run[-1].ref_end, segments=covering_segments,
+            ref_segments=covering_ref_segments))
 
     return subsequences
