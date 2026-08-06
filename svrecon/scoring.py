@@ -62,9 +62,8 @@ class QueryInfo:
     reference_check_err: Optional[float] = None
     reference_check_strand: Optional[int] = None
 
-    # Populated by get_summary() -- the final per-subsequence verdict.
-    status: Optional['SubseqStatus'] = None
-    reason: Optional['SubseqReason'] = None
+    status: 'SubseqStatus' = SubseqStatus.SKIPPED # by default, unscored
+    reason: 'SubseqReason' = SubseqReason.SKIPPED
 
     def update(self, **kwargs) -> None:
         # Field update based on pass / no pass on validation methods
@@ -265,12 +264,14 @@ class AlignScorer(object):
         total_calls = Counter()
         correct_calls = Counter()
         inconclusive_calls = Counter()  # reads mode: no read spans the full resulting allele
+        skipped_calls = Counter()   # eval_mode='none': reconstructed but never validated
         assembly_hits = Counter()   # hits validated by the assembly (mappy or edlib)
         read_hits = Counter()       # hits validated only by reads
         source_counts = Counter()   # overall hit provenance: assembly | edlib | reads
         overall_count = 0
         overall_correct = 0
         overall_inconclusive = 0
+        overall_skipped = 0
         edlib_rescues = 0
         precision = {}
 
@@ -310,7 +311,7 @@ class AlignScorer(object):
                     if outcome == Outcome.HIT:
                         # Tier 1 (read) vs Tier 2 (assembly), plus the detailed source.
                         line += f'\t{result.get("tier", "")}\t{result.get("validation_source", "")}'
-                    else:  # miss or inconclusive -> show why
+                    elif outcome != Outcome.SKIPPED:  # miss or inconclusive -> show why
                         line += f'\t{result.get("subseq_diagnostics", [])}'
                     logger.debug(line)
 
@@ -347,15 +348,24 @@ class AlignScorer(object):
                     elif outcome == Outcome.INCONCLUSIVE:
                         inconclusive_calls[sv_type] += 1
                         overall_inconclusive += 1
-                    # else: miss -> counts toward total but not correct/inconclusive
+                    elif outcome == Outcome.SKIPPED:
+                        skipped_calls[sv_type] += 1
+                        overall_skipped += 1
+                    # else: miss -> counts toward total but not correct/inconclusive/skipped
 
-                    # precision is over CONCLUSIVE calls only (hits + misses)
-                    conclusive = overall_count - overall_inconclusive
-                    pbar.set_description(
-                        f'Scoring SVs. Precision {overall_correct / conclusive:.2f} '
-                        f'({overall_correct}/{conclusive}); inconclusive {overall_inconclusive}')
-                    denom = total_calls[sv_type] - inconclusive_calls[sv_type]
-                    precision[sv_type] = correct_calls[sv_type] / denom if denom else float('nan')
+                    # precision is over CONCLUSIVE calls only (hits + misses; inconclusive and
+                    # skipped -- never validated at all -- are excluded from the denominator)
+                    conclusive = overall_count - overall_inconclusive - overall_skipped
+                    if conclusive:
+                        desc = (f'Scoring SVs. Precision {overall_correct / conclusive:.2f} '
+                               f'({overall_correct}/{conclusive}); inconclusive {overall_inconclusive}')
+                        if overall_skipped:
+                            desc += f'; skipped {overall_skipped}'
+                    else:
+                        desc = f'Scoring SVs. {overall_skipped} skipped so far, 0 conclusive'
+                    pbar.set_description(desc)
+                    denom = total_calls[sv_type] - inconclusive_calls[sv_type] - skipped_calls[sv_type]
+                    precision[sv_type] = correct_calls[sv_type] / denom if denom else 0
 
                 except Exception as exc:
                     logger.error(f'SV processing generated an exception: {exc}')
@@ -365,10 +375,12 @@ class AlignScorer(object):
             logger.info(f'Wrote per-SV eval report: {report_path}')
 
         logger.info(f'Total SVs rescued by edlib fallback: {edlib_rescues}')
-        overall_miss = overall_count - overall_correct - overall_inconclusive
+        overall_miss = overall_count - overall_correct - overall_inconclusive - overall_skipped
         logger.info(
             f"Outcomes: hit={overall_correct} miss={overall_miss} inconclusive={overall_inconclusive} "
-            f"(inconclusive = no read spans the full resulting allele; excluded from precision)")
+            f"skipped={overall_skipped} "
+            f"(inconclusive = no read spans the full resulting allele; skipped = eval_mode='none'; "
+            f"both excluded from precision)")
         logger.info(
             f"Hits by validation source: assembly={source_counts['assembly']} "
             f"edlib={source_counts['edlib']} reads={source_counts['reads']}")
@@ -379,15 +391,17 @@ class AlignScorer(object):
 
         total_all = sum(total_calls.values())
         inc_all = sum(inconclusive_calls.values())
-        conclusive_all = total_all - inc_all
-        precision['ALL'] = sum(correct_calls.values()) / conclusive_all if conclusive_all else float('nan')
+        skip_all = sum(skipped_calls.values())
+        conclusive_all = total_all - inc_all - skip_all
+        precision['ALL'] = sum(correct_calls.values()) / conclusive_all if conclusive_all else 0
         correct_calls['ALL'] = sum(correct_calls.values())
         total_calls['ALL'] = total_all
         inconclusive_calls['ALL'] = inc_all
+        skipped_calls['ALL'] = skip_all
         assembly_hits['ALL'] = sum(assembly_hits.values())
         read_hits['ALL'] = sum(read_hits.values())
 
-        return precision, correct_calls, total_calls, inconclusive_calls, assembly_hits, read_hits
+        return precision, correct_calls, total_calls, inconclusive_calls, skipped_calls, assembly_hits, read_hits
 
     def score_sv(self, records: List[VariantRecord], buffer: Union[int, float], location_tolerance: Union[int, float],
                  match_error_threshold=0.1): 
@@ -444,13 +458,19 @@ class AlignScorer(object):
             coords = records[0].pos, records[0].stop
 
             # SV-level roll-up:
+            #   skipped      -> eval_mode='none': reconstructed (and, where the reference
+            #                   covers it, ref_sequence populated for plotting) but never
+            #                   validated at all -- distinct from "inconclusive" (which
+            #                   means validation was attempted but couldn't reach a verdict)
             #   hit          -> every subsequence passed
             #   miss         -> at least one subsequence was contradicted (spanning
             #                   reads / assembly aligned but didn't match)
             #   inconclusive -> no contradiction, but at least one subsequence could
             #                   not be tested (reads mode: no read spans the full allele)
             subseq_status = [r.status for r in score_records]
-            if len(subseq_status) > 0 and all(s == SubseqStatus.PASS for s in subseq_status):
+            if len(subseq_status) > 0 and all(s == SubseqStatus.SKIPPED for s in subseq_status):
+                outcome = Outcome.SKIPPED
+            elif len(subseq_status) > 0 and all(s == SubseqStatus.PASS for s in subseq_status):
                 outcome = Outcome.HIT
             elif SubseqStatus.FAIL in subseq_status:
                 outcome = Outcome.MISS

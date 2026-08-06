@@ -49,10 +49,13 @@ def main():
                         dest='classified', default=None)
     parser.add_argument('--igv_prefix', help='Prefix for igv session paths (default empty)', dest='igv_prefix', default=None)
     parser.add_argument('--chrom_cache', help='Directory to save/load per-chromosome MMI indices.', default=None)
-    parser.add_argument('--eval_mode', choices=['assembly', 'reads', 'both'], default=None,
+    parser.add_argument('--eval_mode', choices=['assembly', 'reads', 'both', 'none'], default=None,
                         help="Validation source: 'assembly' (default), 'reads' "
-                             "(skip the assembly entirely and validate against BAM long reads), or "
-                             "'both' (assembly first, reads to rescue misses).")
+                             "(skip the assembly entirely and validate against BAM long reads), "
+                             "'both' (assembly first, reads to rescue misses), or 'none' (skip all "
+                             "validation -- just reconstruct each SV's alt allele; useful with "
+                             "--plot_first_n to get reconstructed-vs-reference dot plots without "
+                             "needing a --sample assembly or --bam).")
     parser.add_argument('--read_error_threshold', type=float, default=None,
                         help='Max edlib error rate for a read to validate a reconstruction (read modes; '
                              'default 0.1). Keep <= the assembly error threshold (0.1) for consistent hit/miss calls.')
@@ -122,8 +125,8 @@ def main():
     # mis-scores or skips the report -- so validate those. Also accept a scalar `sample:` path.
     if isinstance(args.sample, str):
         args.sample = [args.sample]
-    if args.eval_mode not in ('assembly', 'reads', 'both'):
-        parser.error(f"eval_mode must be assembly|reads|both, got {args.eval_mode!r}")
+    if args.eval_mode not in ('assembly', 'reads', 'both', 'none'):
+        parser.error(f"eval_mode must be assembly|reads|both|none, got {args.eval_mode!r}")
     if args.report not in ('none', 'json'):
         parser.error(f"report must be none|json, got {args.report!r}")
 
@@ -233,7 +236,7 @@ def main():
             build_chrom_aligners(samp, scorer.aligners, 'sample')
         logger.info('Aligners ready')
     else:
-        logger.info('Read-only eval mode: skipping sample assembly load and aligner build.')
+        logger.info(f"eval_mode={eval_mode!r}: skipping sample assembly load and aligner build.")
 
     if args.check_reference:
         logger.info('Building/loading reference aligner(s) for --check_reference (mappy)...')
@@ -250,7 +253,7 @@ def main():
 
     img_dir = Path(output_dir) / 'sv_recon_img'
 
-    precision, correct_calls, total_calls, inconclusive_calls, assembly_hits, read_hits = scorer.score_all(
+    precision, correct_calls, total_calls, inconclusive_calls, skipped_calls, assembly_hits, read_hits = scorer.score_all(
         location_tolerance=args.location_tolerance, report_path=report_path,
         plot_first_n=args.plot_first_n, plot_out_dir=img_dir)
 
@@ -258,12 +261,13 @@ def main():
         'correct_calls': correct_calls,
         'total_calls': total_calls,
         'inconclusive': inconclusive_calls,
+        'skipped': skipped_calls,
         'precision': precision,
         'assembly_hits': assembly_hits,
         'read_hits': read_hits,
     })
     # count columns: missing SV-type keys (e.g. a type with 0 hits) -> 0, not NaN
-    for col in ('correct_calls', 'total_calls', 'inconclusive', 'assembly_hits', 'read_hits'):
+    for col in ('correct_calls', 'total_calls', 'inconclusive', 'skipped', 'assembly_hits', 'read_hits'):
         df[col] = df[col].fillna(0).astype(int)
     df.sort_values('total_calls', ascending=False, inplace=True)
 
