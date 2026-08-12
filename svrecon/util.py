@@ -48,10 +48,9 @@ def load_fasta_to_bytes(filename: str, chroms) -> Dict[str, bytearray]:
 
 
 def get_start_stop(rec: VariantRecord) -> Tuple[int, int]:
-    """Converts VCF start/stop coordinates to Python style.
-    Uses SVLEN instead of rec.stop/END, which pysam miscalculates for some symbolic ALTs (e.g. INV, DUP)."""
+    """Obtains VCF start/stop coordinates. If SVLEN is available, calculate stop (due to pysam bug in shifting stop)"""
     start = rec.start
-    stop = start + rec.info['SVLEN']
+    stop = start + rec.info['SVLEN'] if rec.info.get('SVLEN') else rec.stop
     return start, stop
 
 
