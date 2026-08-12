@@ -6,13 +6,11 @@ import logging
 import sys
 import tempfile
 import os
-from pathlib import Path
 
 import pandas as pd
-import yaml
 
 from svrecon.align import get_chrom_aligner
-from svrecon.config import log_name_from_config, update_args_from_groovi_config
+from svrecon.config import Config
 from svrecon.reads import BamReader
 from svrecon.scoring import AlignScorer
 from svrecon.util import export_igv_session, load_fasta_to_bytes
@@ -97,99 +95,21 @@ def main():
                              "Off by default (maps to both strands).")
     args = parser.parse_args()
 
-    # --- Resolve the effective config: CLI flag > svrecon --config value > groovi inference > default ---
-    MERGE_KEYS = ['reference', 'sample', 'calls', 'bam', 'classified', 'gap_file', 'chrom_cache',
-                  'igv_prefix', 'eval_mode', 'buffer', 'location_tolerance', 'read_error_threshold',
-                  'min_read_support', 'max_reads_per_site', 'report', 'check_reference',
-                  'junction_window_factor', 'junction_window_min',
-                  'junction_window_max', 'groovi_config', 'plot_first_n', 'plot_aspect',
-                  'assembly_forward_match_only']
-    cfg, unknown_keys = {}, []
-    if args.config:
-        with open(args.config) as f:
-            cfg = yaml.safe_load(f) or {}
-        unknown_keys = sorted(set(cfg) - set(MERGE_KEYS))
-        for k in MERGE_KEYS:                       # svrecon config fills anything not set on the CLI
-            if getattr(args, k) is None and k in cfg:
-                setattr(args, k, cfg[k])
+    config = Config(args)
 
-    if args.groovi_config:                          # groovi inference fills anything still unset
-        args = update_args_from_groovi_config(args, args.groovi_config)
-
-    defaults = {'eval_mode': 'assembly', 'buffer': 500, 'location_tolerance': float('inf'),
-                'igv_prefix': '', 'read_error_threshold': 0.1, 'min_read_support': 1,
-                'max_reads_per_site': 1000, 'report': 'none', 'check_reference': False,
-                'junction_window_factor': 1.5, 'junction_window_min': 150,
-                'junction_window_max': 300, 'plot_first_n': 0, 'plot_aspect': 'auto', 'assembly_forward_match_only': False}
-    for k, v in defaults.items():
-        if getattr(args, k) is None:
-            setattr(args, k, v)
-
-    # YAML already infers int/float for numeric params (write infinity as `.inf`); a bad value
-    # crashes on use. But a wrong eval_mode/report from the config does NOT crash -- it silently
-    # mis-scores or skips the report -- so validate those. Also accept a scalar `sample:` path.
-    if isinstance(args.sample, str):
-        args.sample = [args.sample]
-    if args.eval_mode not in ('assembly', 'reads', 'both', 'none'):
-        parser.error(f"eval_mode must be assembly|reads|both|none, got {args.eval_mode!r}")
-    if args.report not in ('none', 'json'):
-        parser.error(f"report must be none|json, got {args.report!r}")
-    if args.plot_aspect not in ('equal', 'auto'):
-        parser.error(f"plot_aspect must be equal|auto, got {args.plot_aspect!r}")
-    if args.buffer != 'auto':
-        try:
-            args.buffer = int(args.buffer)
-        except (TypeError, ValueError):
-            parser.error(f"buffer must be an integer or 'auto', got {args.buffer!r}")
-
-    # Outputs live beside the svrecon --config: the experiment directory identifies the run, so
-    # fixed names (a re-run in the same dir overwrites -- use separate configs/dirs to compare
-    # modes). Without a --config, fall back to ./logs with a run-specific name (the groovi
-    # experiment name, else a timestamp) so ad-hoc runs don't clobber each other.
-    if args.config:
-        output_dir = os.path.dirname(os.path.abspath(args.config))
-        base = 'svrecon'
-    else:
-        output_dir = './logs'
-        base = log_name_from_config(args.groovi_config) or f'svrecon_{timestamp}'
-    os.makedirs(output_dir, exist_ok=True)
-    log_filename = os.path.join(output_dir, f'{base}.log')
-    report_path = os.path.join(output_dir, f'{base}.report.jsonl') if args.report == 'json' else None
-
-    file_handler = logging.FileHandler(log_filename, mode='w')
-    file_handler.setLevel(logging.DEBUG)
-
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
-
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(asctime)s %(levelname)-8s %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        handlers=[file_handler, console_handler]
-    )
-
-    logger.info(f'Logging to {log_filename}')
-    if args.config:
-        logger.info(f'Loaded svrecon config: {args.config} (outputs -> {output_dir})')
-    if unknown_keys:
-        logger.warning(f'Ignoring unrecognized keys in {args.config}: {unknown_keys}')
-    logger.info(f'Config: {vars(args)}')
-
-
-    eval_mode = args.eval_mode
+    eval_mode = config.eval_mode
 
     logger.info('Initializing scorer and loading callset')
-    scorer = AlignScorer(args.calls, args.buffer, args.gap_file)
+    scorer = AlignScorer(config.calls, config.buffer, config.gap_file)
     scorer.eval_mode = eval_mode
-    scorer.read_error_threshold = args.read_error_threshold
-    scorer.min_read_support = args.min_read_support
-    scorer.max_reads_per_site = args.max_reads_per_site
-    scorer.check_reference = args.check_reference
-    scorer.junction_window_factor = args.junction_window_factor
-    scorer.junction_window_min = args.junction_window_min
-    scorer.junction_window_max = args.junction_window_max
-    scorer.assembly_forward_match_only = args.assembly_forward_match_only
+    scorer.read_error_threshold = config.read_error_threshold
+    scorer.min_read_support = config.min_read_support
+    scorer.max_reads_per_site = config.max_reads_per_site
+    scorer.check_reference = config.check_reference
+    scorer.junction_window_factor = config.junction_window_factor
+    scorer.junction_window_min = config.junction_window_min
+    scorer.junction_window_max = config.junction_window_max
+    scorer.assembly_forward_match_only = config.assembly_forward_match_only
 
     logger.info('Finding relevant chromosomes')
     chroms = set()
@@ -201,7 +121,7 @@ def main():
     logger.info(f'Found {len(chroms)} referenced chromosomes in callset')
 
     logger.info('Loading reference bytearrays')
-    scorer.ref = load_fasta_to_bytes(args.reference, chroms)
+    scorer.ref = load_fasta_to_bytes(config.reference, chroms)
     logger.info(f'Loaded {len(scorer.ref)} reference chromosomes.')
 
     scorer.sample = []
@@ -219,8 +139,8 @@ def main():
         'min_dp_score': 10,
         'min_chain_score': 1,
     }
-    if args.chrom_cache:
-        cache_dir = args.chrom_cache
+    if config.chrom_cache:
+        cache_dir = config.chrom_cache
         logger.info(f'Using persistent cache directory: {cache_dir}')
     else:
         cache_dir = os.path.join(tempfile.gettempdir(), 'mappy_chrom_cache')
@@ -241,33 +161,33 @@ def main():
 
     if eval_mode in ('assembly', 'both'):
         logger.info('Loading sample assembly bytearrays')
-        scorer.sample = [load_fasta_to_bytes(samp, chroms) for samp in args.sample]
+        scorer.sample = [load_fasta_to_bytes(samp, chroms) for samp in config.sample]
         logger.info(f'Initialized {len(scorer.sample)} sample assembly file(s).')
         logger.info('Building/loading per-chromosome aligners...')
-        for samp in args.sample:
+        for samp in config.sample:
             build_chrom_aligners(samp, scorer.aligners, 'sample')
         logger.info('Aligners ready')
     else:
         logger.info(f"eval_mode={eval_mode!r}: skipping sample assembly load and aligner build.")
 
-    if args.check_reference:
+    if config.check_reference:
         logger.info('Building/loading reference aligner(s) for --check_reference (mappy)...')
         scorer.reference_aligners = defaultdict(list)
-        build_chrom_aligners(args.reference, scorer.reference_aligners, 'reference')
+        build_chrom_aligners(config.reference, scorer.reference_aligners, 'reference')
         logger.info('Reference aligners ready')
 
     if eval_mode in ('reads', 'both'):
-        if not args.bam:
+        if not config.bam:
             logger.error('--eval_mode reads/both requires a BAM (--bam) for read-based evaluation.')
             sys.exit(1)
-        logger.info(f'Initializing thread-safe BAM reader: {args.bam}')
-        scorer.bam_reader = BamReader(args.bam)
+        logger.info(f'Initializing thread-safe BAM reader: {config.bam}')
+        scorer.bam_reader = BamReader(config.bam)
 
-    img_dir = Path(output_dir) / 'sv_recon_img'
+    img_dir = config.experiment_dir / 'sv_recon_img'
 
     precision, correct_calls, total_calls, inconclusive_calls, skipped_calls, assembly_hits, read_hits = scorer.score_all(
-        location_tolerance=args.location_tolerance, report_path=report_path,
-        plot_first_n=args.plot_first_n, plot_out_dir=img_dir, plot_aspect=args.plot_aspect)
+        location_tolerance=config.location_tolerance, report_path=config.report_path,
+        plot_first_n=config.plot_first_n, plot_out_dir=img_dir, plot_aspect=config.plot_aspect)
 
     df = pd.DataFrame({
         'correct_calls': correct_calls,
@@ -286,7 +206,7 @@ def main():
     # to_string() prints all columns (default repr truncates the middle ones)
     logger.info('Score table:\n' + df.to_string())
 
-    export_igv_session(args.calls, args.bam, args.classified, timestamp, args.igv_prefix)
+    export_igv_session(config.calls, config.bam, config.classified, timestamp, config.igv_prefix)
 
 
 if __name__ == '__main__':
