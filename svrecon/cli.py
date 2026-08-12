@@ -4,7 +4,6 @@ import datetime
 import hashlib
 import logging
 import sys
-import tempfile
 import os
 
 import pandas as pd
@@ -139,18 +138,10 @@ def main():
         'min_dp_score': 10,
         'min_chain_score': 1,
     }
-    if config.chrom_cache:
-        cache_dir = config.chrom_cache
-        logger.info(f'Using persistent cache directory: {cache_dir}')
-    else:
-        cache_dir = os.path.join(tempfile.gettempdir(), 'mappy_chrom_cache')
-        logger.info(f'Using temporary cache directory: {cache_dir}')
-    os.makedirs(cache_dir, exist_ok=True)
-
     def build_chrom_aligners(fasta, into, label):
         """Build/load per-chromosome mappy aligners for `fasta` into the `into` dict."""
         path_hash = hashlib.md5(os.path.abspath(fasta).encode('utf-8')).hexdigest()[:8]
-        fa_cache = os.path.join(cache_dir, f'{os.path.basename(fasta)}_{path_hash}')
+        fa_cache = os.path.join(config.cache_dir, f'{os.path.basename(fasta)}_{path_hash}')
         os.makedirs(fa_cache, exist_ok=True)
         for chrom in chroms:
             aligner = get_chrom_aligner(fasta, chrom, fa_cache, align_params, threads=32)
@@ -183,11 +174,9 @@ def main():
         logger.info(f'Initializing thread-safe BAM reader: {config.bam}')
         scorer.bam_reader = BamReader(config.bam)
 
-    img_dir = config.experiment_dir / 'sv_recon_img'
-
     precision, correct_calls, total_calls, inconclusive_calls, skipped_calls, assembly_hits, read_hits = scorer.score_all(
         location_tolerance=config.location_tolerance, report_path=config.report_path,
-        plot_first_n=config.plot_first_n, plot_out_dir=img_dir, plot_aspect=config.plot_aspect)
+        plot_first_n=config.plot_first_n, plot_out_dir=config.img_dir, plot_aspect=config.plot_aspect)
 
     df = pd.DataFrame({
         'correct_calls': correct_calls,

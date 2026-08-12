@@ -2,6 +2,7 @@
 import datetime
 import logging
 import sys
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -66,6 +67,8 @@ VALID_PARAM_FNS = {
     'experiment_dir': lambda arg: isinstance(arg, Path),
     'log_path': lambda arg: isinstance(arg, Path),
     'report_path': lambda arg: arg is None or isinstance(arg, Path),
+    'cache_dir': lambda arg: isinstance(arg, Path),
+    'img_dir': lambda arg: isinstance(arg, Path),
 }
 
 class Config:
@@ -97,6 +100,15 @@ class Config:
         base = 'svrecon'
         self.log_path = self.experiment_dir / f'{base}.log'
         self.report_path = self.experiment_dir / f'{base}.report.jsonl' if self.report == 'json' else None
+        self.img_dir = self.experiment_dir / 'sv_recon_img'
+
+        # Cache dir for per-chromosome mappy indices, shared by the assembly aligners and
+        # (when --check_reference is on) the reference aligners.
+        if self.chrom_cache:
+            self.cache_dir = Path(self.chrom_cache)
+        else:
+            self.cache_dir = Path(tempfile.gettempdir()) / 'mappy_chrom_cache'
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Parameter Validation
         for key, value in self.__dict__.items():
@@ -123,6 +135,7 @@ class Config:
         if self.config:
             logger.info(f'Loaded svrecon config: {self.config} (outputs -> {self.experiment_dir})')
         logger.info(f'Config: {vars(self)}')
+        logger.info(f"Using {'persistent' if self.chrom_cache else 'temporary'} cache directory: {self.cache_dir}")
 
     def update_from_args(self, args):
         for k, v in vars(args).items():

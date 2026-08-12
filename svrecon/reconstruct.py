@@ -29,12 +29,11 @@ class QueryReconSubsequence:
     length: int
     ref_start: int
     ref_end: int
-    segments: List[Tuple[int, int]] # indicator of segments of interest, 0 indexed to the start of the subsequence,
+    recon_segments: List[Tuple[int, int]] # indicator of segments of interest, 0 indexed to the start of the subsequence,
     ref_segments: List[Tuple[int, int]] # same pieces, in absolute reference coordinates (parallel to segments)
 
     def __len__(self):
         return self.length
-
 
 @dataclass
 class _Segment:
@@ -49,9 +48,6 @@ class _Segment:
     alt_start: int
     alt_end: int
     invert: bool
-
-    
-
 
 @dataclass
 class _Operation:
@@ -108,7 +104,7 @@ class _Invert(_Operation):
                              f'on an existing segment boundary (found [{seg.alt_start},{seg.alt_end}))')
         seg.invert = not seg.invert
 
-def get_operations(records: list[VariantRecord]) -> list[_Operation]:
+def get_operations_from_records(records: list[VariantRecord]) -> list[_Operation]:
     operations: list[_Operation] = []
 
     for record in records:
@@ -173,7 +169,7 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
     # Descending by op_start type order (Invert, Delete, Insert): INSORD
     _OP_TYPE_ORDER = {_Invert: 0, _Delete: 1, _Insert: 2}
     operations: list[_Operation] = sorted(
-        get_operations(records),
+        get_operations_from_records(records),
         key=lambda op: (-op.op_start, _OP_TYPE_ORDER[type(op)],
                          -op.insord if isinstance(op, _Insert) else 0))
     segments: list[_Segment] = create_starting_segments(records, buffer)
@@ -212,7 +208,7 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
         sequence = ''.join(pieces)
         subsequences.append(QueryReconSubsequence(
             chrom=chrom, svtype=sv_type, svid=svid, sequence=sequence, length=len(sequence),
-            ref_start=run[0].ref_start, ref_end=run[-1].ref_end, segments=covering_segments,
+            ref_start=run[0].ref_start, ref_end=run[-1].ref_end, recon_segments=covering_segments,
             ref_segments=covering_ref_segments))
 
     return subsequences
