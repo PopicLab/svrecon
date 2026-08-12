@@ -167,7 +167,10 @@ class AlignScorer(object):
 
             self.variants = {key: value for (key, value) in filtered_variants}
 
-        self.buffer = int(buffer)
+        # 'auto' is a sentinel meaning "per-SV, sized to that SV's own longest segment"
+        # (resolved in score_sv, since it depends on each SV's records) -- otherwise a
+        # fixed bp value shared by every SV.
+        self.buffer = buffer if buffer == 'auto' else int(buffer)
         # Run-time state, set by the CLI after ref/aligners are built. Shared by
         # reference across worker threads (ThreadPoolExecutor), never copied.
         self.ref = None
@@ -260,7 +263,7 @@ class AlignScorer(object):
                 raise ValueError(f'record {rec.id} on {chrom} has an interchromosomal TARGET_CHROM={target_chrom}')
 
     def score_all(self, location_tolerance=float('inf'), error_threshold=0.1, n_threads=40, report_path=None,
-                 plot_first_n=0, plot_out_dir=None):
+                 plot_first_n=0, plot_out_dir=None, plot_aspect='auto'):
         total_calls = Counter()
         correct_calls = Counter()
         inconclusive_calls = Counter()  # reads mode: no read spans the full resulting allele
@@ -332,7 +335,7 @@ class AlignScorer(object):
                         if query_infos:
                             logger.info(f'Producing dot plots for SV {svid} ({sv_type}, {len(query_infos)} part(s))')
                             for part, query_info in enumerate(query_infos):
-                                plot_query_dot_plots(query_info, svid, sv_type, plot_out_dir, part=part)
+                                plot_query_dot_plots(query_info, svid, sv_type, plot_out_dir, part=part, aspect=plot_aspect)
 
                     if outcome == Outcome.HIT:
                         correct_calls[sv_type] += 1
@@ -420,9 +423,14 @@ class AlignScorer(object):
             self._assert_sv_records_non_interchromosomal(records)
             self._assert_sv_records_contiguous_intervals(records)
 
+            if buffer == 'auto':
+                # 10% of this SV's own longest segment (floored at 100bp)
+                longest_segment = max(stop - start for start, stop in {get_start_stop(rec) for rec in records})
+                buffer = max(100, int(0.1 * longest_segment))
+
             eval_reads = self.eval_mode in ('reads', 'both')
             eval_assembly = self.eval_mode in ('assembly', 'both')
-            
+
             recon_sequences: List[QueryReconSubsequence] = simulate_subsequences(records, buffer, self.ref)
             score_records: List[QueryInfo] = []  # one per reconstructed subsequence of an SV
 

@@ -72,6 +72,7 @@ class _Operation:
 @dataclass
 class _Insert(_Operation):
     invert: bool = False
+    insord: int = -1
 
     def modify_segments(self, segments: List["_Segment"]) -> None:
         length = self.ref_end - self.ref_start
@@ -113,6 +114,7 @@ def get_operations(records: list[VariantRecord]) -> list[_Operation]:
     for record in records:
         start, stop = get_start_stop(record)
         target = record.info.get('TARGET', stop) # NOTE: is there a +1 here?
+        insord = record.info.get('INSORD', -1)
 
         if record.info['OP_TYPE'] == 'CUT' or record.info['SVTYPE'] == 'DEL':
             operations.append(_Delete(start, start, stop))
@@ -121,15 +123,15 @@ def get_operations(records: list[VariantRecord]) -> list[_Operation]:
         elif record.info['OP_TYPE'] == 'DUP' or record.info['SVTYPE'] == 'DUP':
             operations.append(_Insert(stop, start, stop))
         elif record.info['OP_TYPE'] == 'COPY-PASTE' or record.info['SVTYPE'] == 'dDUP':
-            operations.append(_Insert(target, start, stop))
+            operations.append(_Insert(target, start, stop, insord=insord))
         elif record.info['OP_TYPE'] == 'CUT-PASTE' or record.info['SVTYPE'] == 'nrTRA':
             operations.append(_Delete(start, start, stop))
-            operations.append(_Insert(target, start, stop))
+            operations.append(_Insert(target, start, stop, insord=insord))
         elif record.info['OP_TYPE'] == 'COPYinv-PASTE' or record.info['SVTYPE'] == 'INV_dDUP':
-            operations.append(_Insert(target, start, stop, invert=True))
+            operations.append(_Insert(target, start, stop, invert=True, insord=insord))
         elif record.info['OP_TYPE'] == 'CUTinv-PASTE' or record.info['SVTYPE'] == 'INV_nrTRA':
             operations.append(_Delete(start, start, stop))
-            operations.append(_Insert(target, start, stop, invert=True))
+            operations.append(_Insert(target, start, stop, invert=True, insord=insord))
         else:
             logger.warning(f'Unknown OP_TYPE: {record.info["OP_TYPE"]}')
 
@@ -137,11 +139,7 @@ def get_operations(records: list[VariantRecord]) -> list[_Operation]:
 
 def create_starting_segments(records: list[VariantRecord], buffer: int) -> list[_Segment]:
     """
-    Seeds one untouched segment per distinct [start, stop) among the records (multiple records
-    sharing an identical source span -- e.g. an in-place INV plus a COPY-PASTE from the same
-    source -- collapse to one segment), plus buffer flanks around the SV span and around any
-    out-of-span TARGET. Alt coordinates start out equal to ref coordinates. Raises ValueError if
-    any two segments overlap.
+    Creates buffer segments around boundaries of contiguous records
     """
     starts_stops = sorted({get_start_stop(rec) for rec in records})
     min_start = starts_stops[0][0]
@@ -172,14 +170,12 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
     Given records of operations, recreate the resulting subsequences and metadata 
     """
 
-    # Descending by op_start (so shifts never invalidate a not-yet-processed op's
-    # position), then -- for two operations that land on the same op_start -- a fixed
-    # type order (Invert, Delete, Insert): an in-place Invert/Delete must see its own
-    # untouched segment before an unrelated Insert lands on top of that same position.
+    # Descending by op_start type order (Invert, Delete, Insert): INSORD
     _OP_TYPE_ORDER = {_Invert: 0, _Delete: 1, _Insert: 2}
     operations: list[_Operation] = sorted(
         get_operations(records),
-        key=lambda op: (-op.op_start, _OP_TYPE_ORDER[type(op)]))
+        key=lambda op: (-op.op_start, _OP_TYPE_ORDER[type(op)],
+                         -op.insord if isinstance(op, _Insert) else 0))
     segments: list[_Segment] = create_starting_segments(records, buffer)
 
     for operation in operations:

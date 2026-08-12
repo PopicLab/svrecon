@@ -41,7 +41,8 @@ def main():
                              'default unbounded (recommended for per-contig/unscaffolded assemblies '
                              'whose hit coordinates are contig-local, not genomic)',
                         type=float, default=None)
-    parser.add_argument('--buffer', help='Subsequence context buffer (default 500)', type=int, dest='buffer', default=None)
+    parser.add_argument('--buffer', help="Subsequence context buffer, in bp (default 500), or 'auto' to size "
+                        "it per-SV to max(100, 10%% of that SV's own longest segment).", dest='buffer', default=None)
     parser.add_argument('--gap_file', help='Tab-delimited file containing regions to omit (e.g., centromere and telomere)',
                         default=None)
     parser.add_argument('--bam', help='BAM file for generating IGV config', dest='bam', default=None)
@@ -87,6 +88,9 @@ def main():
                         help="Write a dot-plot PNG (reconstructed subsequence vs. the validating real-data "
                              "sequence) for the first N SV calls of each SV type, into <output_dir>/img/ "
                              "(default 0 -- no plots).")
+    parser.add_argument('--plot_aspect', choices=['equal', 'auto'], default=None,
+                        help="Dot-plot axes aspect (default 'auto'): 'auto' keeps the plot square; "
+                             "'equal' is true-to-scale (1bp=1bp) but can squeeze asymmetric SVs into a sliver.")
     parser.add_argument('--assembly_forward_match_only', action='store_true', default=None,
                         help="Only accept forward-strand alignments during assembly validation "
                              "(reverse-strand hits are filtered out before the error/junction checks). "
@@ -98,7 +102,8 @@ def main():
                   'igv_prefix', 'eval_mode', 'buffer', 'location_tolerance', 'read_error_threshold',
                   'min_read_support', 'max_reads_per_site', 'report', 'check_reference',
                   'junction_window_factor', 'junction_window_min',
-                  'junction_window_max', 'groovi_config', 'plot_first_n', 'assembly_forward_match_only']
+                  'junction_window_max', 'groovi_config', 'plot_first_n', 'plot_aspect',
+                  'assembly_forward_match_only']
     cfg, unknown_keys = {}, []
     if args.config:
         with open(args.config) as f:
@@ -115,7 +120,7 @@ def main():
                 'igv_prefix': '', 'read_error_threshold': 0.1, 'min_read_support': 1,
                 'max_reads_per_site': 1000, 'report': 'none', 'check_reference': False,
                 'junction_window_factor': 1.5, 'junction_window_min': 150,
-                'junction_window_max': 300, 'plot_first_n': 0, 'assembly_forward_match_only': False}
+                'junction_window_max': 300, 'plot_first_n': 0, 'plot_aspect': 'auto', 'assembly_forward_match_only': False}
     for k, v in defaults.items():
         if getattr(args, k) is None:
             setattr(args, k, v)
@@ -129,6 +134,13 @@ def main():
         parser.error(f"eval_mode must be assembly|reads|both|none, got {args.eval_mode!r}")
     if args.report not in ('none', 'json'):
         parser.error(f"report must be none|json, got {args.report!r}")
+    if args.plot_aspect not in ('equal', 'auto'):
+        parser.error(f"plot_aspect must be equal|auto, got {args.plot_aspect!r}")
+    if args.buffer != 'auto':
+        try:
+            args.buffer = int(args.buffer)
+        except (TypeError, ValueError):
+            parser.error(f"buffer must be an integer or 'auto', got {args.buffer!r}")
 
     # Outputs live beside the svrecon --config: the experiment directory identifies the run, so
     # fixed names (a re-run in the same dir overwrites -- use separate configs/dirs to compare
@@ -255,7 +267,7 @@ def main():
 
     precision, correct_calls, total_calls, inconclusive_calls, skipped_calls, assembly_hits, read_hits = scorer.score_all(
         location_tolerance=args.location_tolerance, report_path=report_path,
-        plot_first_n=args.plot_first_n, plot_out_dir=img_dir)
+        plot_first_n=args.plot_first_n, plot_out_dir=img_dir, plot_aspect=args.plot_aspect)
 
     df = pd.DataFrame({
         'correct_calls': correct_calls,

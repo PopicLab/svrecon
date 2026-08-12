@@ -11,94 +11,58 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Plotting Hyperparameters
-k = 15
-TICK_COUNT = 8  # target number of ticks per axis, regardless of sequence length
+K = 15  # wotplot k-mer size
+TICK_COUNT = 8  # target ticks per axis, regardless of sequence length
 
-# Functions
+
 def plot_dot_plot(s1: str, s2: str, title: str, output_path: str,
                   s1_name: str = 'reconstructed', s2_name: str = 'validating',
                   segment_boundaries: Optional[Sequence[int]] = None,
                   ref_segment_boundaries: Optional[Sequence[int]] = None,
-                  x_offset: int = 0, y_offset: int = 0) -> None:
-    """x_offset/y_offset shift the tick LABELS (not the data) so an axis whose sequence
-    starts at a known genomic position can display real coordinates instead of raw
-    0-based indices into s1/s2 -- e.g. y_offset=ref_start when s2 is a reference slice.
-    wotplot's default yorder='BT' puts s2 position 0 at the BOTTOM row (the traditional
-    bioinformatics dot-plot convention), so row index and position-from-start run in
-    OPPOSITE directions on the y-axis: row = num_rows - 1 - position. num_rows - 1 - row
-    below converts back, for both the tick labels and the ref_segment_boundaries lines."""
-    matrix = wp.DotPlotMatrix(s1.upper(), s2.upper(), k)
+                  x_offset: int = 0, y_offset: int = 0, aspect: str = 'auto') -> None:
+    matrix = wp.DotPlotMatrix(s1.upper(), s2.upper(), K)
     num_rows = matrix.mat.shape[0]
+    fig, ax = wp.viz_spy(matrix, markersize=1.0, aspect=aspect, title=title, s1_name=s1_name, s2_name=s2_name)
 
-    # s1_name labels the x-axis, s2_name the y-axis (wotplot's own convention).
-    fig, ax = wp.viz_imshow(matrix, title=title, s1_name=s1_name, s2_name=s2_name)
-
-    # Nice, evenly-spaced ticks that scale to the sequence length instead of wotplot's
-    # default density, so a 200 bp window and a 50 kb window are equally readable.
+    # Ticks scale with sequence length instead of wotplot's default density.
     ax.xaxis.set_major_locator(MaxNLocator(nbins=TICK_COUNT, integer=True))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=TICK_COUNT, integer=True))
     ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _pos: f'{int(x) + x_offset:,}'))
     ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _pos: f'{num_rows - 1 - int(y) + y_offset:,}'))
 
-    if segment_boundaries:
-        # Boundaries are in s1 (x-axis) coordinates -- mark where each reconstructed
-        # piece (junction/flank) begins or ends.
-        for pos in segment_boundaries:
-            ax.axvline(x=pos, color='gray', linestyle='--', linewidth=0.6, alpha=0.6)
+    # segment_boundaries: s1/x-axis coords. ref_segment_boundaries: s2/y-axis, row-indexed like the ticks.
+    for pos in segment_boundaries or ():
+        ax.axvline(x=pos, color='gray', linestyle='--', linewidth=0.6, alpha=0.6)
+    for pos in ref_segment_boundaries or ():
+        ax.axhline(y=num_rows - 1 - pos, color='blue', linestyle='--', linewidth=0.6, alpha=0.6)
 
-    if ref_segment_boundaries:
-        # Boundaries are in s2 (y-axis) coordinates -- the same pieces' reference
-        # positions, which needn't line up with their s1 (alt) positions once pieces
-        # have been rearranged (moved, inverted, or pasted). Converted from
-        # position-from-start to row index the same way as the tick labels above.
-        for pos in ref_segment_boundaries:
-            ax.axhline(y=num_rows - 1 - pos, color='blue', linestyle='--', linewidth=0.6, alpha=0.6)
-
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    fig.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
 
 
-def plot_query_dot_plots(query_info: 'QueryInfo', svid: str, sv_type: str, output_dir: str, part: int = 0) -> None:
-    """Writes two dot-plot PNGs for one reconstructed subsequence of an SV (`part` is that
-    subsequence's index among the SV's possibly-compound set of reconstructed pieces):
-    1. reconstructed vs. validating sequence -- the real read/assembly/edlib span that confirmed it.
-    2. reconstructed vs. reference sequence -- the unmodified reference window it was built from.
-    Alt-coordinate segment boundaries (query_info.query.segments) are drawn as vertical lines on
-    both, marking where each reconstructed piece (junction, flank) begins/ends. The same pieces'
-    reference-coordinate boundaries (query_info.query.ref_segments) are drawn as horizontal lines
-    on the reference plot only, since a piece's ref position needn't line up with its alt position
-    once it's been moved, inverted, or pasted -- the validating plot's y-axis isn't a direct
-    reference slice, so ref boundaries wouldn't correspond to real positions on it. The title
-    carries the SV's genomic locus (chrom:ref_start-ref_end) since the reconstructed sequence's
-    own coordinates don't map 1:1 to the genome once pieces have been rearranged."""
-    recon_seq = query_info.query.sequence
-    alt_boundaries = sorted({pos for start, end in query_info.query.segments for pos in (start, end)})
+def plot_query_dot_plots(query_info: 'QueryInfo', svid: str, sv_type: str, output_dir: str, part: int = 0,
+                         aspect: str = 'auto') -> None:
+    """Writes reconstructed-vs-validating and reconstructed-vs-reference dot plots for one
+    subsequence. Ref-coordinate boundaries are drawn only on the latter, since a piece's ref
+    position can diverge from its alt position once moved, inverted, or pasted."""
+    query = query_info.query
+    recon_seq = query.sequence
+    alt_boundaries = sorted({pos for start, end in query.segments for pos in (start, end)})
     source = query_info.source.value if query_info.source else 'none'
-
-    chrom = query_info.query.chrom
-    ref_start = query_info.query.ref_start
-    ref_end = query_info.query.ref_end
-    locus = f'{chrom}:{ref_start:,}-{ref_end:,}'
+    locus = f'{query.chrom}:{query.ref_start:,}-{query.ref_end:,}'
     title = f'{sv_type} {svid}_{part} ({locus})'
 
-    if query_info.validating_seq is not None:
-        plot_path = Path(output_dir) / f'{sv_type}_{svid}_{part}_validating_{source}.png'
-        plot_dot_plot(recon_seq, query_info.validating_seq, title, str(plot_path),
-                     s1_name='reconstructed', s2_name=f'validating ({source})',
-                     segment_boundaries=alt_boundaries)
-    else:
-        logger.warning(f'Skipping reconstructed-vs-validating dot plot for {svid}_{part} ({sv_type}): no validating sequence.')
+    def write(seq, plot_suffix, s2_name, seq_label, **extra):
+        if seq is None:
+            logger.warning(f'Skipping reconstructed-vs-{seq_label} dot plot for {svid}_{part} ({sv_type}): '
+                           f'no {seq_label} sequence.')
+            return
+        plot_path = Path(output_dir) / f'{sv_type}_{svid}_{part}_{plot_suffix}.png'
+        plot_dot_plot(recon_seq, seq, title, str(plot_path), s1_name='reconstructed', s2_name=s2_name,
+                     segment_boundaries=alt_boundaries, aspect=aspect, **extra)
 
-    if query_info.ref_sequence is not None:
-        plot_path = Path(output_dir) / f'{sv_type}_{svid}_{part}_reference.png'
-        # The reference slice starts at ref_start, so its own position 0 IS genomic
-        # position ref_start -- offset the y-axis ticks to show real coordinates, and
-        # shift ref_segments' absolute genomic positions back down to that same 0-based
-        # frame (mirroring the tick offset) to place the horizontal lines correctly.
-        ref_boundaries = sorted({pos - ref_start for start, end in query_info.query.ref_segments for pos in (start, end)})
-        plot_dot_plot(recon_seq, query_info.ref_sequence, title, str(plot_path),
-                     s1_name='reconstructed', s2_name=f'reference',
-                     segment_boundaries=alt_boundaries, ref_segment_boundaries=ref_boundaries, y_offset=ref_start)
-    else:
-        logger.warning(f'Skipping reconstructed-vs-reference dot plot for {svid}_{part} ({sv_type}): no reference sequence.')
+    write(query_info.validating_seq, f'validating_{source}', f'validating ({source})', 'validating')
+
+    ref_boundaries = sorted({pos - query.ref_start for start, end in query.ref_segments for pos in (start, end)})
+    write(query_info.ref_sequence, 'reference', 'reference', 'reference',
+         ref_segment_boundaries=ref_boundaries, y_offset=query.ref_start)
