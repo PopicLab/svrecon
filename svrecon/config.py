@@ -1,5 +1,4 @@
 """CLI config resolution: groovi-config inference and log-basename derivation."""
-import datetime
 import logging
 import sys
 import tempfile
@@ -75,9 +74,6 @@ class Config:
     """Merge precedence: CLI flags (`args`) > svrecon --config (YAML) > groovi inference > DEFAULTS."""
 
     def __init__(self, args):
-        timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H%M%S')
-        logging.info(f"initiating svrecon at {timestamp}")
-
         self.__dict__.update(DEFAULTS)
         self.experiment_dir = Path.cwd()  # overridden to parent folder of config file if it exists
 

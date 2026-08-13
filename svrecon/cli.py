@@ -1,18 +1,12 @@
 import argparse
-from collections import defaultdict
 import datetime
-import hashlib
 import logging
-import sys
-import os
 
 import pandas as pd
 
-from svrecon.align import get_chrom_aligner
 from svrecon.config import Config
-from svrecon.reads import BamReader
 from svrecon.scoring import AlignScorer
-from svrecon.util import export_igv_session, load_fasta_to_bytes
+from svrecon.util import export_igv_session
 
 logger = logging.getLogger(__name__)
 
@@ -96,83 +90,8 @@ def main():
 
     config = Config(args)
 
-    eval_mode = config.eval_mode
-
     logger.info('Initializing scorer and loading callset')
-    scorer = AlignScorer(config.calls, config.buffer, config.gap_file)
-    scorer.eval_mode = eval_mode
-    scorer.read_error_threshold = config.read_error_threshold
-    scorer.min_read_support = config.min_read_support
-    scorer.max_reads_per_site = config.max_reads_per_site
-    scorer.check_reference = config.check_reference
-    scorer.junction_window_factor = config.junction_window_factor
-    scorer.junction_window_min = config.junction_window_min
-    scorer.junction_window_max = config.junction_window_max
-    scorer.assembly_forward_match_only = config.assembly_forward_match_only
-
-    logger.info('Finding relevant chromosomes')
-    chroms = set()
-    for records in scorer.variants.values():
-        for record in records:
-            chroms.add(record.chrom)
-            if 'TARGET_CHROM' in record.info:
-                chroms.add(record.info['TARGET_CHROM'])
-    logger.info(f'Found {len(chroms)} referenced chromosomes in callset')
-
-    logger.info('Loading reference bytearrays')
-    scorer.ref = load_fasta_to_bytes(config.reference, chroms)
-    logger.info(f'Loaded {len(scorer.ref)} reference chromosomes.')
-
-    scorer.sample = []
-    scorer.aligners = defaultdict(list)
-    scorer.reference_aligners = None
-
-    # Aligner build params + cache dir, shared by the assembly aligners and (when
-    # --check_reference is on) the reference aligners.
-    align_params = {
-        'preset': 'map-hifi',
-        'k': 15,
-        'w': 5,
-        'best_n': 100,
-        'min_cnt': 1,
-        'min_dp_score': 10,
-        'min_chain_score': 1,
-    }
-    def build_chrom_aligners(fasta, into, label):
-        """Build/load per-chromosome mappy aligners for `fasta` into the `into` dict."""
-        path_hash = hashlib.md5(os.path.abspath(fasta).encode('utf-8')).hexdigest()[:8]
-        fa_cache = os.path.join(config.cache_dir, f'{os.path.basename(fasta)}_{path_hash}')
-        os.makedirs(fa_cache, exist_ok=True)
-        for chrom in chroms:
-            aligner = get_chrom_aligner(fasta, chrom, fa_cache, align_params, threads=32)
-            if aligner:
-                into[chrom].append(aligner)
-            else:
-                logger.warning(f'No sequences found for {chrom} in {label} FASTA {fasta}.')
-
-    if eval_mode in ('assembly', 'both'):
-        logger.info('Loading sample assembly bytearrays')
-        scorer.sample = [load_fasta_to_bytes(samp, chroms) for samp in config.sample]
-        logger.info(f'Initialized {len(scorer.sample)} sample assembly file(s).')
-        logger.info('Building/loading per-chromosome aligners...')
-        for samp in config.sample:
-            build_chrom_aligners(samp, scorer.aligners, 'sample')
-        logger.info('Aligners ready')
-    else:
-        logger.info(f"eval_mode={eval_mode!r}: skipping sample assembly load and aligner build.")
-
-    if config.check_reference:
-        logger.info('Building/loading reference aligner(s) for --check_reference (mappy)...')
-        scorer.reference_aligners = defaultdict(list)
-        build_chrom_aligners(config.reference, scorer.reference_aligners, 'reference')
-        logger.info('Reference aligners ready')
-
-    if eval_mode in ('reads', 'both'):
-        if not config.bam:
-            logger.error('--eval_mode reads/both requires a BAM (--bam) for read-based evaluation.')
-            sys.exit(1)
-        logger.info(f'Initializing thread-safe BAM reader: {config.bam}')
-        scorer.bam_reader = BamReader(config.bam)
+    scorer = AlignScorer(config)
 
     precision, correct_calls, total_calls, inconclusive_calls, skipped_calls, assembly_hits, read_hits = scorer.score_all(
         location_tolerance=config.location_tolerance, report_path=config.report_path,

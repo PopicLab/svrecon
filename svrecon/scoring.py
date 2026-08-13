@@ -1,5 +1,6 @@
 """Scoring engine: the AlignScorer orchestrator and per-SV scoring."""
 from dataclasses import dataclass, field
+import hashlib
 import json
 import logging
 import traceback
@@ -14,13 +15,13 @@ from intervaltree import IntervalTree
 from pysam import VariantRecord
 from tqdm import tqdm
 
-from svrecon.align import (check_match, edlib_to_cigartuples,
+from svrecon.align import (check_match, edlib_to_cigartuples, get_chrom_aligner,
                            run_edlib_fallback, validate_segments_from_cigar, SeqSegmentValidationResult)
 from svrecon.constants import *
 from svrecon.plot import plot_query_dot_plots
-from svrecon.reads import run_read_edlib, ReadEdlibResult
+from svrecon.reads import run_read_edlib, BamReader, ReadEdlibResult
 from svrecon.reconstruct import simulate_subsequences, QueryReconSubsequence
-from svrecon.util import clamp, reverse_complement, get_start_stop
+from svrecon.util import clamp, reverse_complement, get_start_stop, load_fasta_to_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +63,8 @@ class QueryInfo:
     reference_check_err: Optional[float] = None
     reference_check_strand: Optional[int] = None
 
-    status: 'SubseqStatus' = SubseqStatus.SKIPPED # by default, unscored
-    reason: 'SubseqReason' = SubseqReason.SKIPPED
+    status: SubseqStatus = SubseqStatus.SKIPPED # by default, unscored
+    reason: SubseqReason = SubseqReason.SKIPPED
 
     def update(self, **kwargs) -> None:
         # Field update based on pass / no pass on validation methods
@@ -143,80 +144,139 @@ class AmbiguityResult:
     reference_err: float = 1.0
     reference_strand: Optional[int] = None
 
+
+def load_exclude_list(gap_file: str) -> Dict[str, IntervalTree]:
+    exclude_list = defaultdict(IntervalTree)
+    with open(gap_file, 'r') as f:
+        for line in f:
+            row = line.strip().split()
+            chrom = row[1]
+            start, stop = int(row[2]), int(row[3])
+            region_type = row[7]
+            exclude_list[chrom][start:stop] = region_type
+    return exclude_list
+
+
+def group_variants_by_id(vcf_path: str, gap_file: Optional[str] = None) -> Dict[str, List[VariantRecord]]:
+    """Group a callset VCF's records by SVID, optionally dropping any SV with a record
+    (its own span, or its TARGET) overlapping an excluded region (e.g. centromere/telomere)."""
+    grouped_variants: Dict[str, List[VariantRecord]] = defaultdict(list)
+    for rec in pysam.VariantFile(vcf_path).fetch():
+        svid = rec.info.get('SVID')
+        if svid:
+            grouped_variants[svid].append(rec)
+
+    if not gap_file:
+        return grouped_variants
+
+    exclude_list = load_exclude_list(gap_file)
+    filtered_variants: Dict[str, List[VariantRecord]] = {}
+    for svid, records in grouped_variants.items():
+        allowed = True
+        for rec in records:
+            target_chrom = rec.info['TARGET_CHROM'] if 'TARGET_CHROM' in rec.info else None
+            if exclude_list[rec.chrom].overlap(rec.start, rec.stop) or \
+                    target_chrom and exclude_list[target_chrom].overlap(rec.info['TARGET'],
+                                                                        rec.info['TARGET'] + 1):
+                allowed = False
+                break
+        if allowed:
+            filtered_variants[svid] = records
+
+    return filtered_variants
+
+
 class AlignScorer(object):
-    def __init__(self, callset_vcf, buffer, gap_file):
-        self.variants = None
-        self.vcf_header = None
-        self.read_vcf(callset_vcf)
-
-        if gap_file:
-            self.exclude_list = self.load_exclude_list(gap_file)
-
-            filtered_variants = []
-            for svid, records in self.variants.items():
-                allowed = True
-                for rec in records:
-                    target_chrom = rec.info['TARGET_CHROM'] if 'TARGET_CHROM' in rec.info else None
-                    if self.exclude_list[rec.chrom].overlap(rec.start, rec.stop) or \
-                            target_chrom and self.exclude_list[target_chrom].overlap(rec.info['TARGET'],
-                                                                                     rec.info['TARGET'] + 1):
-                        allowed = False
-                        break
-                if allowed:
-                    filtered_variants.append((svid, records))
-
-            self.variants = {key: value for (key, value) in filtered_variants}
+    def __init__(self, config):
+        self.variants = group_variants_by_id(config.calls, config.gap_file)
 
         # 'auto' is a sentinel meaning "per-SV, sized to that SV's own longest segment"
         # (resolved in score_sv, since it depends on each SV's records) -- otherwise a
         # fixed bp value shared by every SV.
-        self.buffer = buffer if buffer == 'auto' else int(buffer)
-        # Run-time state, set by the CLI after ref/aligners are built. Shared by
-        # reference across worker threads (ThreadPoolExecutor), never copied.
-        self.ref = None
-        self.sample = []
-        self.aligners = None
-        self.eval_mode = 'assembly'
-        self.bam_reader = None
-        self.read_error_threshold = 0.1
-        self.min_read_support = 1
-        self.max_reads_per_site = 1000
+        self.buffer = config.buffer if config.buffer == 'auto' else int(config.buffer)
+        self.eval_mode = config.eval_mode
+        self.read_error_threshold = config.read_error_threshold
+        self.min_read_support = config.min_read_support
+        self.max_reads_per_site = config.max_reads_per_site
         # Optional ambiguity check: also search the REFERENCE for the reconstructed allele;
         # a hit there means the match isn't specific to the SV -> inconclusive. Off by default.
-        self.check_reference = False
-        self.reference_aligners = None                 # mappy aligners over the reference
+        self.check_reference = config.check_reference
         self.reference_search_tolerance = EDLIB_FALLBACK_MAX_TOLERANCE
         # Junction-validation window, scaled to SV size and clamped: window = clamp(factor*span,
         # min, max). Applies to ALL junction checks (reads, assembly, edlib, reference) so the
         # junction test measures the SV's actual change rather than the surrounding context --
         # otherwise a small SV's signal is diluted below threshold and passes on flanks alone.
-        self.junction_window_factor = 0.05 # TODO make these constants config params
-        self.junction_window_min = 150
-        self.junction_window_max = JUNCTION_VALIDATION_WINDOW_MAX
+        self.junction_window_factor = config.junction_window_factor
+        self.junction_window_min = config.junction_window_min
+        self.junction_window_max = config.junction_window_max
         # When True, assembly validation only considers forward-strand alignments
         # (reverse-strand hits are filtered out before the error/junction checks).
-        self.assembly_forward_match_only = False
+        self.assembly_forward_match_only = config.assembly_forward_match_only
 
-    def load_exclude_list(self, gap_file):
-        exclude_list = defaultdict(IntervalTree)
-        with open(gap_file, 'r') as f:
-            for line in f:
-                row = line.strip().split()
-                chrom = row[1]
-                start, stop = int(row[2]), int(row[3])
-                region_type = row[7]
-                exclude_list[chrom][start:stop] = region_type
-        return exclude_list
+        logger.info('Finding relevant chromosomes')
+        chroms = set()
+        for records in self.variants.values():
+            for record in records:
+                chroms.add(record.chrom)
+                if 'TARGET_CHROM' in record.info:
+                    chroms.add(record.info['TARGET_CHROM'])
+        logger.info(f'Found {len(chroms)} referenced chromosomes in callset')
 
-    def read_vcf(self, vcf_path: str):
-        grouped_variants = defaultdict(list)
-        vcf_in = pysam.VariantFile(vcf_path)
-        for rec in vcf_in.fetch():
-            svid = rec.info.get('SVID')
-            if svid:
-                grouped_variants[svid].append(rec)
-        self.variants = grouped_variants
-        self.vcf_header = vcf_in.header
+        logger.info('Loading reference bytearrays')
+        self.ref = load_fasta_to_bytes(config.reference, chroms)
+        logger.info(f'Loaded {len(self.ref)} reference chromosomes.')
+
+        self.sample = []
+        self.aligners = defaultdict(list)
+        self.reference_aligners = None                 # mappy aligners over the reference
+        self.bam_reader = None
+
+        # Aligner build params, shared by the assembly aligners and (when
+        # --check_reference is on) the reference aligners.
+        align_params = {
+            'preset': 'map-hifi',
+            'k': 15,
+            'w': 5,
+            'best_n': 100,
+            'min_cnt': 1,
+            'min_dp_score': 10,
+            'min_chain_score': 1,
+        }
+
+        def build_chrom_aligners(fasta, into, label):
+            """Build/load per-chromosome mappy aligners for `fasta` into the `into` dict."""
+            path_hash = hashlib.md5(str(Path(fasta).resolve()).encode('utf-8')).hexdigest()[:8]
+            fa_cache = config.cache_dir / f'{Path(fasta).name}_{path_hash}'
+            fa_cache.mkdir(parents=True, exist_ok=True)
+            for chrom in chroms:
+                aligner = get_chrom_aligner(fasta, chrom, str(fa_cache), align_params, threads=32)
+                if aligner:
+                    into[chrom].append(aligner)
+                else:
+                    logger.warning(f'No sequences found for {chrom} in {label} FASTA {fasta}.')
+
+        if self.eval_mode in ('assembly', 'both'):
+            logger.info('Loading sample assembly bytearrays')
+            self.sample = [load_fasta_to_bytes(samp, chroms) for samp in config.sample]
+            logger.info(f'Initialized {len(self.sample)} sample assembly file(s).')
+            logger.info('Building/loading per-chromosome aligners...')
+            for samp in config.sample:
+                build_chrom_aligners(samp, self.aligners, 'sample')
+            logger.info('Aligners ready')
+        else:
+            logger.info(f"eval_mode={self.eval_mode!r}: skipping sample assembly load and aligner build.")
+
+        if self.check_reference:
+            logger.info('Building/loading reference aligner(s) for --check_reference (mappy)...')
+            self.reference_aligners = defaultdict(list)
+            build_chrom_aligners(config.reference, self.reference_aligners, 'reference')
+            logger.info('Reference aligners ready')
+
+        if self.eval_mode in ('reads', 'both'):
+            if not config.bam:
+                raise ValueError('--eval_mode reads/both requires a BAM (--bam) for read-based evaluation.')
+            logger.info(f'Initializing thread-safe BAM reader: {config.bam}')
+            self.bam_reader = BamReader(config.bam)
 
     def _assert_sv_records_contiguous_intervals(self, records: List[VariantRecord]) -> None:
         """
@@ -558,7 +618,7 @@ class AlignScorer(object):
                 if read_res.error <= self.read_error_threshold:
                     cigartuples = edlib_to_cigartuples(read_res.cigar)
                     junctions_validation_results: List[SeqSegmentValidationResult] = \
-                                                                        validate_segments_from_cigar(cigartuples, query.segments,
+                                                                        validate_segments_from_cigar(cigartuples, query.recon_segments,
                                                                                                 radius=junction_validation_radius,
                                                                                                 error_threshold=self.read_error_threshold)
                     if all(j.passed for j in junctions_validation_results):
@@ -602,7 +662,7 @@ class AlignScorer(object):
                 lowest_error = min(lowest_error, match_err)
                 if match_err <= match_error_threshold:
                     junctions_validation_results: List[SeqSegmentValidationResult] = \
-                                                        validate_segments_from_cigar(alignment.cigar, query.segments,
+                                                        validate_segments_from_cigar(alignment.cigar, query.recon_segments,
                                                         radius=junction_validation_radius,
                                                         q_st=alignment.q_st, q_en=alignment.q_en,
                                                         query_len=len(query.sequence), strand=alignment.strand,
@@ -651,7 +711,7 @@ class AlignScorer(object):
             if edlib_res and edlib_res.error <= match_error_threshold:
                 cigartuples = edlib_to_cigartuples(edlib_res.cigar)
                 junctions_validation_results: List[SeqSegmentValidationResult] = \
-                    validate_segments_from_cigar(cigartuples, query.segments,
+                    validate_segments_from_cigar(cigartuples, query.recon_segments,
                                                     radius=junction_validation_radius,
                                                     error_threshold=match_error_threshold)
                 if all(j.passed for j in junctions_validation_results):
