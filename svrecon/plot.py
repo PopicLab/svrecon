@@ -23,6 +23,7 @@ def plot_dot_plot(s1: str, s2: str, title: str, output_path: str,
     matrix = wp.DotPlotMatrix(s1.upper(), s2.upper(), K)
     num_rows = matrix.mat.shape[0]
     fig, ax = wp.viz_spy(matrix, markersize=1.0, aspect=aspect, title=title, s1_name=s1_name, s2_name=s2_name)
+    ax.xaxis.tick_bottom()  # spy() defaults to top-side ticks; move them to match the x-label below
 
     # Ticks scale with sequence length instead of wotplot's default density.
     ax.xaxis.set_major_locator(MaxNLocator(nbins=TICK_COUNT, integer=True))
@@ -43,21 +44,25 @@ def plot_dot_plot(s1: str, s2: str, title: str, output_path: str,
 def plot_query_dot_plots(query_info: 'QueryInfo', svid: str, sv_type: str, output_dir: str, part: int = 0,
                          aspect: str = 'auto') -> None:
     """Writes reconstructed-vs-validating and reconstructed-vs-reference dot plots for one
-    subsequence. Ref-coordinate boundaries are drawn only on the latter, since a piece's ref
-    position can diverge from its alt position once moved, inverted, or pasted."""
+    subsequence directly into output_dir, which must already exist -- the caller (score_all)
+    owns the directory layout (organizing by validation outcome, SV type, and SVID) and its
+    creation, since that's a scoring concern, not a plotting one. Ref-coordinate boundaries
+    are drawn only on the latter, since a piece's ref position can diverge from its alt
+    position once moved, inverted, or pasted."""
     query = query_info.query
     recon_seq = query.sequence
-    alt_boundaries = sorted({pos for start, end in query.segments for pos in (start, end)})
+    alt_boundaries = sorted({pos for start, end in query.recon_segments for pos in (start, end)})
     source = query_info.source.value if query_info.source else 'none'
     locus = f'{query.chrom}:{query.ref_start:,}-{query.ref_end:,}'
     title = f'{sv_type} {svid}_{part} ({locus})'
+    out_dir = Path(output_dir)
 
     def write(seq, plot_suffix, s2_name, seq_label, **extra):
         if seq is None:
-            logger.warning(f'Skipping reconstructed-vs-{seq_label} dot plot for {svid}_{part} ({sv_type}): '
-                           f'no {seq_label} sequence.')
+            logger.info(f'Skipping reconstructed-vs-{seq_label} dot plot for {svid}_{part} ({sv_type}): '
+                       f'no {seq_label} sequence.')
             return
-        plot_path = Path(output_dir) / f'{sv_type}_{svid}_{part}_{plot_suffix}.png'
+        plot_path = out_dir / f'{part}_{plot_suffix}.png'
         plot_dot_plot(recon_seq, seq, title, str(plot_path), s1_name='reconstructed', s2_name=s2_name,
                      segment_boundaries=alt_boundaries, aspect=aspect, **extra)
 

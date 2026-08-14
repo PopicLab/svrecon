@@ -18,7 +18,6 @@ DEFAULTS = {
     'gap_file': None,
     'chrom_cache': None,
     'groovi_config': None,
-    'eval_mode': 'assembly',
     'buffer': 500,
     'location_tolerance': float('inf'),
     'igv_prefix': '',
@@ -49,7 +48,6 @@ VALID_PARAM_FNS = {
     'chrom_cache': lambda arg: arg is None or isinstance(arg, str),
     'groovi_config': lambda arg: arg is None or isinstance(arg, str),
     'igv_prefix': lambda arg: isinstance(arg, str),
-    'eval_mode': lambda arg: arg in ('assembly', 'reads', 'both', 'none'),
     'report': lambda arg: arg in ('none', 'json'),
     'plot_aspect': lambda arg: arg in ('equal', 'auto'),
     'buffer': lambda arg: arg == 'auto' or isinstance(arg, int),
@@ -115,13 +113,13 @@ class Config:
 
         # --- logging setup ---
         file_handler = logging.FileHandler(self.log_path, mode='w')
-        file_handler.setLevel(logging.DEBUG)
+        file_handler.setLevel(logging.INFO)
 
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(logging.INFO)
 
         logging.basicConfig(
-            level=logging.DEBUG,
+            level=logging.INFO,
             format='%(asctime)s %(levelname)-8s %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S',
             handlers=[file_handler, console_handler],
@@ -130,8 +128,11 @@ class Config:
         logger.info(f'Logging to {self.log_path}')
         if self.config:
             logger.info(f'Loaded svrecon config: {self.config} (outputs -> {self.experiment_dir})')
-        logger.info(f'Config: {vars(self)}')
+        logger.info(f'Config:\n{self}')
         logger.info(f"Using {'persistent' if self.chrom_cache else 'temporary'} cache directory: {self.cache_dir}")
+
+    def __repr__(self):
+        return '\n'.join(f'  {key}={value!r}' for key, value in vars(self).items())
 
     def update_from_args(self, args):
         for k, v in vars(args).items():

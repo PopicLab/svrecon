@@ -7,7 +7,7 @@ class SubseqStatus(str, Enum):
     PASS = 'pass'
     FAIL = 'fail'
     INCONCLUSIVE = 'inconclusive'
-    SKIPPED = 'skipped'  # eval_mode='none' -- reconstructed but deliberately not validated
+    SKIPPED = 'skipped'  # neither --sample nor --bam -- reconstructed but deliberately not validated
 
 
 class SubseqReason(str, Enum):
@@ -20,7 +20,7 @@ class SubseqReason(str, Enum):
     INCONCLUSIVE = 'inconclusive'
     NO_ALIGNER = 'no_aligner'
     NO_ALIGNMENT_IN_WINDOW = 'no_alignment_in_window'
-    SKIPPED = 'skipped'  # eval_mode='none'
+    SKIPPED = 'skipped'  # neither --sample nor --bam
     OTHER = 'other'
 
 
@@ -29,7 +29,7 @@ class Outcome(str, Enum):
     HIT = 'hit'
     MISS = 'miss'
     INCONCLUSIVE = 'inconclusive'
-    SKIPPED = 'skipped'  # eval_mode='none' -- reconstructed but deliberately not validated
+    SKIPPED = 'skipped'  # neither --sample nor --bam -- reconstructed but deliberately not validated
 
 
 class ValidationSource(str, Enum):

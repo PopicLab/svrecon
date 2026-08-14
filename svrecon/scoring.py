@@ -34,6 +34,20 @@ MIN_EDLIB_QUERY = 5000
 # contig assemblies where a hit's r_st is contig-local, not a genomic coordinate).
 EDLIB_FALLBACK_MAX_TOLERANCE = 10_000_000
 JUNCTION_VALIDATION_WINDOW_MAX = 5000
+AUTO_BUFFER_MIN = 50  # floor for --buffer=auto, also its no-segments fallback
+AUTO_BUFFER_FRACTION = 0.1  # --buffer=auto sizes to this fraction of the SV's longest segment
+
+
+def resolve_buffer(buffer: Union[int, str], records: List[VariantRecord]) -> int:
+    """Resolves the 'auto' sentinel to max(AUTO_BUFFER_MIN, AUTO_BUFFER_FRACTION * the SV's
+    longest segment); a fixed buffer passes through unchanged."""
+    if buffer != 'auto':
+        return int(buffer)
+    segment_lengths = [stop - start for start, stop in {get_start_stop(rec) for rec in records}]
+    if not segment_lengths:
+        return AUTO_BUFFER_MIN
+    return max(AUTO_BUFFER_MIN, int(AUTO_BUFFER_FRACTION * max(segment_lengths)))
+
 
 @dataclass
 class QueryInfo:
@@ -194,7 +208,10 @@ class AlignScorer(object):
         # (resolved in score_sv, since it depends on each SV's records) -- otherwise a
         # fixed bp value shared by every SV.
         self.buffer = config.buffer if config.buffer == 'auto' else int(config.buffer)
-        self.eval_mode = config.eval_mode
+        # Validation source is inferred, not configured: --sample enables assembly-based
+        # eval, --bam enables read-based eval, independently -- both, either, or neither.
+        self.eval_assembly = bool(config.sample)
+        self.eval_reads = bool(config.bam)
         self.read_error_threshold = config.read_error_threshold
         self.min_read_support = config.min_read_support
         self.max_reads_per_site = config.max_reads_per_site
@@ -255,7 +272,7 @@ class AlignScorer(object):
                 else:
                     logger.warning(f'No sequences found for {chrom} in {label} FASTA {fasta}.')
 
-        if self.eval_mode in ('assembly', 'both'):
+        if self.eval_assembly:
             logger.info('Loading sample assembly bytearrays')
             self.sample = [load_fasta_to_bytes(samp, chroms) for samp in config.sample]
             logger.info(f'Initialized {len(self.sample)} sample assembly file(s).')
@@ -264,7 +281,7 @@ class AlignScorer(object):
                 build_chrom_aligners(samp, self.aligners, 'sample')
             logger.info('Aligners ready')
         else:
-            logger.info(f"eval_mode={self.eval_mode!r}: skipping sample assembly load and aligner build.")
+            logger.info('No --sample given: skipping sample assembly load and aligner build.')
 
         if self.check_reference:
             logger.info('Building/loading reference aligner(s) for --check_reference (mappy)...')
@@ -272,9 +289,7 @@ class AlignScorer(object):
             build_chrom_aligners(config.reference, self.reference_aligners, 'reference')
             logger.info('Reference aligners ready')
 
-        if self.eval_mode in ('reads', 'both'):
-            if not config.bam:
-                raise ValueError('--eval_mode reads/both requires a BAM (--bam) for read-based evaluation.')
+        if self.eval_reads:
             logger.info(f'Initializing thread-safe BAM reader: {config.bam}')
             self.bam_reader = BamReader(config.bam)
 
@@ -327,7 +342,7 @@ class AlignScorer(object):
         total_calls = Counter()
         correct_calls = Counter()
         inconclusive_calls = Counter()  # reads mode: no read spans the full resulting allele
-        skipped_calls = Counter()   # eval_mode='none': reconstructed but never validated
+        skipped_calls = Counter()   # neither --sample nor --bam: reconstructed but never validated
         assembly_hits = Counter()   # hits validated by the assembly (mappy or edlib)
         read_hits = Counter()       # hits validated only by reads
         source_counts = Counter()   # overall hit provenance: assembly | edlib | reads
@@ -376,7 +391,7 @@ class AlignScorer(object):
                         line += f'\t{result.get("tier", "")}\t{result.get("validation_source", "")}'
                     elif outcome != Outcome.SKIPPED:  # miss or inconclusive -> show why
                         line += f'\t{result.get("subseq_diagnostics", [])}'
-                    logger.debug(line)
+                    logger.info(line)
 
                     if report_fh is not None:
                         report_fh.write(json.dumps({
@@ -394,8 +409,11 @@ class AlignScorer(object):
                         query_infos = result.get('segments', [])
                         if query_infos:
                             logger.info(f'Producing dot plots for SV {svid} ({sv_type}, {len(query_infos)} part(s))')
+                            outcome_dir = 'validated' if outcome == Outcome.HIT else 'unvalidated'
+                            sv_plot_dir = Path(plot_out_dir) / outcome_dir / sv_type / svid
+                            sv_plot_dir.mkdir(parents=True, exist_ok=True)
                             for part, query_info in enumerate(query_infos):
-                                plot_query_dot_plots(query_info, svid, sv_type, plot_out_dir, part=part, aspect=plot_aspect)
+                                plot_query_dot_plots(query_info, svid, sv_type, str(sv_plot_dir), part=part, aspect=plot_aspect)
 
                     if outcome == Outcome.HIT:
                         correct_calls[sv_type] += 1
@@ -442,8 +460,8 @@ class AlignScorer(object):
         logger.info(
             f"Outcomes: hit={overall_correct} miss={overall_miss} inconclusive={overall_inconclusive} "
             f"skipped={overall_skipped} "
-            f"(inconclusive = no read spans the full resulting allele; skipped = eval_mode='none'; "
-            f"both excluded from precision)")
+            f"(inconclusive = no read spans the full resulting allele; skipped = neither --sample "
+            f"nor --bam given; both excluded from precision)")
         logger.info(
             f"Hits by validation source: assembly={source_counts['assembly']} "
             f"edlib={source_counts['edlib']} reads={source_counts['reads']}")
@@ -468,9 +486,10 @@ class AlignScorer(object):
 
     def score_sv(self, records: List[VariantRecord], buffer: Union[int, float], location_tolerance: Union[int, float],
                  match_error_threshold=0.1): 
-        """Score one SV: reconstruct its alt allele(s) and validate each against reads/assembly
-        per `self.eval_mode`, then roll up one outcome for the call ('hit' iff every reconstructed
-        subsequence passed, 'miss' if any was contradicted, else 'inconclusive').
+        """Score one SV: reconstruct its alt allele(s), validate against reads and/or assembly
+        (per `self.eval_reads`/`self.eval_assembly`), then roll up one outcome for the call
+        ('hit' iff every reconstructed subsequence passed, 'miss' if any was contradicted,
+        else 'inconclusive').
 
         Returns a dict with svid, sv_type, outcome, is_correct, tier, validation_source,
         rescued_by_edlib, coords, match_scores, validating_sequences, recon_sequences,
@@ -483,34 +502,28 @@ class AlignScorer(object):
             self._assert_sv_records_non_interchromosomal(records)
             self._assert_sv_records_contiguous_intervals(records)
 
-            if buffer == 'auto':
-                # 10% of this SV's own longest segment (floored at 100bp)
-                longest_segment = max(stop - start for start, stop in {get_start_stop(rec) for rec in records})
-                buffer = max(100, int(0.1 * longest_segment))
-
-            eval_reads = self.eval_mode in ('reads', 'both')
-            eval_assembly = self.eval_mode in ('assembly', 'both')
+            buffer = resolve_buffer(buffer, records)
 
             recon_sequences: List[QueryReconSubsequence] = simulate_subsequences(records, buffer, self.ref)
             score_records: List[QueryInfo] = []  # one per reconstructed subsequence of an SV
 
             candidate_reads_by_chrom = None
-            if eval_reads:
-                candidate_reads_by_chrom: Dict[str, list] = self.bam_reader.candidate_reads_from_records(records) if eval_reads else None # TODO: 
+            if self.eval_reads:
+                candidate_reads_by_chrom: Dict[str, list] = self.bam_reader.candidate_reads_from_records(records)
 
             for query in recon_sequences:
-                # Window size 
+                # Window size
                 junction_validation_radius = int(clamp(round(self.junction_window_factor * len(query.sequence)), self.junction_window_min, self.junction_window_max))
 
                 score_record = QueryInfo(query=query)
                 if query.chrom in self.ref:
                     score_record.ref_sequence = self.ref[query.chrom][query.ref_start:query.ref_end].decode('ascii')
 
-                if eval_reads:
+                if self.eval_reads:
                     read_based_score = self._score_read_based_eval(query, junction_validation_radius, candidate_reads_by_chrom[query.chrom], buffer)
                     score_record.update(**read_based_score)
 
-                if not score_record.passed and eval_assembly:
+                if not score_record.passed and self.eval_assembly:
                     assembly_based_score = self._score_assembly_based_eval(query, junction_validation_radius, location_tolerance, match_error_threshold)
                     score_record.update(**assembly_based_score)
 
@@ -526,7 +539,7 @@ class AlignScorer(object):
             coords = records[0].pos, records[0].stop
 
             # SV-level roll-up:
-            #   skipped      -> eval_mode='none': reconstructed (and, where the reference
+            #   skipped      -> neither --sample nor --bam: reconstructed (and, where the reference
             #                   covers it, ref_sequence populated for plotting) but never
             #                   validated at all -- distinct from "inconclusive" (which
             #                   means validation was attempted but couldn't reach a verdict)

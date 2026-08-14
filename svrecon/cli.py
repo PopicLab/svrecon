@@ -25,7 +25,8 @@ def main():
                         'params (reference/sample/bam/calls/classified). Was --config previously.',
                         dest='groovi_config', default=None)
     parser.add_argument('--reference', help='Reference genome .fa file', dest='reference', default=None)
-    parser.add_argument('--sample', help='Sample genome .fa file(s)', dest='sample', nargs='+', default=None)
+    parser.add_argument('--sample', help='Sample genome .fa file(s). Presence enables assembly-based '
+                        'validation.', dest='sample', nargs='+', default=None)
     parser.add_argument('--calls', help='VCF containing called SVs', dest='calls', default=None)
     parser.add_argument('--location_tolerance',
                         help='BP tolerance between a mappy hit and the expected SV location; '
@@ -33,21 +34,15 @@ def main():
                              'whose hit coordinates are contig-local, not genomic)',
                         type=float, default=None)
     parser.add_argument('--buffer', help="Subsequence context buffer, in bp (default 500), or 'auto' to size "
-                        "it per-SV to max(100, 10%% of that SV's own longest segment).", dest='buffer', default=None)
+                        "it per-SV to max(50, 10%% of that SV's own longest segment).", dest='buffer', default=None)
     parser.add_argument('--gap_file', help='Tab-delimited file containing regions to omit (e.g., centromere and telomere)',
                         default=None)
-    parser.add_argument('--bam', help='BAM file for generating IGV config', dest='bam', default=None)
+    parser.add_argument('--bam', help='BAM file. Presence enables read-based validation; also used '
+                        'for generating IGV config.', dest='bam', default=None)
     parser.add_argument('--classified', help='VCF file of groovi-style classified breakpoints for IGV config',
                         dest='classified', default=None)
     parser.add_argument('--igv_prefix', help='Prefix for igv session paths (default empty)', dest='igv_prefix', default=None)
     parser.add_argument('--chrom_cache', help='Directory to save/load per-chromosome MMI indices.', default=None)
-    parser.add_argument('--eval_mode', choices=['assembly', 'reads', 'both', 'none'], default=None,
-                        help="Validation source: 'assembly' (default), 'reads' "
-                             "(skip the assembly entirely and validate against BAM long reads), "
-                             "'both' (assembly first, reads to rescue misses), or 'none' (skip all "
-                             "validation -- just reconstruct each SV's alt allele; useful with "
-                             "--plot_first_n to get reconstructed-vs-reference dot plots without "
-                             "needing a --sample assembly or --bam).")
     parser.add_argument('--read_error_threshold', type=float, default=None,
                         help='Max edlib error rate for a read to validate a reconstruction (read modes; '
                              'default 0.1). Keep <= the assembly error threshold (0.1) for consistent hit/miss calls.')
