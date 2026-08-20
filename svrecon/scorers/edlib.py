@@ -107,4 +107,5 @@ class EdlibScorer(Scorer):
             lowest_error=edlib_result.error,
             validating_seq=validating_seq,
             segment_results=segment_validation_results,
+            best_strand_match=1,  # edlib aligns forward only
         )

@@ -10,8 +10,7 @@ from svrecon.scorers.utils import SegmentValidation
 
 @dataclass
 class QueryValidationInput:
-    """One scorer's self-classified result for one query; each scorer sets its own
-    status/reason, so the folding in QueryValidation stays scorer-agnostic."""
+    """One scorer's self-classified result."""
     source: ValidationSource
     passed: bool = False
     status: SubseqStatus = SubseqStatus.FAIL
@@ -20,7 +19,19 @@ class QueryValidationInput:
     lowest_error: float = 1.0
     validating_seq: Optional[str] = None
     segment_results: List[SegmentValidation] = field(default_factory=list)
-    best_strand_match: Optional[int] = None  # assembly only
+    best_strand_match: Optional[int] = None  # alignmet only
+
+    def jsonify(self) -> dict:
+        return {
+            'source': self.source,
+            'passed': self.passed,
+            'status': self.status,
+            'reason': self.reason,
+            'lowest_pass_error': self.lowest_pass_error,
+            'lowest_error': self.lowest_error,
+            'strand': self.best_strand_match,
+            'segments': [s.jsonify() for s in self.segment_results],
+        }
 
 
 class Scorer:

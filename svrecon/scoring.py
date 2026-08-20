@@ -15,7 +15,6 @@ from svrecon.plot import plot_sv_validation
 from svrecon.reconstruct import Query, simulate_subsequences
 from svrecon.scorers.assembly import AssemblyScorer
 from svrecon.scorers.base import Scorer, QueryValidationInput
-from svrecon.scorers.utils import SegmentValidation
 from svrecon.scorers.edlib import EdlibScorer
 from svrecon.scorers.reads import ReadScorer
 from svrecon.utils import get_start_stop, group_variants_by_id, load_fasta_to_bytes
@@ -25,53 +24,19 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class QueryValidation:
-    """Validation state of one reconstructed subsequence, accumulated across scorers'
-    QueryValidationInput results. NOTE: in upcoming versions, we can track the results of
-    reach run for a more comprehensive report.""" 
+    """Every scorer's result for one reconstructed subsequence, in the order they ran.
+    Scoring stops at the first pass, so the last entry is the decisive one."""
     query: Query
-    source: Optional[ValidationSource] = None
-
-    # Pass Diagnostics
-    lowest_pass_error: float = 1.0
-    lowest_error: float = 1.0  # lowest error seen overall, pass or fail
-    passed: bool = False
-    validating_seq: Optional[str] = None
-    segment_results: List[SegmentValidation] = field(default_factory=list)
-    best_strand_match: Optional[int] = None  # assembly only
-
-    # Populated by apply_ambiguity() -- only meaningful when passed, and only checked
-    # when check_reference is on.
-    reference_check_match: bool = False
-    reference_check_err: Optional[float] = None
-    reference_check_strand: Optional[int] = None
-
-    status: SubseqStatus = SubseqStatus.SKIPPED # by default, unscored
-    reason: SubseqReason = SubseqReason.SKIPPED
+    validations: List[QueryValidationInput] = field(default_factory=list)
+    # Reference-ambiguity results, kept apart: a pass there means the allele also matches
+    # the unmodified reference, making the query inconclusive rather than validated.
+    ambiguity_validations: List[QueryValidationInput] = field(default_factory=list)
 
     def update_validation(self, result: QueryValidationInput) -> None:
-        """Fold one scorer's self-classified result in: each result's own status/reason
-        override the previous ones;"""
-        self.lowest_error = min(self.lowest_error, result.lowest_error)
-        if self.passed:
-            return
-        self.status = result.status
-        self.reason = result.reason
-        self.segment_results = result.segment_results
-        if result.passed:
-            self.passed = True
-            self.lowest_pass_error = result.lowest_pass_error
-            self.validating_seq = result.validating_seq
-            self.source = result.source
-            self.best_strand_match = result.best_strand_match
+        self.validations.append(result)
 
     def update_ambiguity(self, result: QueryValidationInput) -> None:
-        """A pass against the reference -> inconclusive."""
-        if result.passed:
-            self.reference_check_match = True
-            self.reference_check_err = result.lowest_pass_error
-            self.reference_check_strand = result.best_strand_match or 1  # edlib aligns forward only
-            self.status = SubseqStatus.INCONCLUSIVE
-            self.reason = SubseqReason.REFERENCE_MATCH
+        self.ambiguity_validations.append(result)
 
     def jsonify(self) -> Dict:
         return {
@@ -81,16 +46,55 @@ class QueryValidation:
             'reason': self.reason,
             'source': self.source,
             'strand': self.decisive_strand,
-            'segments': [s.jsonify() for s in self.segment_results],
             'validating_sequence': self.validating_seq,
+            'validations': [v.jsonify() for v in self.validations],
+            'ambiguity_validations': [v.jsonify() for v in self.ambiguity_validations],
         }
 
     @property
+    def latest(self) -> Optional[QueryValidationInput]:
+        return self.validations[-1] if self.validations else None
+
+    @property
+    def passed(self) -> bool:
+        return bool(self.latest and self.latest.passed)
+
+    @property
+    def reference_matches(self) -> List[QueryValidationInput]:
+        return [v for v in self.ambiguity_validations if v.passed]
+
+    @property
+    def status(self) -> SubseqStatus:
+        if self.reference_matches:
+            return SubseqStatus.INCONCLUSIVE
+        return self.latest.status if self.latest else SubseqStatus.SKIPPED
+
+    @property
+    def reason(self) -> SubseqReason:
+        if self.reference_matches:
+            return SubseqReason.REFERENCE_MATCH
+        return self.latest.reason if self.latest else SubseqReason.SKIPPED
+
+    @property
+    def source(self) -> Optional[ValidationSource]:
+        return self.latest.source if self.passed else None
+
+    @property
+    def validating_seq(self) -> Optional[str]:
+        return self.latest.validating_seq if self.passed else None
+
+    @property
+    def lowest_pass_error(self) -> float:
+        return self.latest.lowest_pass_error if self.passed else 1.0
+
+    @property
     def decisive_strand(self) -> Optional[int]:
-        # Strand of the decisive alignment where meaningful: the reference match for a
-        # reference_match, else the assembly match. None for read/edlib confirmations
-        # (reads are randomly oriented; strand carries no signal there).
-        return self.reference_check_strand if self.reason == SubseqReason.REFERENCE_MATCH else self.best_strand_match
+        # Strand of the alignment that decided the query: the reference match if the allele
+        # also matched the reference, else the validating one. None for reads (randomly
+        # oriented, so strand carries no signal).
+        if not self.passed:
+            return None
+        return (self.reference_matches or self.validations)[-1].best_strand_match
 
 
 class SVValidation:
@@ -412,7 +416,7 @@ class CallsetScorer(object):
                 if query_validation.passed:
                     for scorer in self.ambiguity_scorers:
                         query_validation.update_ambiguity(scorer.score_query(query))
-                        if query_validation.reference_check_match: break
+                        if query_validation.reference_matches: break
 
                 query_validations.append(query_validation)
 
