@@ -11,7 +11,7 @@ import pysam
 from svrecon.constants import ValidationSource
 from svrecon.reconstruct import Query
 from svrecon.scorers.base import Scorer, QueryValidationInput
-from svrecon.scorers.cigar import Cigar, SeqSegmentValidationResult, validate_segments_from_cigar
+from svrecon.scorers.cigar import Cigar, SegmentValidation, validate_segments_from_cigar
 from svrecon.util import reverse_complement
 
 logger = logging.getLogger(__name__)
@@ -121,7 +121,7 @@ class AssemblyScorer(Scorer):
             if match_err > self.match_error_threshold:
                 continue
 
-            segment_validation_results: List[SeqSegmentValidationResult] = \
+            segment_validation_results: List[SegmentValidation] = \
                 validate_segments_from_cigar(Cigar.from_mappy(alignment, len(query.sequence)),
                                              query.recon_segments,
                                              error_threshold=self.match_error_threshold)

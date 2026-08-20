@@ -105,7 +105,7 @@ class Cigar:
 
 
 @dataclass
-class SeqSegmentValidationResult:
+class SegmentValidation:
     error: float
     passed: bool
 
@@ -114,12 +114,8 @@ class SeqSegmentValidationResult:
 
 
 def validate_segments_from_cigar(cigar: Cigar, segments: List[Tuple[int, int]],
-                                 error_threshold: float = 0.1) -> List[SeqSegmentValidationResult]:
-    """Scores each segment [start, end) against the same error threshold; one result per
-    segment, verdict = all(r.passed). Segments tile the query (reconstruct.py), and at a
-    shared boundary i of [a, i) and [i, b), a deletion anchored at i counts toward
-    [i, b) -- so a deletion is checked implicitly through its flanking segments.
-    Clipped bases are error, so an unaligned segment fails at 1.0."""
+                                 error_threshold: float = 0.1) -> List[SegmentValidation]:
+    """Scores each segment [start, end) against the same error threshold; one result per segment."""
     rates = [cigar.get_window_error_rate(start, end) for start, end in segments]
-    return [SeqSegmentValidationResult(error=float(f'{rate:.4g}'), passed=rate <= error_threshold)
+    return [SegmentValidation(error=float(f'{rate:.4g}'), passed=rate <= error_threshold)
             for rate in rates]

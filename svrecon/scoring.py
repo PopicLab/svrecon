@@ -16,7 +16,7 @@ from svrecon.plot import plot_sv_validation
 from svrecon.reconstruct import Query, simulate_subsequences
 from svrecon.scorers.assembly import AssemblyScorer
 from svrecon.scorers.base import Scorer, QueryValidationInput
-from svrecon.scorers.cigar import SeqSegmentValidationResult
+from svrecon.scorers.cigar import SegmentValidation
 from svrecon.scorers.edlib import EdlibScorer
 from svrecon.scorers.reads import ReadScorer
 from svrecon.util import get_start_stop, group_variants_by_id, load_fasta_to_bytes
@@ -36,7 +36,7 @@ class QueryValidation:
     lowest_error: float = 1.0  # lowest error seen overall, pass or fail
     passed: bool = False
     validating_seq: Optional[str] = None
-    segment_results: List[SeqSegmentValidationResult] = field(default_factory=list)
+    segment_results: List[SegmentValidation] = field(default_factory=list)
     best_strand_match: Optional[int] = None  # assembly only
 
     # Failure diagnostics -- only meaningful once a tier call did NOT pass. Only the

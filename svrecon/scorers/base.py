@@ -5,7 +5,7 @@ from typing import List, Optional
 from svrecon.config import Config
 from svrecon.constants import ValidationSource
 from svrecon.reconstruct import Query
-from svrecon.scorers.cigar import SeqSegmentValidationResult
+from svrecon.scorers.cigar import SegmentValidation
 
 
 @dataclass
@@ -16,7 +16,7 @@ class QueryValidationInput:
     lowest_pass_error: float = 1.0
     lowest_error: float = 1.0
     validating_seq: Optional[str] = None
-    segment_results: List[SeqSegmentValidationResult] = field(default_factory=list)
+    segment_results: List[SegmentValidation] = field(default_factory=list)
     best_strand_match: Optional[int] = None        # assembly only
     overlapping_spanning_reads_found: bool = True  # reads only; True = n/a for other tiers
     candidate_read_found: bool = True              # reads only
