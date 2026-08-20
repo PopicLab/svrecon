@@ -1,22 +1,208 @@
-"""Scoring engine: the CallsetScorer orchestrator and per-SV scoring."""
+"""Scoring engine: per-query/per-SV validation state and the CallsetScorer orchestrator."""
 import json
 import logging
 import traceback
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from pysam import VariantRecord
 from tqdm import tqdm
 
 from svrecon.constants import *
 from svrecon.plot import plot_sv_validation
-from svrecon.reconstruct import simulate_subsequences
-from svrecon.scorers.base import Scorer, QueryValidation, SVValidation, ReadScorer, AssemblyScorer, EdlibScorer
+from svrecon.reconstruct import Query, simulate_subsequences
+from svrecon.scorers.assembly import AssemblyScorer
+from svrecon.scorers.base import Scorer, QueryValidationInput
+from svrecon.scorers.cigar import SeqSegmentValidationResult
+from svrecon.scorers.edlib import EdlibScorer
+from svrecon.scorers.reads import ReadScorer
 from svrecon.util import get_start_stop, group_variants_by_id, load_fasta_to_bytes
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class QueryValidation:
+    """Validation state of one reconstructed subsequence, accumulated across scorers'
+    QueryValidationInput results."""
+    query: Query
+    source: Optional[ValidationSource] = None
+
+    # Pass Diagnostics
+    lowest_pass_error: float = 1.0
+    lowest_error: float = 1.0  # lowest error seen overall, pass or fail
+    passed: bool = False
+    validating_seq: Optional[str] = None
+    segment_results: List[SeqSegmentValidationResult] = field(default_factory=list)
+    best_strand_match: Optional[int] = None  # assembly only
+
+    # Failure diagnostics -- only meaningful once a tier call did NOT pass. Only the
+    # reads tier emits these; default True ("not applicable/assume satisfied") so an
+    # assembly/edlib-only call never spuriously trips the classification below.
+    overlapping_spanning_reads_found: bool = True
+    candidate_read_found: bool = True
+
+    # Populated by apply_ambiguity() -- only meaningful when passed, and only checked
+    # when check_reference is on.
+    reference_check_match: bool = False
+    reference_check_err: Optional[float] = None
+    reference_check_strand: Optional[int] = None
+
+    status: SubseqStatus = SubseqStatus.SKIPPED # by default, unscored
+    reason: SubseqReason = SubseqReason.SKIPPED
+
+    def update_validation(self, result: QueryValidationInput) -> None:
+        """Fold one scorer's result in: a pass adopts the result's fields; failure
+        diagnostics accumulate only while nothing has passed."""
+        self.lowest_error = min(self.lowest_error, result.lowest_error)
+        if result.passed:
+            self.passed = True
+            self.lowest_pass_error = result.lowest_pass_error
+            self.validating_seq = result.validating_seq
+            self.segment_results = result.segment_results
+            self.source = result.source
+            self.best_strand_match = result.best_strand_match
+
+        elif not self.passed:
+            if result.source == ValidationSource.READS:  # only the reads tier emits these flags
+                self.overlapping_spanning_reads_found = result.overlapping_spanning_reads_found
+                self.candidate_read_found = result.candidate_read_found
+            if result.segment_results:
+                self.segment_results = result.segment_results
+
+        self._update_status()
+
+    def _update_status(self) -> None:
+        # Status / reason diagnostics based on the fields accumulated so far
+        if self.source:
+            self.status = SubseqStatus.PASS
+            self.reason = SubseqReason.PASS
+
+        # Read based validation failure diagnostics
+        elif not self.overlapping_spanning_reads_found:
+            self.status = SubseqStatus.INCONCLUSIVE
+            self.reason = SubseqReason.INCONCLUSIVE
+        elif not self.candidate_read_found:
+            self.status = SubseqStatus.FAIL
+            self.reason = SubseqReason.OVER_ERROR_THRESHOLD
+
+        # Assembly based validation failure diagnostics
+        elif self.segment_results:
+            self.status = SubseqStatus.FAIL
+            self.reason = SubseqReason.JUNCTION_FAILED
+        else:
+            self.status = SubseqStatus.FAIL
+            self.reason = SubseqReason.OTHER
+
+    def update_ambiguity(self, result: QueryValidationInput) -> None:
+        """A pass against the plain reference is not specific to the SV -> inconclusive."""
+        if result.passed:
+            self.reference_check_match = True
+            self.reference_check_err = result.lowest_pass_error
+            self.reference_check_strand = result.best_strand_match or 1  # edlib aligns forward only
+            self.status = SubseqStatus.INCONCLUSIVE
+            self.reason = SubseqReason.REFERENCE_MATCH
+
+    def jsonify(self) -> Dict:
+        return {
+            'chrom': self.query.chrom,
+            'ref_start': self.query.ref_start,
+            'status': self.status,
+            'reason': self.reason,
+            'source': self.source,
+            'strand': self.decisive_strand,
+            'segments': [s.jsonify() for s in self.segment_results],
+            'validating_sequence': self.validating_seq,
+        }
+
+    @property
+    def decisive_strand(self) -> Optional[int]:
+        # Strand of the decisive alignment where meaningful: the reference match for a
+        # reference_match, else the assembly match. None for read/edlib confirmations
+        # (reads are randomly oriented; strand carries no signal there).
+        return self.reference_check_strand if self.reason == SubseqReason.REFERENCE_MATCH else self.best_strand_match
+
+
+class SVValidation:
+    """SV-level roll-up of one call's per-subsequence validations."""
+
+    def __init__(self, svid: str, svtype: str, query_validations: List[QueryValidation]):
+        self.svid = svid
+        self.svtype = svtype
+        self.query_validations = query_validations
+
+        # SV-level roll-up:
+        #   skipped      -> no validation scorers configured: reconstructed but never
+        #                   validated at all -- distinct from "inconclusive" (which
+        #                   means validation was attempted but couldn't reach a verdict)
+        #   hit          -> every subsequence passed
+        #   miss         -> at least one subsequence was contradicted (spanning
+        #                   reads / assembly aligned but didn't match)
+        #   inconclusive -> no contradiction, but at least one subsequence could
+        #                   not be tested (reads mode: no read spans the full allele)
+        subseq_status = [qv.status for qv in query_validations]
+        if len(subseq_status) > 0 and all(s == SubseqStatus.SKIPPED for s in subseq_status):
+            self.outcome = Outcome.SKIPPED
+        elif len(subseq_status) > 0 and all(s == SubseqStatus.PASS for s in subseq_status):
+            self.outcome = Outcome.HIT
+        elif SubseqStatus.FAIL in subseq_status:
+            self.outcome = Outcome.MISS
+        elif SubseqStatus.INCONCLUSIVE in subseq_status:
+            self.outcome = Outcome.INCONCLUSIVE
+        else:
+            self.outcome = Outcome.MISS
+
+        # Per-SV provenance: the highest tier any passing subsequence needed.
+        # 'reads' implies the SV would have been an assembly-miss without reads.
+        self.validation_source = None
+        if self.outcome == Outcome.HIT:
+            srcs = {qv.source for qv in query_validations if qv.source}
+            if ValidationSource.READS in srcs:
+                self.validation_source = ValidationSource.READS
+            elif ValidationSource.EDLIB in srcs:
+                self.validation_source = ValidationSource.EDLIB
+            else:
+                self.validation_source = ValidationSource.ASSEMBLY
+
+        # Coarse evaluation tier for two-tier reporting:
+        #   'read'     (Tier 1) -- a single actual read contained the allele. The
+        #              strongest, most concrete evidence; independent of any
+        #              assembly's quality.
+        #   'assembly' (Tier 2) -- confirmed only against the reconstructed
+        #              assembly (mappy or the edlib fallback). Supporting evidence
+        #              for events too long for any single read to span.
+        if self.validation_source == ValidationSource.READS:
+            self.tier = Tier.READ
+        elif self.validation_source in (ValidationSource.ASSEMBLY, ValidationSource.EDLIB):
+            self.tier = Tier.ASSEMBLY
+        else:
+            self.tier = Tier.MISS
+
+    def get_summary(self) -> Dict:
+        """Report record for the --report json sidecar."""
+        return {
+            'svid': self.svid,
+            'svtype': self.svtype,
+            'outcome': self.outcome,
+            'tier': self.tier,
+            'segments': [qv.jsonify() for qv in self.query_validations],
+        }
+
+    @property
+    def chroms(self) -> List[str]:
+        """Chromosome of each reconstructed subsequence (an SV can span multiple)."""
+        return [qv.query.chrom for qv in self.query_validations]
+
+    @property
+    def match_scores(self) -> List[float]:
+        return [qv.lowest_pass_error for qv in self.query_validations]
+
+    @property
+    def subseq_reasons(self) -> List[str]:
+        return [qv.reason.value for qv in self.query_validations]
 
 
 class CallsetScorer(object):

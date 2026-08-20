@@ -1,4 +1,4 @@
-"""Read-based validation: thread-safe BAM reader and per-read edlib scoring."""
+"""Read-based validation: thread-safe BAM reader, per-read edlib scoring, and the ReadScorer."""
 import logging
 import os
 import threading
@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from typing import List, Optional, Dict, Tuple
 import pysam
 
-from svrecon.scorers.align import edlib_score
+from svrecon.constants import ValidationSource
+from svrecon.reconstruct import Query
+from svrecon.scorers.base import Scorer, QueryValidationInput
+from svrecon.scorers.cigar import Cigar, validate_segments_from_cigar
+from svrecon.scorers.edlib import edlib_score
 from svrecon.util import merge_intervals, reverse_complement
 
 logger = logging.getLogger(__name__)
@@ -174,3 +178,52 @@ def run_read_edlib(query_seq: str, read_seqs: List[str], error_threshold: float,
                                        matched_read_sequence=matched_read_sequence)
     return ReadEdlibResult(n_tried=n_tried, error=best_error, cigar=best_cigar,
                            matched_read_sequence=matched_read_sequence)
+
+
+class ReadScorer(Scorer):
+    """Validates a query against real reads: does any single read contain the allele?"""
+
+    def __init__(self, config, chroms):
+        super().__init__(config, chroms)
+        self.read_error_threshold = config.read_error_threshold
+        self.min_read_support = config.min_read_support
+        self.max_reads_per_site = config.max_reads_per_site
+        self.bam_reader = BamReader(config.bam)
+
+    def score_query(self, query: Query) -> QueryValidationInput:
+        # TODO: logic so far, to finish and re-enable:
+        lowest_pass_error = 1.0
+        lowest_error = 1.0
+        passed = False
+        validating_seq = None
+        best_segment_validation_results = []
+        candidate_read_found = False
+
+        # collect candidate reads that overlap ref region of interest, then filter by size
+        breakpoints = [pos for start, end in query.ref_segments for pos in (start, end)]
+        bp_start, bp_stop = min(breakpoints), max(breakpoints)
+        reads = self.bam_reader.candidate_read_seqs(
+            query.chrom, bp_start, bp_stop, max_reads=self.max_reads_per_site)
+        reads = [r for r in reads if len(r) >= len(query.sequence)]
+
+        if reads:
+            read_res = run_read_edlib(query.sequence, reads, self.read_error_threshold, self.min_read_support)
+            candidate_read_found = read_res.was_read_found()  # TODO: also fold read_res.error into lowest_error
+            if read_res.was_read_found() and read_res.error <= self.read_error_threshold:
+                segment_validation_results = validate_segments_from_cigar(
+                    Cigar.from_edlib(read_res.cigar), query.recon_segments,
+                    error_threshold=self.read_error_threshold)
+                if all(s.passed for s in segment_validation_results):
+                    passed = True
+                    if read_res.error < lowest_pass_error:
+                        lowest_pass_error = read_res.error
+                        best_segment_validation_results = segment_validation_results
+                        validating_seq = read_res.matched_read_sequence
+                if not passed:
+                    best_segment_validation_results = segment_validation_results
+
+        return QueryValidationInput(source=ValidationSource.READS, passed=passed,
+                                    lowest_pass_error=lowest_pass_error, lowest_error=lowest_error,
+                                    validating_seq=validating_seq, segment_results=best_segment_validation_results,
+                                    overlapping_spanning_reads_found=bool(reads),
+                                    candidate_read_found=candidate_read_found)

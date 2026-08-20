@@ -7,7 +7,7 @@ import wotplot as wp
 from matplotlib.ticker import FuncFormatter, MaxNLocator
 
 if TYPE_CHECKING:
-    from svrecon.scorers.base import SVValidation
+    from svrecon.scoring import SVValidation
 
 logger = logging.getLogger(__name__)
 

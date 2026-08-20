@@ -1,12 +1,14 @@
-"""Shared scorer utilities: normalized CIGAR representation."""
+"""Normalized CIGAR representation and per-segment validation."""
 import re
+from dataclasses import dataclass
 from functools import cached_property
 from typing import List, Tuple, TYPE_CHECKING
 
-import mappy
 import numpy as np
-import pysam
 
+if TYPE_CHECKING:
+    import mappy
+    import pysam
 
 
 class Cigar:
@@ -34,7 +36,8 @@ class Cigar:
 
     @cached_property
     def error_mask(self) -> np.ndarray:
-        """boolean bit mask. mask[i] = 1 iff query base i is clipped, inserted, or mismatched."""
+        """uint8, length query_length. mask[i] = 1 iff query base i is clipped,
+        inserted, or mismatched."""
         mask = np.zeros(self.query_length, dtype=np.uint8)
         pos = 0
         for op, length in self.cigartuples:
@@ -46,8 +49,8 @@ class Cigar:
 
     @cached_property
     def deletion_lengths(self) -> np.ndarray:
-        """int32, length query_length + 1. dels[i] = n indicates a deletion of n target bases
-        preceding query base i."""
+        """int32, length query_length + 1. dels[i] = n: a deletion of n target bases
+        immediately precedes query base i."""
         dels = np.zeros(self.query_length + 1, dtype=np.int32)
         pos = 0
         for op, length in self.cigartuples:
@@ -62,10 +65,10 @@ class Cigar:
         (error bases + deletions anchored in [start, end)) / ((end - start) + those deletions)."""
         del_len = int(self.deletion_lengths[start:end].sum())
         errors = int(self.error_mask[start:end].sum()) + del_len
-        return errors / ((end - start) + del_len) # TODO: why do we include this?
+        return errors / ((end - start) + del_len)
 
     @classmethod
-    def from_mappy(cls, alignment: mappy.Alignment, query_len: int) -> 'Cigar':
+    def from_mappy(cls, alignment: 'mappy.Alignment', query_len: int) -> 'Cigar':
         """Normalizes a mappy hit: flips (length, op) order, un-mirrors reverse-strand
         hits to forward-query order, adds the clips implicit in q_st/q_en.
 
@@ -90,7 +93,7 @@ class Cigar:
                     for m in re.finditer(r'(\d+)([MIDX=])', cigar_str)])
 
     @classmethod
-    def from_pysam(cls, read: pysam.AlignedSegment) -> 'Cigar':
+    def from_pysam(cls, read: 'pysam.AlignedSegment') -> 'Cigar':
         """Normalizes a pysam record: hard clips become soft clips (both mean unaligned
         original-read bases here); reverse-strand records flip to forward-read order.
 
@@ -99,3 +102,24 @@ class Cigar:
         if read.is_reverse:
             tuples.reverse()
         return cls(tuples)
+
+
+@dataclass
+class SeqSegmentValidationResult:
+    error: float
+    passed: bool
+
+    def jsonify(self) -> dict:
+        return {'error': self.error, 'passed': self.passed}
+
+
+def validate_segments_from_cigar(cigar: Cigar, segments: List[Tuple[int, int]],
+                                 error_threshold: float = 0.1) -> List[SeqSegmentValidationResult]:
+    """Scores each segment [start, end) against the same error threshold; one result per
+    segment, verdict = all(r.passed). Segments tile the query (reconstruct.py), and at a
+    shared boundary i of [a, i) and [i, b), a deletion anchored at i counts toward
+    [i, b) -- so a deletion is checked implicitly through its flanking segments.
+    Clipped bases are error, so an unaligned segment fails at 1.0."""
+    rates = [cigar.get_window_error_rate(start, end) for start, end in segments]
+    return [SeqSegmentValidationResult(error=float(f'{rate:.4g}'), passed=rate <= error_threshold)
+            for rate in rates]
