@@ -7,7 +7,7 @@ import wotplot as wp
 from matplotlib.ticker import FuncFormatter, MaxNLocator
 
 if TYPE_CHECKING:
-    from svrecon.scoring import QueryInfo
+    from svrecon.scorers.base import SVValidation
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +20,13 @@ def plot_dot_plot(s1: str, s2: str, title: str, output_path: str,
                   segment_boundaries: Optional[Sequence[int]] = None,
                   ref_segment_boundaries: Optional[Sequence[int]] = None,
                   x_offset: int = 0, y_offset: int = 0, aspect: str = 'auto') -> None:
+    """Renders a k-mer dot plot of s1 (x) vs s2 (y) to output_path, with optional dashed
+    boundary lines per axis and x/y tick offsets for genomic coordinates."""
     matrix = wp.DotPlotMatrix(s1.upper(), s2.upper(), K)
-    num_rows = matrix.mat.shape[0]
-    fig, ax = wp.viz_spy(matrix, markersize=1.0, aspect=aspect, title=title, s1_name=s1_name, s2_name=s2_name)
-    ax.xaxis.tick_bottom()  # spy() defaults to top-side ticks; move them to match the x-label below
 
-    # Ticks scale with sequence length instead of wotplot's default density.
+    num_rows = matrix.mat.shape[0]
+    fig, ax = wp.viz_spy(matrix, markersize=1.0, aspect=aspect, title=title, s1_name=s1_name, s2_name=s2_name)     # Ticks scale with sequence length instead of wotplot's default density.
+    ax.xaxis.tick_bottom()  # spy() defaults to top-side ticks; move them to match the x-label below
     ax.xaxis.set_major_locator(MaxNLocator(nbins=TICK_COUNT, integer=True))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=TICK_COUNT, integer=True))
     ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _pos: f'{int(x) + x_offset:,}'))
@@ -41,33 +42,26 @@ def plot_dot_plot(s1: str, s2: str, title: str, output_path: str,
     plt.close(fig)
 
 
-def plot_query_dot_plots(query_info: 'QueryInfo', svid: str, sv_type: str, output_dir: str, part: int = 0,
-                         aspect: str = 'auto') -> None:
-    """Writes reconstructed-vs-validating and reconstructed-vs-reference dot plots for one
-    subsequence directly into output_dir, which must already exist -- the caller (score_all)
-    owns the directory layout (organizing by validation outcome, SV type, and SVID) and its
-    creation, since that's a scoring concern, not a plotting one. Ref-coordinate boundaries
-    are drawn only on the latter, since a piece's ref position can diverge from its alt
-    position once moved, inverted, or pasted."""
-    query = query_info.query
-    recon_seq = query.sequence
-    alt_boundaries = sorted({pos for start, end in query.recon_segments for pos in (start, end)})
-    source = query_info.source.value if query_info.source else 'none'
-    locus = f'{query.chrom}:{query.ref_start:,}-{query.ref_end:,}'
-    title = f'{sv_type} {svid}_{part} ({locus})'
+def plot_sv_validation(sv_validation: 'SVValidation', output_dir: str, aspect: str = 'auto') -> None:
+    """Plots each subsequence of one SV vs the reference and (when found) its validating
+    sequence, into an existing output_dir -- the caller owns directory layout and gating."""
     out_dir = Path(output_dir)
+    for part, query_validation in enumerate(sv_validation.query_validations):
+        query = query_validation.query
+        alt_boundaries = sorted({pos for start, end in query.recon_segments for pos in (start, end)})
+        locus = f'{query.chrom}:{query.ref_start:,}-{query.ref_end:,}'
+        title = f'{query.svtype} {query.svid}_{part} ({locus})'
 
-    def write(seq, plot_suffix, s2_name, seq_label, **extra):
-        if seq is None:
-            logger.info(f'Skipping reconstructed-vs-{seq_label} dot plot for {svid}_{part} ({sv_type}): '
-                       f'no {seq_label} sequence.')
-            return
-        plot_path = out_dir / f'{part}_{plot_suffix}.png'
-        plot_dot_plot(recon_seq, seq, title, str(plot_path), s1_name='reconstructed', s2_name=s2_name,
-                     segment_boundaries=alt_boundaries, aspect=aspect, **extra)
+        # reconstructed vs the unmodified reference
+        ref_boundaries = sorted({pos - query.ref_start
+                                 for start, end in query.ref_segments for pos in (start, end)})
+        plot_dot_plot(query.sequence, query.ref_sequence, title, str(out_dir / f'{part}_reference.png'),
+                      s2_name='reference', segment_boundaries=alt_boundaries,
+                      ref_segment_boundaries=ref_boundaries, y_offset=query.ref_start, aspect=aspect)
 
-    write(query_info.validating_seq, f'validating_{source}', f'validating ({source})', 'validating')
-
-    ref_boundaries = sorted({pos - query.ref_start for start, end in query.ref_segments for pos in (start, end)})
-    write(query_info.ref_sequence, 'reference', 'reference', 'reference',
-         ref_segment_boundaries=ref_boundaries, y_offset=query.ref_start)
+        # reconstructed vs the validating sequence, when a scorer found one
+        if query_validation.validating_seq is not None:
+            source = query_validation.source.value
+            plot_dot_plot(query.sequence, query_validation.validating_seq, title,
+                        str(out_dir / f'{part}_validating_{source}.png'),
+                        s2_name=f'validating ({source})', segment_boundaries=alt_boundaries, aspect=aspect)

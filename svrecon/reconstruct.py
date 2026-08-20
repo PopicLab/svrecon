@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class QueryReconSubsequence:
+class Query:
     chrom: str
     svtype: str
     svid: str
@@ -31,6 +31,8 @@ class QueryReconSubsequence:
     ref_end: int
     recon_segments: List[Tuple[int, int]] # indicator of segments of interest, 0 indexed to the start of the subsequence,
     ref_segments: List[Tuple[int, int]] # same pieces, in absolute reference coordinates (parallel to segments)
+    ref_sequence: str # unmodified reference over [ref_start, ref_end), for plotting and diagnostics
+    buffer: int # bp length of reference context included on each side of SV regions
 
     def __len__(self):
         return self.length
@@ -149,7 +151,7 @@ def create_starting_segments(records: list[VariantRecord], buffer: int) -> list[
 
     targets = {rec.info['TARGET'] for rec in records if 'TARGET' in rec.info}
     for target in sorted(targets):
-        if target < min_start or target > max_stop:
+        if target < min_start or target > max_stop: # TODO: allow merging of overlaps in the case of short dispersions
             segments.append(_Segment(max(0, target - buffer), target, max(0, target - buffer), target, False))
             segments.append(_Segment(target, target + buffer, target, target + buffer, False))
 
@@ -161,7 +163,7 @@ def create_starting_segments(records: list[VariantRecord], buffer: int) -> list[
 
     return segments
 
-def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[str, bytearray]) -> List[QueryReconSubsequence]:
+def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[str, bytearray]) -> List[Query]:
     """
     Given records of operations, recreate the resulting subsequences and metadata 
     """
@@ -182,8 +184,6 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
     chrom = records[0].chrom
 
     # Split into maximal contiguous runs -- a gap marks a separate, independent window
-    # (e.g. a dispersed duplication's distant destination) -- and materialize each run's
-    # bases from ref into its own QueryReconSubsequence.
     runs: List[List[_Segment]] = []
     for seg in segments:
         if runs and seg.alt_start == runs[-1][-1].alt_end:
@@ -206,9 +206,12 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
             covering_ref_segments.append((seg.ref_start, seg.ref_end))
 
         sequence = ''.join(pieces)
-        subsequences.append(QueryReconSubsequence(
+        query_ref_start, query_ref_end = run[0].ref_start, run[-1].ref_end
+        subsequences.append(Query(
             chrom=chrom, svtype=sv_type, svid=svid, sequence=sequence, length=len(sequence),
-            ref_start=run[0].ref_start, ref_end=run[-1].ref_end, recon_segments=covering_segments,
-            ref_segments=covering_ref_segments))
+            ref_start=query_ref_start, ref_end=query_ref_end, recon_segments=covering_segments,
+            ref_segments=covering_ref_segments,
+            ref_sequence=ref[chrom][query_ref_start:query_ref_end].decode('ascii'),
+            buffer=buffer))
 
     return subsequences

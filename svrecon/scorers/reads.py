@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Dict, Tuple
 import pysam
 
-from svrecon.align import edlib_score
+from svrecon.scorers.align import edlib_score
 from svrecon.util import merge_intervals, reverse_complement
 
 logger = logging.getLogger(__name__)
@@ -94,8 +94,8 @@ class BamReader:
 
         Only the fetch + sequence copy is done under the lock; alignment is the
         caller's job."""
-        lo = max(0, start - flank)
-        hi = end + flank
+        lo = max(0, start)
+        hi = end
         by_name = {}
         with self._lock:
             try:

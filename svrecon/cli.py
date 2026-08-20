@@ -5,7 +5,7 @@ import logging
 import pandas as pd
 
 from svrecon.config import Config
-from svrecon.scoring import AlignScorer
+from svrecon.scoring import CallsetScorer
 from svrecon.util import export_igv_session
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ def main():
                         dest='groovi_config', default=None)
     parser.add_argument('--reference', help='Reference genome .fa file', dest='reference', default=None)
     parser.add_argument('--sample', help='Sample genome .fa file(s). Presence enables assembly-based '
-                        'validation.', dest='sample', nargs='+', default=None)
+                        'validation.', dest='sample', default=None)
     parser.add_argument('--calls', help='VCF containing called SVs', dest='calls', default=None)
     parser.add_argument('--location_tolerance',
                         help='BP tolerance between a mappy hit and the expected SV location; '
@@ -46,6 +46,11 @@ def main():
     parser.add_argument('--read_error_threshold', type=float, default=None,
                         help='Max edlib error rate for a read to validate a reconstruction (read modes; '
                              'default 0.1). Keep <= the assembly error threshold (0.1) for consistent hit/miss calls.')
+    parser.add_argument('--match_error_threshold', type=float, default=None,
+                        help='Max error rate for an assembly/edlib/reference alignment to validate a '
+                             'reconstruction (default 0.1).')
+    parser.add_argument('--n_threads', type=int, default=None,
+                        help='Worker threads for scoring SVs (default 40).')
     parser.add_argument('--min_read_support', type=int, default=None,
                         help='Min number of spanning reads that must clear --read_error_threshold (read modes; default 1).')
     parser.add_argument('--max_reads_per_site', type=int, default=None,
@@ -61,15 +66,6 @@ def main():
                              "if it also validates there (the match isn't specific to the SV -- common "
                              "in repetitive / segmental-dup regions), mark the call inconclusive "
                              "(reason 'reference_match'). Off by default; builds a reference aligner set.")
-    parser.add_argument('--junction_window_factor', type=float, default=None,
-                        help="Junction-validation window as a multiple of SV size (default 1.5), applied "
-                             "to ALL junction checks. Scaling to SV size keeps a real SV's junction signal "
-                             "above threshold instead of diluting it in a fixed wide context window.")
-    parser.add_argument('--junction_window_min', type=int, default=None,
-                        help="Min junction window in bp (default 150). Sets the resolution floor: SVs "
-                             "larger than ~2*min*T/(1-T) are resolvable against the reference.")
-    parser.add_argument('--junction_window_max', type=int, default=None,
-                        help="Max junction window in bp (default 300); caps the window for large SVs.")
     parser.add_argument('--plot_first_n', type=int, default=None,
                         help="Write a dot-plot PNG (reconstructed subsequence vs. the validating real-data "
                              "sequence) for the first N SV calls of each SV type, into <output_dir>/img/ "
@@ -83,14 +79,11 @@ def main():
                              "Off by default (maps to both strands).")
     args = parser.parse_args()
 
-    config = Config(args)
-
     logger.info('Initializing scorer and loading callset')
-    scorer = AlignScorer(config)
+    config = Config(args)
+    scorer = CallsetScorer(config)
 
-    precision, correct_calls, total_calls, inconclusive_calls, skipped_calls, assembly_hits, read_hits = scorer.score_all(
-        location_tolerance=config.location_tolerance, report_path=config.report_path,
-        plot_first_n=config.plot_first_n, plot_out_dir=config.img_dir, plot_aspect=config.plot_aspect)
+    precision, correct_calls, total_calls, inconclusive_calls, skipped_calls, assembly_hits, read_hits = scorer.score_all()
 
     df = pd.DataFrame({
         'correct_calls': correct_calls,

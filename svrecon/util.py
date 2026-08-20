@@ -1,13 +1,13 @@
-"""Small shared helpers: sequence ops, FASTA loading, IGV session export."""
+"""Small shared helpers: sequence ops, FASTA/VCF loading, IGV session export."""
 import os
-from typing import Dict, List, Tuple, Union
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple, Union
 
 import pysam
+from intervaltree import IntervalTree
 from pysam import VariantRecord
 
 _COMPLEMENT_TRANS = str.maketrans('ACGTNacgtn', 'TGCANtgcan')
-
-
 
 def clamp(x: float, lo: float, hi: float) -> float:
     """Clamps x to the closed interval [lo, hi]."""
@@ -52,6 +52,47 @@ def get_start_stop(rec: VariantRecord) -> Tuple[int, int]:
     start = rec.start
     stop = start + rec.info['SVLEN'] if rec.info.get('SVLEN') else rec.stop
     return start, stop
+
+
+def load_exclude_list(gap_file: str) -> Dict[str, IntervalTree]:
+    exclude_list = defaultdict(IntervalTree)
+    with open(gap_file, 'r') as f:
+        for line in f:
+            row = line.strip().split()
+            chrom = row[1]
+            start, stop = int(row[2]), int(row[3])
+            region_type = row[7]
+            exclude_list[chrom][start:stop] = region_type
+    return exclude_list
+
+
+def group_variants_by_id(vcf_path: str, gap_file: Optional[str] = None) -> Dict[str, List[VariantRecord]]:
+    """Group a callset VCF's records by SVID, optionally dropping any SV with a record
+    (its own span, or its TARGET) overlapping an excluded region (e.g. centromere/telomere)."""
+    grouped_variants: Dict[str, List[VariantRecord]] = defaultdict(list)
+    for rec in pysam.VariantFile(vcf_path).fetch():
+        svid = rec.info.get('SVID')
+        if svid:
+            grouped_variants[svid].append(rec)
+
+    if not gap_file:
+        return grouped_variants
+
+    exclude_list = load_exclude_list(gap_file)
+    filtered_variants: Dict[str, List[VariantRecord]] = {}
+    for svid, records in grouped_variants.items():
+        allowed = True
+        for rec in records:
+            target_chrom = rec.info['TARGET_CHROM'] if 'TARGET_CHROM' in rec.info else None
+            if exclude_list[rec.chrom].overlap(rec.start, rec.stop) or \
+                    target_chrom and exclude_list[target_chrom].overlap(rec.info['TARGET'],
+                                                                        rec.info['TARGET'] + 1):
+                allowed = False
+                break
+        if allowed:
+            filtered_variants[svid] = records
+
+    return filtered_variants
 
 
 def export_igv_session(calls, bam, classified, timestamp, igv_prefix):
