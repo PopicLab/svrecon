@@ -1,6 +1,0 @@
-reference: /Users/tonycui/research/svrecon/tests/samples/sample_genomes/genome_200000_11chr.fa
-calls: /Users/tonycui/research/svrecon/tests/samples/sample_2/sim.vcf
-sample: /Users/tonycui/research/svrecon/tests/samples/sample_2/sim.hapA.fa
-eval_mode: "assembly"
-plot_first_n: 5
-buffer: "auto"
