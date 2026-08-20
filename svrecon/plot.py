@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 K = 15  # wotplot k-mer size
 TICK_COUNT = 8  # target ticks per axis, regardless of sequence length
+PLOTTABLE_BASES = {'A', 'C', 'G', 'T'}  # wotplot rejects N and every other IUPAC code
 
 
 def plot_dot_plot(s1: str, s2: str, title: str, output_path: str,
@@ -52,16 +53,26 @@ def plot_sv_validation(sv_validation: 'SVValidation', output_dir: str, aspect: s
         locus = f'{query.chrom}:{query.ref_start:,}-{query.ref_end:,}'
         title = f'{query.svtype} {query.svid}_{part} ({locus})'
 
+        # skip plotting if non plottable base pair exists in sequence
+        recon_plottable = all(char in PLOTTABLE_BASES for char in query.sequence.upper())
+
         # reconstructed vs the unmodified reference
         ref_boundaries = sorted({pos - query.ref_start
                                  for start, end in query.ref_segments for pos in (start, end)})
-        plot_dot_plot(query.sequence, query.ref_sequence, title, str(out_dir / f'{part}_reference.png'),
-                      s2_name='reference', segment_boundaries=alt_boundaries,
-                      ref_segment_boundaries=ref_boundaries, y_offset=query.ref_start, aspect=aspect)
+        if recon_plottable and all(char in PLOTTABLE_BASES for char in query.ref_sequence.upper()):
+            plot_dot_plot(query.sequence, query.ref_sequence, title, str(out_dir / f'{part}_reference.png'),
+                          s2_name='reference', segment_boundaries=alt_boundaries,
+                          ref_segment_boundaries=ref_boundaries, y_offset=query.ref_start, aspect=aspect)
+        else:
+            logger.info(f'Skipping {query.svid}_{part} reference plot, sequence contains unknown basepair')
 
         # reconstructed vs the validating sequence, when a scorer found one
         if query_validation.validating_seq is not None:
             source = query_validation.source.value
-            plot_dot_plot(query.sequence, query_validation.validating_seq, title,
-                        str(out_dir / f'{part}_validating_{source}.png'),
-                        s2_name=f'validating ({source})', segment_boundaries=alt_boundaries, aspect=aspect)
+            if recon_plottable and all(char in PLOTTABLE_BASES
+                                       for char in query_validation.validating_seq.upper()):
+                plot_dot_plot(query.sequence, query_validation.validating_seq, title,
+                            str(out_dir / f'{part}_validating_{source}.png'),
+                            s2_name=f'validating ({source})', segment_boundaries=alt_boundaries, aspect=aspect)
+            else:
+                logger.info(f'Skipping {query.svid}_{part} validating plot, sequence contains unknown basepair')
