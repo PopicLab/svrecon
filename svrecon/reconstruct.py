@@ -135,25 +135,33 @@ def get_operations_from_records(records: list[VariantRecord]) -> list[_Operation
 
     return operations
 
-def create_starting_segments(records: list[VariantRecord], buffer: int) -> list[_Segment]:
+def create_starting_segments(records: list[VariantRecord], buffer: int, ref: Dict[str, bytearray]) -> list[_Segment]:
     """
-    Creates buffer segments around boundaries of contiguous records
+    Creates buffer segments around boundaries of contiguous records, clamped to [0, chromosome length)
     """
     starts_stops = sorted({get_start_stop(rec) for rec in records})
     min_start = starts_stops[0][0]
     max_stop = max(stop for _, stop in starts_stops)
+    chrom_len = len(ref[records[0].chrom])
 
-    segments = [
-        _Segment(max(0, min_start - buffer), min_start, max(0, min_start - buffer), min_start, False),
-        _Segment(max_stop, max_stop + buffer, max_stop, max_stop + buffer, False),
-    ]
-    segments.extend(_Segment(start, stop, start, stop, False) for start, stop in starts_stops)
+    # add ref segments
+    segments = [_Segment(start, stop, start, stop, False) for start, stop in starts_stops]
+
+    # create buffer region surrounding ref segments, clamping at chromosome ends
+    left_start, right_end = max(0, min_start - buffer), min(chrom_len, max_stop + buffer)
+    if left_start < min_start:
+        segments.append(_Segment(left_start, min_start, left_start, min_start, False))
+    if max_stop < right_end:
+        segments.append(_Segment(max_stop, right_end, max_stop, right_end, False))
 
     targets = {rec.info['TARGET'] for rec in records if 'TARGET' in rec.info}
     for target in sorted(targets):
         if target < min_start or target > max_stop: # TODO: allow merging of overlaps in the case of short dispersions
-            segments.append(_Segment(max(0, target - buffer), target, max(0, target - buffer), target, False))
-            segments.append(_Segment(target, target + buffer, target, target + buffer, False))
+            t_start, t_end = max(0, target - buffer), min(chrom_len, target + buffer)
+            if t_start < target:
+                segments.append(_Segment(t_start, target, t_start, target, False))
+            if target < t_end:
+                segments.append(_Segment(target, t_end, target, t_end, False))
 
     segments.sort(key=lambda seg: seg.alt_start)
     for prev, seg in zip(segments, segments[1:]):
@@ -174,7 +182,7 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
         get_operations_from_records(records),
         key=lambda op: (-op.op_start, _OP_TYPE_ORDER[type(op)],
                          -op.insord if isinstance(op, _Insert) else 0))
-    segments: list[_Segment] = create_starting_segments(records, buffer)
+    segments: list[_Segment] = create_starting_segments(records, buffer, ref)
 
     for operation in operations:
         operation.modify_segments(segments)
