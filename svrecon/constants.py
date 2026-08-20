@@ -16,10 +16,7 @@ class SubseqReason(str, Enum):
     REFERENCE_MATCH = 'reference_match'
     JUNCTION_FAILED = 'junction_failed'
     OVER_ERROR_THRESHOLD = 'over_error_threshold'
-    NO_READS = 'no_reads'
     INCONCLUSIVE = 'inconclusive'
-    NO_ALIGNER = 'no_aligner'
-    NO_ALIGNMENT_IN_WINDOW = 'no_alignment_in_window'
     SKIPPED = 'skipped'  # neither --sample nor --bam
     OTHER = 'other'
 

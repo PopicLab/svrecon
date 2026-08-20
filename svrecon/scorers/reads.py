@@ -100,7 +100,7 @@ class ReadScorer(Scorer):
         bp_start, bp_stop = min(breakpoints), max(breakpoints)
         reads = self.bam_reader.candidate_read_seqs(
             query.chrom, bp_start, bp_stop, max_reads=self.max_reads_per_site)
-        reads = [r for r in reads if len(r) >= len(query.sequence)]
+        reads = [r for r in reads if len(r) >= len(query)]
         if not reads:  # no read long enough to span the allele -> untestable, not contradicted
             return QueryValidationInput(source=ValidationSource.READS,
                                         status=SubseqStatus.INCONCLUSIVE,

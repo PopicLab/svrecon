@@ -9,11 +9,6 @@ from pysam import VariantRecord
 
 _COMPLEMENT_TRANS = str.maketrans('ACGTNacgtn', 'TGCANtgcan')
 
-def clamp(x: float, lo: float, hi: float) -> float:
-    """Clamps x to the closed interval [lo, hi]."""
-    return max(lo, min(hi, x))
-
-
 def reverse_complement(seq: Union[str, List[str]]) -> str:
     """Reverse complement of a DNA sequence (unknown bases -> N). Accepts a str or
     a list of single-character strings; always returns a str."""

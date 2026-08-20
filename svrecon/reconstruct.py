@@ -9,7 +9,6 @@ joining its neighbors directly. Segments are independent, non-overlapping ranges
 """
 import bisect
 import logging
-from collections import namedtuple
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -26,7 +25,6 @@ class Query:
     svtype: str
     svid: str
     sequence: str
-    length: int
     ref_start: int
     ref_end: int
     recon_segments: List[Tuple[int, int]] # indicator of segments of interest, 0 indexed to the start of the subsequence,
@@ -35,7 +33,7 @@ class Query:
     buffer: int # bp length of reference context included on each side of SV regions
 
     def __len__(self):
-        return self.length
+        return len(self.sequence)
 
 @dataclass
 class _Segment:
@@ -216,7 +214,7 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
         sequence = ''.join(pieces)
         query_ref_start, query_ref_end = run[0].ref_start, run[-1].ref_end
         subsequences.append(Query(
-            chrom=chrom, svtype=sv_type, svid=svid, sequence=sequence, length=len(sequence),
+            chrom=chrom, svtype=sv_type, svid=svid, sequence=sequence,
             ref_start=query_ref_start, ref_end=query_ref_end, recon_segments=covering_segments,
             ref_segments=covering_ref_segments,
             ref_sequence=ref[chrom][query_ref_start:query_ref_end].decode('ascii'),

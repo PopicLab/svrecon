@@ -104,12 +104,10 @@ class AssemblyScorer(Scorer):
         best_segment_validation_results = []
         best_strand_match = None
 
-        aligner = self.aligners.get(query.chrom)
-        if aligner is None:
-            return QueryValidationInput(source=ValidationSource.ASSEMBLY)
+        chrom_aligner = self.aligners[query.chrom]  
 
         # gather and filter candidate alignments
-        alignments: List[mappy.Alignment] = list(aligner.map(query.sequence)) # .map returns possible alignments, esp repetitive alignments?
+        alignments: List[mappy.Alignment] = list(chrom_aligner.map(query.sequence)) # .map returns possible alignments, esp repetitive alignments?
         alignments = [a for a in alignments if abs(a.r_st - query.ref_start) <= self.location_tolerance]
         if self.forward_match_only:
             alignments = [a for a in alignments if a.strand == 1]
@@ -122,7 +120,7 @@ class AssemblyScorer(Scorer):
                 continue
 
             segment_validation_results: List[SegmentValidation] = \
-                validate_segments_from_cigar(Cigar.from_mappy(alignment, len(query.sequence)),
+                validate_segments_from_cigar(Cigar.from_mappy(alignment, len(query)),
                                              query.recon_segments,
                                              error_threshold=self.match_error_threshold)
             if all(s.passed for s in segment_validation_results):
@@ -131,7 +129,7 @@ class AssemblyScorer(Scorer):
                     lowest_pass_error = match_err
                     best_strand_match = alignment.strand   # record the best passing match's strand
                     best_segment_validation_results = segment_validation_results
-                    matched_seq = aligner.seq(alignment.ctg, alignment.r_st, alignment.r_en)
+                    matched_seq = chrom_aligner.seq(alignment.ctg, alignment.r_st, alignment.r_en)
                     validating_seq = reverse_complement(matched_seq) if alignment.strand == -1 else matched_seq
             if not passed and match_err <= lowest_error:
                 best_segment_validation_results = segment_validation_results

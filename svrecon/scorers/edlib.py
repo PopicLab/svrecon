@@ -68,7 +68,7 @@ class EdlibScorer(Scorer):
         self.sample_bytes = load_fasta_to_bytes(fasta_path, chroms)
 
     def score_query(self, query: Query) -> QueryValidationInput:
-        if len(query.sequence) >= self.min_edlib_query:  # cost bound: the search is O(len * window)
+        if len(query) >= self.min_edlib_query:  # cost bound: the search is O(len * window)
             return QueryValidationInput(source=ValidationSource.EDLIB)
 
         lowest_pass_error = 1.0
