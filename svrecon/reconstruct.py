@@ -15,7 +15,7 @@ from typing import Dict, List, Tuple
 
 from pysam import VariantRecord
 
-from svrecon.util import get_start_stop, reverse_complement
+from svrecon.utils import get_start_stop, reverse_complement
 
 logger = logging.getLogger(__name__)
 

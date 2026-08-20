@@ -19,7 +19,7 @@ from svrecon.scorers.base import Scorer, QueryValidationInput
 from svrecon.scorers.utils import SegmentValidation
 from svrecon.scorers.edlib import EdlibScorer
 from svrecon.scorers.reads import ReadScorer
-from svrecon.util import get_start_stop, group_variants_by_id, load_fasta_to_bytes
+from svrecon.utils import get_start_stop, group_variants_by_id, load_fasta_to_bytes
 
 logger = logging.getLogger(__name__)
 

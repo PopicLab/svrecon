@@ -6,7 +6,7 @@ import pandas as pd
 
 from svrecon.config import Config
 from svrecon.scoring import CallsetScorer
-from svrecon.util import export_igv_session
+from svrecon.utils import export_igv_session
 
 logger = logging.getLogger(__name__)
 

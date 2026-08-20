@@ -12,7 +12,7 @@ from svrecon.constants import ValidationSource
 from svrecon.reconstruct import Query
 from svrecon.scorers.base import Scorer, QueryValidationInput
 from svrecon.scorers.utils import Cigar, SegmentValidation, validate_segments_from_cigar
-from svrecon.util import reverse_complement
+from svrecon.utils import reverse_complement
 
 logger = logging.getLogger(__name__)
 

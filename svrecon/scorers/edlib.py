@@ -5,7 +5,7 @@ from svrecon.constants import ValidationSource
 from svrecon.reconstruct import Query
 from svrecon.scorers.base import Scorer, QueryValidationInput
 from svrecon.scorers.utils import Cigar, EdlibScoreResult, edlib_score, validate_segments_from_cigar
-from svrecon.util import load_fasta_to_bytes
+from svrecon.utils import load_fasta_to_bytes
 
 
 def run_edlib_fallback(query_seq: str, chrom: str, location: int, initial_buffer: int, max_tolerance: int,
