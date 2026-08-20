@@ -1,16 +1,13 @@
 """Normalized CIGAR representation and per-segment validation."""
 import re
 from dataclasses import dataclass
-from functools import cached_property
 from typing import List, Tuple, TYPE_CHECKING
 
+import mappy
 import numpy as np
+import pysam
 
-if TYPE_CHECKING:
-    import mappy
-    import pysam
-
-
+# TODO: manually review conversion
 class Cigar:
     """A CIGAR in normal form: pysam-ordered ``(op, length)`` tuples, forward-query
     orientation, 0 indexed, accounting for the full query (clipped flanks as explicit soft clips).
@@ -28,37 +25,18 @@ class Cigar:
 
     def __init__(self, cigartuples: List[Tuple[int, int]]):
         self.cigartuples = cigartuples
-
-    @cached_property
-    def query_length(self) -> int:
-        """Total query bases the CIGAR accounts for, clips included."""
-        return sum(length for op, length in self.cigartuples if op in self.QUERY_CONSUMING_OPS)
-
-    @cached_property
-    def error_mask(self) -> np.ndarray:
-        """uint8, length query_length. mask[i] = 1 iff query base i is clipped,
-        inserted, or mismatched."""
-        mask = np.zeros(self.query_length, dtype=np.uint8)
+        # Total query bases the CIGAR accounts for, clips included.
+        self.query_length = sum(length for op, length in cigartuples if op in self.QUERY_CONSUMING_OPS)
+        self.error_mask = np.zeros(self.query_length, dtype=np.uint8) # mask[i] = 1 iff query base i is clipped, inserted, or mismatched.
+        self.deletion_lengths = np.zeros(self.query_length + 1, dtype=np.int32) # dels[i] = n: a deletion of n target bases immediately precedes query base i.
         pos = 0
-        for op, length in self.cigartuples:
-            if op in self.QUERY_CONSUMING_OPS:
-                if op in self.ERROR_OPS:
-                    mask[pos:pos + length] = 1
-                pos += length
-        return mask
-
-    @cached_property
-    def deletion_lengths(self) -> np.ndarray:
-        """int32, length query_length + 1. dels[i] = n: a deletion of n target bases
-        immediately precedes query base i."""
-        dels = np.zeros(self.query_length + 1, dtype=np.int32)
-        pos = 0
-        for op, length in self.cigartuples:
+        for op, length in cigartuples:
             if op in self.TARGET_ONLY_OPS:
-                dels[pos] += length
+                self.deletion_lengths[pos] += length
             elif op in self.QUERY_CONSUMING_OPS:
+                if op in self.ERROR_OPS:
+                    self.error_mask[pos:pos + length] = 1
                 pos += length
-        return dels
 
     def get_window_error_rate(self, start: int, end: int) -> float:
         """Error rate over [start, end):
@@ -68,7 +46,7 @@ class Cigar:
         return errors / ((end - start) + del_len)
 
     @classmethod
-    def from_mappy(cls, alignment: 'mappy.Alignment', query_len: int) -> 'Cigar':
+    def from_mappy(cls, alignment: mappy.Alignment, query_len: int) -> 'Cigar':
         """Normalizes a mappy hit: flips (length, op) order, un-mirrors reverse-strand
         hits to forward-query order, adds the clips implicit in q_st/q_en.
 
@@ -93,7 +71,7 @@ class Cigar:
                     for m in re.finditer(r'(\d+)([MIDX=])', cigar_str)])
 
     @classmethod
-    def from_pysam(cls, read: 'pysam.AlignedSegment') -> 'Cigar':
+    def from_pysam(cls, read: pysam.AlignedSegment) -> 'Cigar':
         """Normalizes a pysam record: hard clips become soft clips (both mean unaligned
         original-read bases here); reverse-strand records flip to forward-read order.
 
