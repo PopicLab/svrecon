@@ -8,7 +8,7 @@ from typing import Dict, Iterable, List
 import mappy
 import pysam
 
-from svrecon.constants import ValidationSource
+from svrecon.constants import SubseqReason, SubseqStatus, ValidationSource
 from svrecon.reconstruct import Query
 from svrecon.scorers.base import Scorer, QueryValidationInput
 from svrecon.scorers.utils import Cigar, SegmentValidation, validate_segments_from_cigar
@@ -136,9 +136,18 @@ class AssemblyScorer(Scorer):
             if not passed and match_err <= lowest_error:
                 best_segment_validation_results = segment_validation_results
 
+        if passed:
+            status, reason = SubseqStatus.PASS, SubseqReason.PASS
+        elif best_segment_validation_results:  # a candidate aligned, but a segment failed
+            status, reason = SubseqStatus.FAIL, SubseqReason.JUNCTION_FAILED
+        else:  # nothing aligned under the error threshold
+            status, reason = SubseqStatus.FAIL, SubseqReason.OTHER
+
         return QueryValidationInput(
             source=ValidationSource.ASSEMBLY,
             passed=passed,
+            status=status,
+            reason=reason,
             lowest_pass_error=lowest_pass_error,
             lowest_error=lowest_error,
             validating_seq=validating_seq,

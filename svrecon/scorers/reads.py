@@ -5,7 +5,7 @@ import threading
 from typing import List
 import pysam
 
-from svrecon.constants import ValidationSource
+from svrecon.constants import SubseqReason, SubseqStatus, ValidationSource
 from svrecon.reconstruct import Query
 from svrecon.scorers.base import Scorer, QueryValidationInput
 from svrecon.scorers.utils import Cigar, EdlibScoreResult, edlib_score, validate_segments_from_cigar
@@ -102,9 +102,10 @@ class ReadScorer(Scorer):
         reads = self.bam_reader.candidate_read_seqs(
             query.chrom, bp_start, bp_stop, max_reads=self.max_reads_per_site)
         reads = [r for r in reads if len(r) >= len(query.sequence)]
-        if not reads:
+        if not reads:  # no read long enough to span the allele -> untestable, not contradicted
             return QueryValidationInput(source=ValidationSource.READS,
-                                        overlapping_spanning_reads_found=False)
+                                        status=SubseqStatus.INCONCLUSIVE,
+                                        reason=SubseqReason.INCONCLUSIVE)
 
         passed = False
         lowest_pass_error = 1.0
@@ -112,8 +113,6 @@ class ReadScorer(Scorer):
         validating_seq = None
         segment_validation_results = []
 
-        # "candidate found" means at least one read within the error budget: an empty
-        # list maps to FAIL/OVER_ERROR_THRESHOLD downstream.
         read_results = run_read_edlib(query.sequence, reads, self.read_error_threshold)
         for read_res in read_results:
             lowest_error = min(lowest_error, read_res.error)
@@ -125,8 +124,14 @@ class ReadScorer(Scorer):
                 lowest_pass_error = read_res.error
                 validating_seq = read_res.matched_target_sequence
 
+        if passed:
+            status, reason = SubseqStatus.PASS, SubseqReason.PASS
+        elif not read_results:  # no read within the error budget
+            status, reason = SubseqStatus.FAIL, SubseqReason.OVER_ERROR_THRESHOLD
+        else:  # candidate reads aligned, but none passed segment validation
+            status, reason = SubseqStatus.FAIL, SubseqReason.JUNCTION_FAILED
+
         return QueryValidationInput(source=ValidationSource.READS, passed=passed,
+                                    status=status, reason=reason,
                                     lowest_pass_error=lowest_pass_error, lowest_error=lowest_error,
-                                    validating_seq=validating_seq, segment_results=segment_validation_results,
-                                    overlapping_spanning_reads_found=True,
-                                    candidate_read_found=bool(read_results))
+                                    validating_seq=validating_seq, segment_results=segment_validation_results)

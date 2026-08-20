@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class QueryValidation:
     """Validation state of one reconstructed subsequence, accumulated across scorers'
-    QueryValidationInput results."""
+    QueryValidationInput results. NOTE: in upcoming versions, we can track the results of
+    reach run for a more comprehensive report.""" 
     query: Query
     source: Optional[ValidationSource] = None
 
@@ -39,12 +40,6 @@ class QueryValidation:
     segment_results: List[SegmentValidation] = field(default_factory=list)
     best_strand_match: Optional[int] = None  # assembly only
 
-    # Failure diagnostics -- only meaningful once a tier call did NOT pass. Only the
-    # reads tier emits these; default True ("not applicable/assume satisfied") so an
-    # assembly/edlib-only call never spuriously trips the classification below.
-    overlapping_spanning_reads_found: bool = True
-    candidate_read_found: bool = True
-
     # Populated by apply_ambiguity() -- only meaningful when passed, and only checked
     # when check_reference is on.
     reference_check_match: bool = False
@@ -55,47 +50,21 @@ class QueryValidation:
     reason: SubseqReason = SubseqReason.SKIPPED
 
     def update_validation(self, result: QueryValidationInput) -> None:
-        """Fold one scorer's result in: a pass adopts the result's fields; failure
-        diagnostics accumulate only while nothing has passed."""
+        """Fold one scorer's self-classified result in: each result's own status/reason
+        override the previous ones; a pass additionally adopts the result's fields
+        (score_sv breaks on the first pass, so a pass is never downgraded)."""
         self.lowest_error = min(self.lowest_error, result.lowest_error)
+        if self.passed:
+            return
+        self.status = result.status
+        self.reason = result.reason
+        self.segment_results = result.segment_results
         if result.passed:
             self.passed = True
             self.lowest_pass_error = result.lowest_pass_error
             self.validating_seq = result.validating_seq
-            self.segment_results = result.segment_results
             self.source = result.source
             self.best_strand_match = result.best_strand_match
-
-        elif not self.passed:
-            if result.source == ValidationSource.READS:  # only the reads tier emits these flags
-                self.overlapping_spanning_reads_found = result.overlapping_spanning_reads_found
-                self.candidate_read_found = result.candidate_read_found
-            if result.segment_results:
-                self.segment_results = result.segment_results
-
-        self._update_status()
-
-    def _update_status(self) -> None:
-        # Status / reason diagnostics based on the fields accumulated so far
-        if self.source:
-            self.status = SubseqStatus.PASS
-            self.reason = SubseqReason.PASS
-
-        # Read based validation failure diagnostics
-        elif not self.overlapping_spanning_reads_found:
-            self.status = SubseqStatus.INCONCLUSIVE
-            self.reason = SubseqReason.INCONCLUSIVE
-        elif not self.candidate_read_found:
-            self.status = SubseqStatus.FAIL
-            self.reason = SubseqReason.OVER_ERROR_THRESHOLD
-
-        # Assembly based validation failure diagnostics
-        elif self.segment_results:
-            self.status = SubseqStatus.FAIL
-            self.reason = SubseqReason.JUNCTION_FAILED
-        else:
-            self.status = SubseqStatus.FAIL
-            self.reason = SubseqReason.OTHER
 
     def update_ambiguity(self, result: QueryValidationInput) -> None:
         """A pass against the plain reference is not specific to the SV -> inconclusive."""
