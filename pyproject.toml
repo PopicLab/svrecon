@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "svrecon"
 description = "Structural-variant reconstruction scoring"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dynamic = ["version"]
 dependencies = ["edlib", "intervaltree", "mappy", "matplotlib", "pandas", "pysam", "pyyaml", "tqdm", "wotplot"]
 
