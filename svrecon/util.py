@@ -14,16 +14,6 @@ def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 
-def merge_intervals(intervals: List[List[int]]) -> List[List[int]]:
-    """Merges overlapping [start, end] intervals into their union."""
-    merged = []
-    for start, end in sorted(intervals):
-        if merged and start <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], end)
-        else:
-            merged.append([start, end])
-    return merged
-
 def reverse_complement(seq: Union[str, List[str]]) -> str:
     """Reverse complement of a DNA sequence (unknown bases -> N). Accepts a str or
     a list of single-character strings; always returns a str."""

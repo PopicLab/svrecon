@@ -16,7 +16,7 @@ from svrecon.plot import plot_sv_validation
 from svrecon.reconstruct import Query, simulate_subsequences
 from svrecon.scorers.assembly import AssemblyScorer
 from svrecon.scorers.base import Scorer, QueryValidationInput
-from svrecon.scorers.cigar import SegmentValidation
+from svrecon.scorers.utils import SegmentValidation
 from svrecon.scorers.edlib import EdlibScorer
 from svrecon.scorers.reads import ReadScorer
 from svrecon.util import get_start_stop, group_variants_by_id, load_fasta_to_bytes

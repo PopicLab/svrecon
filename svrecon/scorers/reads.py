@@ -2,36 +2,16 @@
 import logging
 import os
 import threading
-from collections import defaultdict
-from dataclasses import dataclass
-from typing import List, Optional, Dict, Tuple
+from typing import List
 import pysam
 
 from svrecon.constants import ValidationSource
 from svrecon.reconstruct import Query
 from svrecon.scorers.base import Scorer, QueryValidationInput
-from svrecon.scorers.cigar import Cigar, validate_segments_from_cigar
-from svrecon.scorers.edlib import edlib_score
-from svrecon.util import merge_intervals, reverse_complement
+from svrecon.scorers.utils import Cigar, EdlibScoreResult, edlib_score, validate_segments_from_cigar
+from svrecon.util import reverse_complement
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class ReadEdlibResult:
-    """Outcome of aligning a query sequence against a pool of candidate reads,
-    keeping whichever read produced the lowest error. ``error`` starts at the
-    worst possible value (1.0) and is only ever improved on, so it is never
-    ``None``; ``cigar``/``matched_read_sequence`` stay ``None`` together --
-    exactly when no candidate ever produced a result -- and are the signal to
-    check for "did anything match at all"."""
-    n_tried: int
-    error: float = 1.0
-    cigar: Optional[str] = None
-    matched_read_sequence: Optional[str] = None
-
-    def was_read_found(self):
-        return self.cigar is not None
 
 
 class BamReader:
@@ -52,60 +32,14 @@ class BamReader:
         self._bam = pysam.AlignmentFile(bam_path, 'rb')
         self._lock = threading.Lock()
 
-    def candidate_reads_from_records(self, records: List[pysam.VariantRecord], flank: int,
-                                     max_reads: int) -> Dict[str, List[str]]:
-        """Full-chrom read sequences for every genomic locus an SV's records touch, by
-        contig (``{'chr1': [read_seq, ...]}``).
-
-        Each record contributes its in-place interval ``[start, stop)`` on its chrom; a paste record
-        also contributes its insertion ``TARGET`` (on ``TARGET_CHROM``).
-        Per chrom the loci are merged (so overlapping sub-loci are fetched once) and each
-        merged interval's reads from :meth:`candidate_read_seqs` are pooled and de-duplicated
-        into that chrom's list. The caller aligns the reconstruction against each chrom's pool."""
-        loci: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
-        for rec in records:
-            loci[rec.chrom].append((rec.start, rec.stop))
-            if 'TARGET' in rec.info:
-                target = int(rec.info['TARGET'])
-                loci[rec.info.get('TARGET_CHROM', rec.chrom)].append((target, target))
-
-        reads_by_chrom: Dict[str, List[str]] = {}
-        for chrom, intervals in loci.items():
-            pooled = [seq
-                      for start, stop in merge_intervals(intervals)
-                      for seq in self.candidate_read_seqs(chrom, start, stop, flank, max_reads)]
-            reads_by_chrom[chrom] = list(dict.fromkeys(pooled))  # dedup, preserve order
-        return reads_by_chrom
-
-    def candidate_read_seqs(self, chrom: str, start: int, end: int, flank: int,
-                            max_reads: int) -> List[str]:
-        """Full-molecule sequences of reads with ANY alignment overlapping
-        ``[start - flank, end + flank]`` on ``chrom``.
-
-        We deliberately cast a wide net rather than requiring a read to *span*
-        the locus: a read that carries the SV is typically split into a primary
-        + supplementary (chimeric) alignments, so no single alignment spans it.
-        We therefore keep supplementary alignments, dedup by read name, and keep
-        the longest sequence seen per read -- the primary alignment's
-        soft-clipped record carries the complete molecule, while supplementary
-        records are hard-clipped. The caller aligns the reconstruction against
-        these full molecules with edlib and lets that judge support (we trust
-        the aligner only to gather candidates, not to validate). Secondary and
-        unmapped records are skipped (no usable / no full sequence).
-
-        Collection stops once ``max_reads`` distinct reads have been gathered,
-        which bounds work (and lock-hold time) on deep read pileups.
-
-        Only the fetch + sequence copy is done under the lock; alignment is the
-        caller's job."""
+    def candidate_read_seqs(self, chrom: str, start: int, end: int, max_reads: int) -> List[str]:
+        """Fetch full-molecule sequences of reads with ANY alignment overlapping
+        ``[start, end]`` on ``chrom``."""
         lo = max(0, start)
         hi = end
         by_name = {}
         with self._lock:
-            try:
-                fetched = self._bam.fetch(chrom, lo, hi)
-            except (ValueError, KeyError):
-                return []  # chrom absent from BAM header
+            fetched = self._bam.fetch(chrom, lo, hi)
             for r in fetched:
                 if r.is_unmapped or r.is_secondary:
                     continue
@@ -122,62 +56,33 @@ class BamReader:
                         break
         return list(by_name.values())
 
-    def close(self):
-        with self._lock:
-            self._bam.close()
 
-
-def run_read_edlib(query_seq: str, read_seqs: List[str], error_threshold: float,
-                   min_support: int = 1) -> ReadEdlibResult:
-    """Align ``query_seq`` against each candidate read with the shared
-    ``edlib_score`` primitive.
-
-    Returns a ``ReadEdlibResult`` holding the best candidate's error/cigar/read
-    sequence once ``min_support`` reads clear ``error_threshold`` (early exit),
-    else the best within the 2x bound, else none found (see the dataclass
-    docstring). ``n_tried`` is the number of reads actually aligned (i.e. long
-    enough to pass the length pre-filter) -- ``n_tried == 0`` means every
-    candidate read was too short to host the alt, distinct from "reads aligned
-    but failed", so the caller can report it differently."""
-    best_error = 1.0
-    best_cigar = None
-    matched_read_sequence = None
-    support = 0
-    n_tried = 0
+def run_read_edlib(query_seq: str, read_seqs: List[str], error_threshold: float) -> List[EdlibScoreResult]:
+    """Return the EdlibScoreResult for each read (forward and RC tried) that contains
+    ``query_seq`` with at most ``error_threshold`` error."""
+    passing: List[EdlibScoreResult] = []
     # A read can't contain the alt under HW alignment if it is shorter than the
     # alt by more than the error budget: the unmatched overhang alone forces
     # error >= (len(alt) - len(read)) / len(alt). Skip those reads.
     min_target_len = len(query_seq) * (1.0 - error_threshold)
     # Bound each edlib alignment so non-matching reads abort early instead of
     # computing a full O(len*len) matrix -- without this, a multi-kb alt that no
-    # read supports grinds through every read at full cost. We allow up to 2x the
-    # decision threshold so near-misses (threshold..2x) still compute and report
-    # their error for diagnostics; only clearly-bad alignments (>2x) abort.
+    # read supports grinds through every read at full cost.
     k = max(1, int(2 * error_threshold * len(query_seq)))
     for target_seq in read_seqs:
         if len(target_seq) < min_target_len:
             continue
-        n_tried += 1
         # A read molecule can be sequenced from either strand relative to the
         # reference-oriented alt, so try BOTH orientations and keep the better.
-        rev_seq = reverse_complement(target_seq)
-        candidates = [(r, s) for r, s in ((edlib_score(query_seq, target_seq, k=k), target_seq),
-                                          (edlib_score(query_seq, rev_seq, k=k), rev_seq))
+        candidates = [r for r in (edlib_score(query_seq, target_seq, k=k),
+                                  edlib_score(query_seq, reverse_complement(target_seq), k=k))
                       if r is not None]
         if not candidates:
             continue
-        res, matched_seq = min(candidates, key=lambda pair: pair[0].error)
-        if res.error < best_error:
-            best_error = res.error
-            best_cigar = res.cigar
-            matched_read_sequence = matched_seq
+        res = min(candidates, key=lambda r: r.error)
         if res.error <= error_threshold:
-            support += 1
-            if support >= min_support:
-                return ReadEdlibResult(n_tried=n_tried, error=best_error, cigar=best_cigar,
-                                       matched_read_sequence=matched_read_sequence)
-    return ReadEdlibResult(n_tried=n_tried, error=best_error, cigar=best_cigar,
-                           matched_read_sequence=matched_read_sequence)
+            passing.append(res)
+    return passing
 
 
 class ReadScorer(Scorer):
@@ -191,39 +96,37 @@ class ReadScorer(Scorer):
         self.bam_reader = BamReader(config.bam)
 
     def score_query(self, query: Query) -> QueryValidationInput:
-        # TODO: logic so far, to finish and re-enable:
-        lowest_pass_error = 1.0
-        lowest_error = 1.0
-        passed = False
-        validating_seq = None
-        best_segment_validation_results = []
-        candidate_read_found = False
-
         # collect candidate reads that overlap ref region of interest, then filter by size
         breakpoints = [pos for start, end in query.ref_segments for pos in (start, end)]
         bp_start, bp_stop = min(breakpoints), max(breakpoints)
         reads = self.bam_reader.candidate_read_seqs(
             query.chrom, bp_start, bp_stop, max_reads=self.max_reads_per_site)
         reads = [r for r in reads if len(r) >= len(query.sequence)]
+        if not reads:
+            return QueryValidationInput(source=ValidationSource.READS,
+                                        overlapping_spanning_reads_found=False)
 
-        if reads:
-            read_res = run_read_edlib(query.sequence, reads, self.read_error_threshold, self.min_read_support)
-            candidate_read_found = read_res.was_read_found()  # TODO: also fold read_res.error into lowest_error
-            if read_res.was_read_found() and read_res.error <= self.read_error_threshold:
-                segment_validation_results = validate_segments_from_cigar(
-                    Cigar.from_edlib(read_res.cigar), query.recon_segments,
-                    error_threshold=self.read_error_threshold)
-                if all(s.passed for s in segment_validation_results):
-                    passed = True
-                    if read_res.error < lowest_pass_error:
-                        lowest_pass_error = read_res.error
-                        best_segment_validation_results = segment_validation_results
-                        validating_seq = read_res.matched_read_sequence
-                if not passed:
-                    best_segment_validation_results = segment_validation_results
+        passed = False
+        lowest_pass_error = 1.0
+        lowest_error = 1.0
+        validating_seq = None
+        segment_validation_results = []
+
+        # "candidate found" means at least one read within the error budget: an empty
+        # list maps to FAIL/OVER_ERROR_THRESHOLD downstream.
+        read_results = run_read_edlib(query.sequence, reads, self.read_error_threshold)
+        for read_res in read_results:
+            lowest_error = min(lowest_error, read_res.error)
+            segment_validation_results = validate_segments_from_cigar(
+                Cigar.from_edlib(read_res.cigar), query.recon_segments,
+                error_threshold=self.read_error_threshold)
+            if all(s.passed for s in segment_validation_results) and read_res.error < lowest_pass_error:
+                passed = True
+                lowest_pass_error = read_res.error
+                validating_seq = read_res.matched_target_sequence
 
         return QueryValidationInput(source=ValidationSource.READS, passed=passed,
                                     lowest_pass_error=lowest_pass_error, lowest_error=lowest_error,
-                                    validating_seq=validating_seq, segment_results=best_segment_validation_results,
-                                    overlapping_spanning_reads_found=bool(reads),
-                                    candidate_read_found=candidate_read_found)
+                                    validating_seq=validating_seq, segment_results=segment_validation_results,
+                                    overlapping_spanning_reads_found=True,
+                                    candidate_read_found=bool(read_results))

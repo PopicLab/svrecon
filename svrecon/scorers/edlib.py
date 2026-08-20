@@ -1,51 +1,11 @@
-"""Edlib-based validation: HW alignment scoring, the expanding-window fallback search,
-and the EdlibScorer. (`import edlib` below resolves to the external edlib package --
-Python 3 imports are absolute by default.)"""
-from dataclasses import dataclass
+"""Edlib-based validation: the expanding-window fallback search and the EdlibScorer."""
 from typing import Dict, Union
-
-import edlib
 
 from svrecon.constants import ValidationSource
 from svrecon.reconstruct import Query
 from svrecon.scorers.base import Scorer, QueryValidationInput
-from svrecon.scorers.cigar import Cigar, validate_segments_from_cigar
+from svrecon.scorers.utils import Cigar, EdlibScoreResult, edlib_score, validate_segments_from_cigar
 from svrecon.util import load_fasta_to_bytes
-
-
-@dataclass
-class EdlibScoreResult:
-    error: float
-    cigar: str
-    matched_target_sequence: str
-
-
-def edlib_score(query_seq: str, target_seq: str, k: int = -1) -> Union[EdlibScoreResult, None]:
-    """HW-align ``query_seq`` against a single ``target_seq`` and normalize to an
-    error rate. Shared primitive for both assembly-window and read-based scoring;
-    returns an ``EdlibScoreResult`` or ``None`` if no alignment was produced.
-
-    ``k`` is edlib's max edit distance: alignments worse than ``k`` abort early
-    and return ``None`` (edlib editDistance = -1). ``k=-1`` (default) is
-    unbounded, preserving the assembly path's behavior; the read path passes a
-    threshold-derived ``k`` so non-matching reads don't cost a full O(len*len)
-    alignment -- the dominant cost when an SV is a read-mode miss."""
-    result = edlib.align(query_seq.upper(), target_seq.upper(), mode="HW", task="path", k=k)
-    if not result or result['editDistance'] < 0:
-        return None
-
-    edit_dist = result['editDistance']
-    if result.get('locations') and result['locations'][0][0] is not None and result['locations'][0][1] is not None:
-        loc = result['locations'][0]
-        target_match_len = loc[1] - loc[0] + 1
-        denominator = max(len(query_seq), target_match_len)
-        matched_target_sequence = target_seq[loc[0]:loc[1] + 1]
-    else:
-        denominator = len(query_seq)
-        matched_target_sequence = target_seq # TODO: check for correctness
-
-    error_rate = edit_dist / denominator if denominator > 0 else 1.0
-    return EdlibScoreResult(error=error_rate, cigar=result['cigar'], matched_target_sequence=matched_target_sequence)
 
 
 def run_edlib_fallback(query_seq: str, chrom: str, location: int, initial_buffer: int, max_tolerance: int,

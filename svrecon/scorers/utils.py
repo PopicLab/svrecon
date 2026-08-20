@@ -1,8 +1,10 @@
-"""Normalized CIGAR representation and per-segment validation."""
+"""Shared alignment primitives: normalized CIGAR representation, per-segment validation,
+and edlib HW scoring."""
 import re
 from dataclasses import dataclass
-from typing import List, Tuple, TYPE_CHECKING
+from typing import List, Tuple, Union
 
+import edlib
 import mappy
 import numpy as np
 import pysam
@@ -97,3 +99,38 @@ def validate_segments_from_cigar(cigar: Cigar, segments: List[Tuple[int, int]],
     rates = [cigar.get_window_error_rate(start, end) for start, end in segments]
     return [SegmentValidation(error=float(f'{rate:.4g}'), passed=rate <= error_threshold)
             for rate in rates]
+
+
+@dataclass
+class EdlibScoreResult:
+    """One HW alignment of a query into a target (genomic window or read): normalized
+    error rate, edlib CIGAR string, and the matched target substring."""
+    error: float
+    cigar: str  # edlib task='path' CIGAR string; parse with Cigar.from_edlib
+    matched_target_sequence: str
+
+
+def edlib_score(query_seq: str, target_seq: str, k: int = -1) -> Union[EdlibScoreResult, None]:
+    """HW-align ``query_seq`` against a single ``target_seq`` and normalize to an
+    error rate. Shared primitive for both assembly-window and read-based scoring;
+    returns an ``EdlibScoreResult`` or ``None`` if no alignment was produced.
+
+    ``k`` is edlib's max edit distance: alignments worse than ``k`` abort early
+    and return ``None`` (edlib editDistance = -1). ``k=-1`` (default) is
+    unbounded, preserving the assembly path's behavior; the read path passes a
+    threshold-derived ``k`` so non-matching reads don't cost a full O(len*len)
+    alignment -- the dominant cost when an SV is a read-mode miss."""
+    result = edlib.align(query_seq.upper(), target_seq.upper(), mode="HW", task="path", k=k)
+    if not result or result['editDistance'] < 0:
+        return None
+
+    match_start, match_end = result['locations'][0]  # best placement in target; edlib interval is inclusive
+    if match_start is None:  # degenerate (empty query); task='path' otherwise always fills both
+        return None
+
+    matched_target_sequence = target_seq[match_start:match_end + 1]
+    target_match_len = match_end - match_start + 1
+    # TODO: revisit scoring. currently, normalize by the longer of query and matched span, so deletions widen thedenominator instead of inflating the rate.
+    denominator = max(len(query_seq), target_match_len)
+    error_rate = result['editDistance'] / denominator
+    return EdlibScoreResult(error=error_rate, cigar=result['cigar'], matched_target_sequence=matched_target_sequence)

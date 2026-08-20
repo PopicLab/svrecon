@@ -11,7 +11,7 @@ import pysam
 from svrecon.constants import ValidationSource
 from svrecon.reconstruct import Query
 from svrecon.scorers.base import Scorer, QueryValidationInput
-from svrecon.scorers.cigar import Cigar, SegmentValidation, validate_segments_from_cigar
+from svrecon.scorers.utils import Cigar, SegmentValidation, validate_segments_from_cigar
 from svrecon.util import reverse_complement
 
 logger = logging.getLogger(__name__)
@@ -131,8 +131,8 @@ class AssemblyScorer(Scorer):
                     lowest_pass_error = match_err
                     best_strand_match = alignment.strand   # record the best passing match's strand
                     best_segment_validation_results = segment_validation_results
-                    matched = aligner.seq(alignment.ctg, alignment.r_st, alignment.r_en)
-                    validating_seq = reverse_complement(matched) if alignment.strand == -1 else matched
+                    matched_seq = aligner.seq(alignment.ctg, alignment.r_st, alignment.r_en)
+                    validating_seq = reverse_complement(matched_seq) if alignment.strand == -1 else matched_seq
             if not passed and match_err <= lowest_error:
                 best_segment_validation_results = segment_validation_results
 

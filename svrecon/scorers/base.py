@@ -5,7 +5,7 @@ from typing import List, Optional
 from svrecon.config import Config
 from svrecon.constants import ValidationSource
 from svrecon.reconstruct import Query
-from svrecon.scorers.cigar import SegmentValidation
+from svrecon.scorers.utils import SegmentValidation
 
 
 @dataclass
