@@ -14,7 +14,7 @@ dependencies = ["edlib", "intervaltree", "mappy", "matplotlib", "pandas", "pysam
 svrecon = "svrecon.cli:main"
 
 [tool.setuptools]
-packages = ["svrecon"]
+packages = ["svrecon", "svrecon.scorers"]
 
 [tool.setuptools.dynamic]
 version = {attr = "svrecon.__version__"}
