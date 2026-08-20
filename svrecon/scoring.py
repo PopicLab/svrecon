@@ -1,7 +1,6 @@
 """Scoring engine: per-query/per-SV validation state and the CallsetScorer orchestrator."""
 import json
 import logging
-import traceback
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -51,8 +50,7 @@ class QueryValidation:
 
     def update_validation(self, result: QueryValidationInput) -> None:
         """Fold one scorer's self-classified result in: each result's own status/reason
-        override the previous ones; a pass additionally adopts the result's fields
-        (score_sv breaks on the first pass, so a pass is never downgraded)."""
+        override the previous ones;"""
         self.lowest_error = min(self.lowest_error, result.lowest_error)
         if self.passed:
             return
@@ -67,7 +65,7 @@ class QueryValidation:
             self.best_strand_match = result.best_strand_match
 
     def update_ambiguity(self, result: QueryValidationInput) -> None:
-        """A pass against the plain reference is not specific to the SV -> inconclusive."""
+        """A pass against the reference -> inconclusive."""
         if result.passed:
             self.reference_check_match = True
             self.reference_check_err = result.lowest_pass_error
@@ -300,67 +298,63 @@ class CallsetScorer(object):
             pbar = tqdm(as_completed(futures), total=len(self.variants), desc=f'Scoring SVs', smoothing=0)
 
             for future in pbar:
-                try:
-                    sv_validation: SVValidation = future.result()
-                    svid, sv_type, outcome = sv_validation.svid, sv_validation.svtype, sv_validation.outcome
-                    line = f'{svid}\t{sv_type}\t{sv_validation.chroms}\t{outcome.value}\t{sv_validation.match_scores}'
-                    if outcome == Outcome.HIT:
-                        # Tier 1 (read) vs Tier 2 (assembly), plus the detailed source.
-                        line += f'\t{sv_validation.tier}\t{sv_validation.validation_source}'
-                    elif outcome != Outcome.SKIPPED:  # miss or inconclusive -> show why
-                        line += f'\t{sv_validation.subseq_reasons}'
-                    logger.info(line)
+                sv_validation: SVValidation = future.result()
+                svid, sv_type, outcome = sv_validation.svid, sv_validation.svtype, sv_validation.outcome
+                line = f'{svid}\t{sv_type}\t{sv_validation.chroms}\t{outcome.value}\t{sv_validation.match_scores}'
+                if outcome == Outcome.HIT:
+                    # Tier 1 (read) vs Tier 2 (assembly), plus the detailed source.
+                    line += f'\t{sv_validation.tier}\t{sv_validation.validation_source}'
+                elif outcome != Outcome.SKIPPED:  # miss or inconclusive -> show why
+                    line += f'\t{sv_validation.subseq_reasons}'
+                logger.info(line)
 
-                    if report_fh is not None:
-                        report_fh.write(json.dumps(sv_validation.get_summary()) + '\n')
+                if report_fh is not None:
+                    report_fh.write(json.dumps(sv_validation.get_summary()) + '\n')
 
-                    total_calls[sv_type] += 1
-                    overall_count += 1
+                total_calls[sv_type] += 1
+                overall_count += 1
 
-                    if self.plot_first_n and total_calls[sv_type] <= self.plot_first_n:
-                        if sv_validation.query_validations:
-                            logger.info(f'Producing dot plots for SV {svid} ({sv_type}, '
-                                        f'{len(sv_validation.query_validations)} part(s))')
-                            outcome_dir = 'validated' if outcome == Outcome.HIT else 'unvalidated'
-                            sv_plot_dir = Path(self.plot_out_dir) / outcome_dir / sv_type / svid
-                            sv_plot_dir.mkdir(parents=True, exist_ok=True)
-                            plot_sv_validation(sv_validation, str(sv_plot_dir), aspect=self.plot_aspect)
+                if self.plot_first_n and total_calls[sv_type] <= self.plot_first_n:
+                    if sv_validation.query_validations:
+                        logger.info(f'Producing dot plots for SV {svid} ({sv_type}, '
+                                    f'{len(sv_validation.query_validations)} part(s))')
+                        outcome_dir = 'validated' if outcome == Outcome.HIT else 'unvalidated'
+                        sv_plot_dir = Path(self.plot_out_dir) / outcome_dir / sv_type / svid
+                        sv_plot_dir.mkdir(parents=True, exist_ok=True)
+                        plot_sv_validation(sv_validation, str(sv_plot_dir), aspect=self.plot_aspect)
 
-                    if outcome == Outcome.HIT:
-                        correct_calls[sv_type] += 1
-                        overall_correct += 1
-                        src = sv_validation.validation_source or ValidationSource.ASSEMBLY
-                        if src == ValidationSource.EDLIB:
-                            edlib_rescues += 1
-                        source_counts[src] += 1
-                        if src == ValidationSource.READS:
-                            read_hits[sv_type] += 1
-                        else:
-                            assembly_hits[sv_type] += 1
-                    elif outcome == Outcome.INCONCLUSIVE:
-                        inconclusive_calls[sv_type] += 1
-                        overall_inconclusive += 1
-                    elif outcome == Outcome.SKIPPED:
-                        skipped_calls[sv_type] += 1
-                        overall_skipped += 1
-                    # else: miss -> counts toward total but not correct/inconclusive/skipped
-
-                    # precision is over CONCLUSIVE calls only (hits + misses; inconclusive and
-                    # skipped -- never validated at all -- are excluded from the denominator)
-                    conclusive = overall_count - overall_inconclusive - overall_skipped
-                    if conclusive:
-                        desc = (f'Scoring SVs. Precision {overall_correct / conclusive:.2f} '
-                               f'({overall_correct}/{conclusive}); inconclusive {overall_inconclusive}')
-                        if overall_skipped:
-                            desc += f'; skipped {overall_skipped}'
+                if outcome == Outcome.HIT:
+                    correct_calls[sv_type] += 1
+                    overall_correct += 1
+                    src = sv_validation.validation_source or ValidationSource.ASSEMBLY
+                    if src == ValidationSource.EDLIB:
+                        edlib_rescues += 1
+                    source_counts[src] += 1
+                    if src == ValidationSource.READS:
+                        read_hits[sv_type] += 1
                     else:
-                        desc = f'Scoring SVs. {overall_skipped} skipped so far, 0 conclusive'
-                    pbar.set_description(desc)
-                    denom = total_calls[sv_type] - inconclusive_calls[sv_type] - skipped_calls[sv_type]
-                    precision[sv_type] = correct_calls[sv_type] / denom if denom else 0
+                        assembly_hits[sv_type] += 1
+                elif outcome == Outcome.INCONCLUSIVE:
+                    inconclusive_calls[sv_type] += 1
+                    overall_inconclusive += 1
+                elif outcome == Outcome.SKIPPED:
+                    skipped_calls[sv_type] += 1
+                    overall_skipped += 1
+                # else: miss -> counts toward total but not correct/inconclusive/skipped
 
-                except Exception as exc:
-                    logger.error(f'SV processing generated an exception: {exc}')
+                # precision is over CONCLUSIVE calls only (hits + misses; inconclusive and
+                # skipped -- never validated at all -- are excluded from the denominator)
+                conclusive = overall_count - overall_inconclusive - overall_skipped
+                if conclusive:
+                    desc = (f'Scoring SVs. Precision {overall_correct / conclusive:.2f} '
+                           f'({overall_correct}/{conclusive}); inconclusive {overall_inconclusive}')
+                    if overall_skipped:
+                        desc += f'; skipped {overall_skipped}'
+                else:
+                    desc = f'Scoring SVs. {overall_skipped} skipped so far, 0 conclusive'
+                pbar.set_description(desc)
+                denom = total_calls[sv_type] - inconclusive_calls[sv_type] - skipped_calls[sv_type]
+                precision[sv_type] = correct_calls[sv_type] / denom if denom else 0
 
         if report_fh is not None:
             report_fh.close()
@@ -397,11 +391,11 @@ class CallsetScorer(object):
 
     def score_sv(self, records: List[VariantRecord]) -> SVValidation:
         """Score one SV: reconstruct its alt allele(s), validate each subsequence with the
-        configured scorers, and return the SVValidation roll-up consumed by score_all."""
-        try:
-            svid = records[0].info['SVID']
-            sv_type = records[0].info['SVTYPE']
+        configured scorers, and return the SVValidation."""
+        svid = records[0].info['SVID']
+        sv_type = records[0].info['SVTYPE']
 
+        try:
             self._assert_sv_records_non_interchromosomal(records)
             self._assert_sv_records_contiguous_intervals(records)
 
@@ -423,8 +417,6 @@ class CallsetScorer(object):
                 query_validations.append(query_validation)
 
             return SVValidation(svid, sv_type, query_validations)
-
         except Exception as e:
-            error_msg = f'Worker failed for SVID: {records[0].info.get("SVID", "Unknown")}. Error: {e}\n{traceback.format_exc()}'
-            logger.error(error_msg)
-            raise e
+            e.add_note(f'while scoring SV {svid} ({sv_type})')
+            raise
