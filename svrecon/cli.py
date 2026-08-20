@@ -21,9 +21,6 @@ def main():
     # config. Mergeable params default to None so we can tell "unset" from an explicit value.
     parser.add_argument('--config', help='svrecon YAML config; keys mirror these flags. Logs and '
                         'reports are written to this file\'s directory.', dest='config')
-    parser.add_argument('--groovi_config', help='(Optional) groovi call config used to INFER unset '
-                        'params (reference/sample/bam/calls/classified). Was --config previously.',
-                        dest='groovi_config', default=None)
     parser.add_argument('--reference', help='Reference genome .fa file', dest='reference', default=None)
     parser.add_argument('--sample', help='Sample genome .fa file(s). Presence enables assembly-based '
                         'validation.', dest='sample', default=None)
@@ -51,8 +48,6 @@ def main():
                              'reconstruction (default 0.1).')
     parser.add_argument('--n_threads', type=int, default=None,
                         help='Worker threads for scoring SVs (default 40).')
-    parser.add_argument('--min_read_support', type=int, default=None,
-                        help='Min number of spanning reads that must clear --read_error_threshold (read modes; default 1).')
     parser.add_argument('--max_reads_per_site', type=int, default=None,
                         help='Cap on candidate reads gathered per SV locus (read modes; default 1000); '
                              'bounds work on deep read pileups.')

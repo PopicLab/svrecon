@@ -1,4 +1,4 @@
-"""CLI config resolution: groovi-config inference and log-basename derivation."""
+"""CLI config resolution and log-basename derivation."""
 import logging
 import os
 import sys
@@ -18,7 +18,6 @@ DEFAULTS = {
     'bam': None,
     'classified': None,
     'gap_file': None,
-    'groovi_config': None,
     'n_threads': max(1, os.cpu_count() // 2),
 
     # Path setting / plotting
@@ -36,7 +35,6 @@ DEFAULTS = {
 
     # Scoring parameters: read-based validation
     'read_error_threshold': 0.1,
-    'min_read_support': 1,
     'max_reads_per_site': 1000,
 
     # Scoring parameters: assembly-based validation (mappy)
@@ -68,7 +66,6 @@ VALID_PARAM_FNS = {
     'bam': lambda arg: arg is None or isinstance(arg, str),
     'classified': lambda arg: arg is None or isinstance(arg, str),
     'gap_file': lambda arg: arg is None or isinstance(arg, str),
-    'groovi_config': lambda arg: arg is None or isinstance(arg, str),
     'n_threads': lambda arg: isinstance(arg, int),
 
     # Path setting / plotting
@@ -86,7 +83,6 @@ VALID_PARAM_FNS = {
 
     # Scoring parameters: read-based validation
     'read_error_threshold': lambda arg: isinstance(arg, (int, float)),
-    'min_read_support': lambda arg: isinstance(arg, int),
     'max_reads_per_site': lambda arg: isinstance(arg, int),
 
     # Scoring parameters: assembly-based validation (mappy)
@@ -109,7 +105,7 @@ VALID_PARAM_FNS = {
 }
 
 class Config:
-    """Merge precedence: CLI flags (`args`) > svrecon --config (YAML) > groovi inference > DEFAULTS."""
+    """Merge precedence: CLI flags (`args`) > svrecon --config (YAML) > DEFAULTS."""
 
     def __init__(self, args):
         self.__dict__.update(DEFAULTS)
