@@ -67,6 +67,9 @@ def main():
                         help="Write a dot-plot PNG (reconstructed subsequence vs. the validating real-data "
                              "sequence) for the first N SV calls of each SV type, into <output_dir>/img/ "
                              "(default 0 -- no plots).")
+    parser.add_argument('--plot_substitute_base', choices=['A', 'C', 'G', 'T'], default=None,
+                        help='Replace non-ACGT bases with this base when plotting, instead of '
+                             'skipping the plot. Affects plots only, never validation.')
     parser.add_argument('--plot_aspect', choices=['equal', 'auto'], default=None,
                         help="Dot-plot axes aspect (default 'auto'): 'auto' keeps the plot square; "
                              "'equal' is true-to-scale (1bp=1bp) but can squeeze asymmetric SVs into a sliver.")
