@@ -27,7 +27,7 @@ DEFAULTS = {
     'report': 'none',
     'plot_first_n': 0,
     'plot_aspect': 'auto',
-    'plot_substitute_base': None,
+    'plot_substitute_bases': False,
 
     # Shared parameters for validation
     'buffer': 500,
@@ -77,7 +77,7 @@ VALID_PARAM_FNS = {
     'report': lambda arg: arg in ('none', 'json'),
     'plot_first_n': lambda arg: isinstance(arg, int),
     'plot_aspect': lambda arg: arg in ('equal', 'auto'),
-    'plot_substitute_base': lambda arg: arg is None or arg in ('A', 'C', 'G', 'T'),
+    'plot_substitute_bases': lambda arg: isinstance(arg, bool),
 
     # Shared parameters for validation
     'buffer': lambda arg: arg == 'auto' or isinstance(arg, int),

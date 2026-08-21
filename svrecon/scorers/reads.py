@@ -135,7 +135,7 @@ class ReadScorer(Scorer):
         elif not read_results:  # no read within the error budget
             status, reason = SubseqStatus.FAIL, SubseqReason.OVER_ERROR_THRESHOLD
         else:  # candidate reads aligned, but none passed segment validation
-            status, reason = SubseqStatus.FAIL, SubseqReason.JUNCTION_FAILED
+            status, reason = SubseqStatus.FAIL, SubseqReason.SEGMENT_FAILED
 
         return QueryValidationInput(source=ValidationSource.READS, passed=passed,
                                     status=status, reason=reason,

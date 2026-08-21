@@ -1,4 +1,5 @@
 import logging
+import random
 import re
 from pathlib import Path
 from typing import Optional, Sequence, TYPE_CHECKING
@@ -14,8 +15,8 @@ logger = logging.getLogger(__name__)
 
 K = 15  # wotplot k-mer size
 TICK_COUNT = 8  # target ticks per axis, regardless of sequence length
-PLOTTABLE_BASES = {'A', 'C', 'G', 'T'}  # wotplot rejects N and every other IUPAC code
-UNPLOTTABLE_BASE = re.compile(f'[^{"".join(sorted(PLOTTABLE_BASES))}]')
+PLOTTABLE_BASES = 'ACGT'  # wotplot rejects N and every other IUPAC code
+UNPLOTTABLE_BASE = re.compile(f'[^{PLOTTABLE_BASES}]')
 
 
 def plot_dot_plot(s1: str, s2: str, title: str, output_path: str,
@@ -46,7 +47,7 @@ def plot_dot_plot(s1: str, s2: str, title: str, output_path: str,
 
 
 def plot_sv_validation(sv_validation: 'SVValidation', output_dir: str, aspect: str = 'auto',
-                       substitute_base: Optional[str] = None) -> None:
+                       substitute_bases: bool = False) -> None:
     """Plots each subsequence of one SV vs the reference and (when found) its validating
     sequence, into an existing output_dir -- the caller owns directory layout and gating."""
     out_dir = Path(output_dir)
@@ -62,10 +63,13 @@ def plot_sv_validation(sv_validation: 'SVValidation', output_dir: str, aspect: s
 
         # skip plotting if non plottable base pair exists in sequence, unless substituted
         plottable = not UNPLOTTABLE_BASE.search(recon_seq + ref_seq + validating_seq)
-        if not plottable and substitute_base:
-            recon_seq, num_recon_subs = UNPLOTTABLE_BASE.subn(substitute_base, recon_seq)
-            ref_seq, num_ref_subs = UNPLOTTABLE_BASE.subn(substitute_base, ref_seq)
-            validating_seq, num_validating_subs = UNPLOTTABLE_BASE.subn(substitute_base, validating_seq)
+        if not plottable and substitute_bases:
+            # substitute unknown bases with random ATCG
+            rng = random.Random(0)  # seeded so a re-run draws the same bases
+            random_base = lambda _match: rng.choice(PLOTTABLE_BASES)
+            recon_seq, num_recon_subs = UNPLOTTABLE_BASE.subn(random_base, recon_seq)
+            ref_seq, num_ref_subs = UNPLOTTABLE_BASE.subn(random_base, ref_seq)
+            validating_seq, num_validating_subs = UNPLOTTABLE_BASE.subn(random_base, validating_seq)
             logger.info(f'Substituting {num_recon_subs + num_ref_subs + num_validating_subs} '
                         f'bases for {query.svid}')
             plottable = True

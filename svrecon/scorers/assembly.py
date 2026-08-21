@@ -154,7 +154,7 @@ class AssemblyScorer(Scorer):
         if passed:
             status, reason = SubseqStatus.PASS, SubseqReason.PASS
         elif best_segment_validation_results:  # a candidate aligned, but a segment failed
-            status, reason = SubseqStatus.FAIL, SubseqReason.JUNCTION_FAILED
+            status, reason = SubseqStatus.FAIL, SubseqReason.SEGMENT_FAILED
         else:  # nothing aligned under the error threshold
             status, reason = SubseqStatus.FAIL, SubseqReason.OTHER
 

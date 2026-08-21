@@ -68,7 +68,7 @@ positions and targets of the included operations, and implement the resulting su
 
 - To search the sample for the subsequence, we load the sample into a minimap2 aligner.
     - Current implementation uses the map-hifi preset for mappy, but this may not be the best setting. The disconnect is that we are seeking the best full match to the query subsequence created by the SV, but aligner objectives can highly score partial matches. We don’t want partial matches, since they will be good partial matches with or without the SV transformations.
-    - After finding alignments, we compute the full edit distance between the query and the match, and a match requires **both** (a) the ratio of edit distance to the query length below a threshold, **and** (b) the SV's breakpoint junctions to validate — the reconstructed adjacencies must align cleanly within a ±300 bp window (`JUNCTION_VALIDATION_WINDOW`) around each junction. Only then is the SV considered **correct**. The junction check catches alignments whose overall error is diluted below threshold by the flanking buffer but that are wrong precisely at the novel adjacency.
+    - After finding alignments, we compute the full edit distance between the query and the match, and a match requires **both** (a) the ratio of edit distance to the query length below a threshold, **and** (b) every reconstructed segment to validate — each segment of the rebuilt allele must align cleanly over its own extent, scored against the same error threshold. Only then is the SV considered **correct**. The segment check catches alignments whose overall error is diluted below threshold by the flanking buffer but that are wrong precisely where the SV rearranges the sequence.
 - We run each SV alone, which means the effects of other SVs in the genome (called or not) are ignored. Thus, the raw location of the SV may not be accurate, so we are searching the full chromosome for occurrences of the resulting sequence.
 - This evaluation is usually correct, but it can be wrong in a few circumstances
     - The resulting sequence is in the sample by coincidence, not because of an SV. This likely happens in highly repetitive regions.
@@ -90,7 +90,7 @@ For each SV, we build the same reconstructed allele (`simulate_subsequences`),
 
 Outcomes. Each SV is one of:
 - **hit** — a read contains the full reconstructed allele within the error
-  threshold (and its junctions validate).
+  threshold (and its segments validate).
 - **miss** — reads that are long enough to contain the whole resulting allele
   exist, but none match it. The reads genuinely contradict the call.
 - **inconclusive** — reads overlap the locus, but none is long enough to
@@ -111,7 +111,7 @@ per-subsequence list, one tag per reconstructed subsequence:
 - `inconclusive` — reads overlap but none span the full resulting allele.
 - `over_error_threshold:<err>` — a spanning read aligned, 1×–2× threshold.
 - `over_error_threshold:aborted` — spanning reads aligned worse than 2× threshold (edlib aborted).
-- `junction_failed:<err>` — aligned within the overall threshold but the breakpoint window failed.
+- `segment_failed:<err>` — aligned within the overall threshold but a reconstructed segment failed.
 
 Hit log lines instead carry the **evaluation tier** and the detailed source:
 `read` (Tier 1 — a single real read contained the allele; the strongest evidence,
@@ -151,14 +151,14 @@ Each record holds only what the *evaluation* concluded; join back to the call VC
    {"chrom": "chr3",            // chromosome the subsequence maps to (pairs with ref_start)
     "ref_start": 187135426,     // reference coord of the subsequence window's left anchor
     "status": "pass",           // pass | fail | inconclusive
-    "reason": "pass",           // pass | junction_failed | over_error_threshold |
+    "reason": "pass",           // pass | segment_failed | over_error_threshold |
                                 //   no_reads | inconclusive | no_aligner | no_alignment_in_window
     "source": "assembly",       // reads | assembly | edlib | null (tier that decided it)
     "error": 0.0696,            // number, 4 sig figs: winning error if pass, best failing error if
                                 //   fail, null if untestable. Tiny rates keep precision and serialize
                                 //   in exponent form (e.g. 8.6e-06).
-    "junctions": [              // per-junction results in the order checked; truncated at the
-      {"error": 0.0, "passed": true}, ...]}]}  // first failure. Empty if no junction in scope.
+    "segments": [               // per-segment results in the order checked; truncated at the
+      {"error": 0.0, "passed": true}, ...]}]}  // first failure. Empty if no segment in scope.
 ```
 
 Note the `ref_start` is the window anchor (≈ breakpoint − buffer), not an exact
@@ -182,6 +182,15 @@ aligner set over the reference (extra build time + memory), so it is best used
 deliberately (e.g. auditing suspicious large calls) rather than on every routine run.
 It caught, for example, a 29 kb chr16 dupINVdup whose allele maps to the reference at
 0.019 error — below the 0.034 assembly match — i.e. a coincidental, non-SV-specific hit.
+
+**Dot plots (`--plot_first_n`, `--plot_substitute_bases`)**
+
+`--plot_first_n N` writes k-mer dot plots for the first N calls of each SV type. Plotting
+uses wotplot, which accepts only `A`/`C`/`G`/`T`, so a subsequence containing `N` is skipped
+by default. `--plot_substitute_bases` replaces non-ACGT bases with random ACGT bases so the
+plot can be drawn, logging how many were substituted.
+
+Base pair substitution is for plotting only, not for validation: scoring never sees the substituted sequence,
 
 **Notes**
 

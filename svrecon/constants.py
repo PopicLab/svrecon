@@ -14,7 +14,7 @@ class SubseqReason(str, Enum):
     """Why a subsequence received its SubseqStatus."""
     PASS = 'pass'
     REFERENCE_MATCH = 'reference_match'
-    JUNCTION_FAILED = 'junction_failed'
+    SEGMENT_FAILED = 'segment_failed'
     OVER_ERROR_THRESHOLD = 'over_error_threshold'
     INCONCLUSIVE = 'inconclusive'
     SKIPPED = 'skipped'  # neither --sample nor --bam

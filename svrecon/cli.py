@@ -56,10 +56,10 @@ def main():
     parser.add_argument('--report', choices=['none', 'json'], default=None,
                         help="Write a per-SV evaluation sidecar. 'json' emits "
                              "<logbasename>.eval.jsonl next to the log (one JSON record per SV: "
-                             "svid, outcome, tier, and per-segment status/reason/source/error/"
-                             "junctions). Default 'none' (log and score table are unchanged).")
+                             "svid, outcome, tier, and per-query status/reason/source/error/"
+                             "segments). Default 'none' (log and score table are unchanged).")
     parser.add_argument('--check_reference', action='store_true', default=None,
-                        help="Also validate each passing allele against the reference (bulk + junctions); "
+                        help="Also validate each passing allele against the reference (bulk + segments); "
                              "if it also validates there (the match isn't specific to the SV -- common "
                              "in repetitive / segmental-dup regions), mark the call inconclusive "
                              "(reason 'reference_match'). Off by default; builds a reference aligner set.")
@@ -67,15 +67,15 @@ def main():
                         help="Write a dot-plot PNG (reconstructed subsequence vs. the validating real-data "
                              "sequence) for the first N SV calls of each SV type, into <output_dir>/img/ "
                              "(default 0 -- no plots).")
-    parser.add_argument('--plot_substitute_base', choices=['A', 'C', 'G', 'T'], default=None,
-                        help='Replace non-ACGT bases with this base when plotting, instead of '
-                             'skipping the plot. Affects plots only, never validation.')
+    parser.add_argument('--plot_substitute_bases', action='store_true', default=None,
+                        help='Replace non-ACGT bases with random ACGT bases when plotting, instead '
+                             'of skipping the plot. Affects plots only, never validation.')
     parser.add_argument('--plot_aspect', choices=['equal', 'auto'], default=None,
                         help="Dot-plot axes aspect (default 'auto'): 'auto' keeps the plot square; "
                              "'equal' is true-to-scale (1bp=1bp) but can squeeze asymmetric SVs into a sliver.")
     parser.add_argument('--assembly_forward_match_only', action='store_true', default=None,
                         help="Only accept forward-strand alignments during assembly validation "
-                             "(reverse-strand hits are filtered out before the error/junction checks). "
+                             "(reverse-strand hits are filtered out before the error/segment checks). "
                              "Off by default (maps to both strands).")
     args = parser.parse_args()
 
