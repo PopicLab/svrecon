@@ -36,15 +36,24 @@ ALIGN_PARAMS = {
 
 def get_chrom_aligner(sample_fasta: str, chrom: str, cache_dir: str, align_params: dict,
                       threads: int = 4) -> mappy.Aligner:
-    """Loads a per-chromosome MMI index, building it first if it doesn't exist.
-    Raises ValueError if the FASTA has no sequences for the chromosome."""
+    """Loads a per-chromosome MMI index, building it first if it doesn't exist or the FASTA
+    changed since it was built. Raises ValueError if the FASTA has no sequences for the chromosome."""
     mmi_path = os.path.join(cache_dir, f"{chrom}.mmi")
+    # The cache is keyed on the FASTA's path, so a FASTA rewritten in place (a re-run
+    # simulation, an updated assembly) would silently reuse an index of the old genome.
+    source_path = os.path.join(cache_dir, f"{chrom}.source")
+    fasta_stat = os.stat(sample_fasta)
+    fasta_id = f'{fasta_stat.st_size},{fasta_stat.st_mtime_ns}'
 
-    if os.path.exists(mmi_path):
-        logger.info(f"Loading existing index for {chrom} from {mmi_path}")
-        return mappy.Aligner(mmi_path, **align_params)
+    if os.path.exists(mmi_path) and os.path.exists(source_path):
+        cached_id = open(source_path).read()
+        if cached_id == fasta_id:
+            logger.info(f"Loading existing index for {chrom} from {mmi_path} ({sample_fasta} {fasta_id})")
+            return mappy.Aligner(mmi_path, **align_params)
+        logger.warning(f"Stale index for {chrom}: built from {cached_id}, "
+                       f"{sample_fasta} is now {fasta_id}. Rebuilding.")
 
-    logger.info(f"Index not found for {chrom}. Extracting sequences...")
+    logger.info(f"Index not current for {chrom}. Extracting sequences...")
     chrom_fa_path = os.path.join(cache_dir, f"{chrom}.fa")
     written_contigs = 0
 
@@ -63,6 +72,8 @@ def get_chrom_aligner(sample_fasta: str, chrom: str, cache_dir: str, align_param
 
     logger.info(f"Building MMI index for {chrom} at {mmi_path}...")
     aligner = mappy.Aligner(chrom_fa_path, n_threads=threads, fn_idx_out=mmi_path, **align_params)
+    with open(source_path, 'w') as f:
+        f.write(fasta_id)
 
     if os.path.exists(chrom_fa_path):
         os.remove(chrom_fa_path)
