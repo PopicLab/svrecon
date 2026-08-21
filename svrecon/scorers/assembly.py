@@ -16,12 +16,10 @@ from svrecon.utils import reverse_complement
 
 logger = logging.getLogger(__name__)
 
-# minimap2 --eqx: report =/X instead of M. Without it a mappy CIGAR is all M, so
-# segment validation cannot see substitutions (see experiments/debug/eqx_comparison.py).
+# minimap2 --eqx: report =/X instead of M.
 MM_F_EQX = 0x4000000
 
-# Aligner build params, shared by the assembly aligners and (when
-# --check_reference is on) the reference aligners.
+# Aligner build params, shared by the aligners
 ALIGN_PARAMS = {
     'preset': 'map-hifi',
     'k': 15,
