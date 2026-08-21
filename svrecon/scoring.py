@@ -46,7 +46,6 @@ class QueryValidation:
             'reason': self.reason,
             'source': self.source,
             'strand': self.decisive_strand,
-            'validating_sequence': self.validating_seq,
             'validations': [v.jsonify() for v in self.validations],
             'ambiguity_validations': [v.jsonify() for v in self.ambiguity_validations],
         }
@@ -159,7 +158,7 @@ class SVValidation:
             'svtype': self.svtype,
             'outcome': self.outcome,
             'tier': self.tier,
-            'segments': [qv.jsonify() for qv in self.query_validations],
+            'query_validations': [qv.jsonify() for qv in self.query_validations],
         }
 
     @property
@@ -202,6 +201,7 @@ class CallsetScorer(object):
         self.auto_buffer_min = config.auto_buffer_min
         self.auto_buffer_fraction = config.auto_buffer_fraction
         self.n_threads = config.n_threads
+        self.verbose = config.verbose
         self.chrom_to_ref = load_fasta_to_bytes(config.reference, chroms)
         logger.info(f'Loaded {len(self.chrom_to_ref)} reference chromosomes from {config.reference}')
 
@@ -310,6 +310,8 @@ class CallsetScorer(object):
                     line += f'\t{sv_validation.tier}\t{sv_validation.validation_source}'
                 elif outcome != Outcome.SKIPPED:  # miss or inconclusive -> show why
                     line += f'\t{sv_validation.subseq_reasons}'
+                if self.verbose:
+                    line += f'\t{json.dumps(sv_validation.get_summary())}'
                 logger.info(line)
 
                 if report_fh is not None:

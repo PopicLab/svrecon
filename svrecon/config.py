@@ -19,6 +19,7 @@ DEFAULTS = {
     'classified': None,
     'gap_file': None,
     'n_threads': max(1, os.cpu_count() // 2),
+    'verbose': False,
 
     # Path setting / plotting
     'chrom_cache': None,
@@ -67,6 +68,7 @@ VALID_PARAM_FNS = {
     'classified': lambda arg: arg is None or isinstance(arg, str),
     'gap_file': lambda arg: arg is None or isinstance(arg, str),
     'n_threads': lambda arg: isinstance(arg, int),
+    'verbose': lambda arg: isinstance(arg, bool),
 
     # Path setting / plotting
     'chrom_cache': lambda arg: arg is None or isinstance(arg, str),

@@ -48,6 +48,8 @@ def main():
                              'reconstruction (default 0.1).')
     parser.add_argument('--n_threads', type=int, default=None,
                         help='Worker threads for scoring SVs (default 40).')
+    parser.add_argument('--verbose', action='store_true', default=None,
+                        help='Log more detail per SV.')
     parser.add_argument('--max_reads_per_site', type=int, default=None,
                         help='Cap on candidate reads gathered per SV locus (read modes; default 1000); '
                              'bounds work on deep read pileups.')
