@@ -9,7 +9,7 @@ import wotplot as wp
 from matplotlib.ticker import FuncFormatter, MaxNLocator
 
 if TYPE_CHECKING:
-    from svrecon.scoring import SVValidation
+    from svrecon.scoring import SVValidationResult
 
 logger = logging.getLogger(__name__)
 
@@ -46,12 +46,12 @@ def plot_dot_plot(s1: str, s2: str, title: str, output_path: str,
     plt.close(fig)
 
 
-def plot_sv_validation(sv_validation: 'SVValidation', output_dir: str, aspect: str = 'auto',
+def plot_sv_validation(sv_validation: 'SVValidationResult', output_dir: str, aspect: str = 'auto',
                        substitute_bases: bool = False) -> None:
-    """Plots each subsequence of one SV vs the reference and (when found) its validating
+    """Plots each subsequence of one SV vs the reference and (when found) its matched
     sequence, into an existing output_dir -- the caller owns directory layout and gating."""
     out_dir = Path(output_dir)
-    for part, query_validation in enumerate(sv_validation.query_validations):
+    for part, query_validation in enumerate(sv_validation.query_validation_results):
         query = query_validation.query
         alt_boundaries = sorted({pos for start, end in query.recon_segments for pos in (start, end)})
         locus = f'{query.chrom}:{query.ref_start:,}-{query.ref_end:,}'
@@ -59,18 +59,18 @@ def plot_sv_validation(sv_validation: 'SVValidation', output_dir: str, aspect: s
 
         recon_seq = query.sequence.upper()
         ref_seq = query.ref_sequence.upper()
-        validating_seq = (query_validation.validating_seq or '').upper()
+        matched_seq = (query_validation.best_matched_seq or '').upper()
 
         # skip plotting if non plottable base pair exists in sequence, unless substituted
-        plottable = not UNPLOTTABLE_BASE.search(recon_seq + ref_seq + validating_seq)
+        plottable = not UNPLOTTABLE_BASE.search(recon_seq + ref_seq + matched_seq)
         if not plottable and substitute_bases:
             # substitute unknown bases with random ATCG
             rng = random.Random(0)  # seeded so a re-run draws the same bases
             random_base = lambda _match: rng.choice(PLOTTABLE_BASES)
             recon_seq, num_recon_subs = UNPLOTTABLE_BASE.subn(random_base, recon_seq)
             ref_seq, num_ref_subs = UNPLOTTABLE_BASE.subn(random_base, ref_seq)
-            validating_seq, num_validating_subs = UNPLOTTABLE_BASE.subn(random_base, validating_seq)
-            logger.info(f'Substituting {num_recon_subs + num_ref_subs + num_validating_subs} '
+            matched_seq, num_matched_subs = UNPLOTTABLE_BASE.subn(random_base, matched_seq)
+            logger.info(f'Substituting {num_recon_subs + num_ref_subs + num_matched_subs} '
                         f'bases for {query.svid}')
             plottable = True
         if not plottable:
@@ -84,9 +84,16 @@ def plot_sv_validation(sv_validation: 'SVValidation', output_dir: str, aspect: s
                       s2_name='reference', segment_boundaries=alt_boundaries,
                       ref_segment_boundaries=ref_boundaries, y_offset=query.ref_start, aspect=aspect)
 
-        # reconstructed vs the validating sequence, when a scorer found one
-        if validating_seq:
+        # reconstructed vs the matched sequence, when a scorer found one (a pass or a match)
+        if matched_seq:
             source = query_validation.source.value
-            plot_dot_plot(recon_seq, validating_seq, title,
-                        str(out_dir / f'{part}_validating_{source}.png'),
-                        s2_name=f'validating ({source})', segment_boundaries=alt_boundaries, aspect=aspect)
+            plot_dot_plot(recon_seq, matched_seq, title,
+                        str(out_dir / f'{part}_matched_{source}.png'),
+                        s2_name=f'matched ({source})', segment_boundaries=alt_boundaries, aspect=aspect)
+
+            # matched vs the reference: shows what the target actually carries at this locus,
+            # which is what distinguishes a wrong call from a wrongly scored one on a match
+            plot_dot_plot(matched_seq, ref_seq, title,
+                        str(out_dir / f'{part}_matched_{source}_reference.png'),
+                        s1_name=f'matched ({source})', s2_name='reference',
+                        ref_segment_boundaries=ref_boundaries, y_offset=query.ref_start, aspect=aspect)

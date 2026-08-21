@@ -14,7 +14,7 @@ from svrecon.constants import *
 from svrecon.plot import plot_sv_validation
 from svrecon.reconstruct import Query, simulate_subsequences
 from svrecon.scorers.assembly import AssemblyScorer
-from svrecon.scorers.base import Scorer, QueryValidationInput
+from svrecon.scorers.base import Scorer, QueryValidation
 from svrecon.scorers.edlib import EdlibScorer
 from svrecon.scorers.reads import ReadScorer
 from svrecon.utils import get_start_stop, group_variants_by_id, load_fasta_to_bytes
@@ -23,19 +23,20 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class QueryValidation:
+class QueryValidationResult:
     """Every scorer's result for one reconstructed subsequence, in the order they ran.
-    Scoring stops at the first pass, so the last entry is the decisive one."""
+    Scoring stops at the first pass; on a failure every scorer runs, so the decisive
+    result is the highest-ranked one, not the last."""
     query: Query
-    validations: List[QueryValidationInput] = field(default_factory=list)
+    validations: List[QueryValidation] = field(default_factory=list)
     # Reference-ambiguity results, kept apart: a pass there means the allele also matches
     # the unmodified reference, making the query inconclusive rather than validated.
-    ambiguity_validations: List[QueryValidationInput] = field(default_factory=list)
+    ambiguity_validations: List[QueryValidation] = field(default_factory=list)
 
-    def update_validation(self, result: QueryValidationInput) -> None:
+    def update_validation(self, result: QueryValidation) -> None:
         self.validations.append(result)
 
-    def update_ambiguity(self, result: QueryValidationInput) -> None:
+    def update_ambiguity(self, result: QueryValidation) -> None:
         self.ambiguity_validations.append(result)
 
     def jsonify(self) -> Dict:
@@ -51,40 +52,41 @@ class QueryValidation:
         }
 
     @property
-    def latest(self) -> Optional[QueryValidationInput]:
-        return self.validations[-1] if self.validations else None
+    def decisive(self) -> Optional[QueryValidation]:
+        """The result that settles the query -- see QueryValidation.__gt__."""
+        return max(self.validations) if self.validations else None
 
     @property
     def passed(self) -> bool:
-        return bool(self.latest and self.latest.passed)
+        return bool(self.decisive and self.decisive.passed)
 
     @property
-    def reference_matches(self) -> List[QueryValidationInput]:
+    def reference_matches(self) -> List[QueryValidation]:
         return [v for v in self.ambiguity_validations if v.passed]
 
     @property
     def status(self) -> SubseqStatus:
         if self.reference_matches:
             return SubseqStatus.INCONCLUSIVE
-        return self.latest.status if self.latest else SubseqStatus.SKIPPED
+        return self.decisive.status if self.decisive else SubseqStatus.SKIPPED
 
     @property
     def reason(self) -> SubseqReason:
         if self.reference_matches:
             return SubseqReason.REFERENCE_MATCH
-        return self.latest.reason if self.latest else SubseqReason.SKIPPED
+        return self.decisive.reason if self.decisive else SubseqReason.SKIPPED
 
     @property
     def source(self) -> Optional[ValidationSource]:
-        return self.latest.source if self.passed else None
+        return self.decisive.source if self.decisive else None
 
     @property
-    def validating_seq(self) -> Optional[str]:
-        return self.latest.validating_seq if self.passed else None
+    def best_matched_seq(self) -> Optional[str]:
+        return self.decisive.best_matched_seq if self.decisive else None
 
     @property
     def lowest_pass_error(self) -> float:
-        return self.latest.lowest_pass_error if self.passed else 1.0
+        return self.decisive.lowest_pass_error if self.passed else 1.0
 
     @property
     def decisive_strand(self) -> Optional[int]:
@@ -93,16 +95,17 @@ class QueryValidation:
         # oriented, so strand carries no signal).
         if not self.passed:
             return None
-        return (self.reference_matches or self.validations)[-1].best_strand_match
+        return self.reference_matches[-1].best_strand_match if self.reference_matches \
+            else self.decisive.best_strand_match
 
 
-class SVValidation:
+class SVValidationResult:
     """SV-level roll-up of one call's per-subsequence validations."""
 
-    def __init__(self, svid: str, svtype: str, query_validations: List[QueryValidation]):
+    def __init__(self, svid: str, svtype: str, query_validations_results: List[QueryValidationResult]):
         self.svid = svid
         self.svtype = svtype
-        self.query_validations = query_validations
+        self.query_validation_results = query_validations_results
 
         # SV-level roll-up:
         #   skipped      -> no validation scorers configured: reconstructed but never
@@ -113,13 +116,13 @@ class SVValidation:
         #                   reads / assembly aligned but didn't match)
         #   inconclusive -> no contradiction, but at least one subsequence could
         #                   not be tested (reads mode: no read spans the full allele)
-        subseq_status = [qv.status for qv in query_validations]
+        subseq_status = [qvr.status for qvr in query_validations_results]
         if len(subseq_status) > 0 and all(s == SubseqStatus.SKIPPED for s in subseq_status):
             self.outcome = Outcome.SKIPPED
         elif len(subseq_status) > 0 and all(s == SubseqStatus.PASS for s in subseq_status):
             self.outcome = Outcome.HIT
-        elif SubseqStatus.FAIL in subseq_status:
-            self.outcome = Outcome.MISS
+        elif any(s in (SubseqStatus.FAIL, SubseqStatus.MATCH) for s in subseq_status):
+            self.outcome = Outcome.MISS  # MATCH aligned but a segment failed: still contradicted
         elif SubseqStatus.INCONCLUSIVE in subseq_status:
             self.outcome = Outcome.INCONCLUSIVE
         else:
@@ -129,7 +132,7 @@ class SVValidation:
         # 'reads' implies the SV would have been an assembly-miss without reads.
         self.validation_source = None
         if self.outcome == Outcome.HIT:
-            srcs = {qv.source for qv in query_validations if qv.source}
+            srcs = {qv.source for qv in query_validations_results if qv.source}
             if ValidationSource.READS in srcs:
                 self.validation_source = ValidationSource.READS
             elif ValidationSource.EDLIB in srcs:
@@ -158,21 +161,21 @@ class SVValidation:
             'svtype': self.svtype,
             'outcome': self.outcome,
             'tier': self.tier,
-            'query_validations': [qv.jsonify() for qv in self.query_validations],
+            'query_validations': [qv.jsonify() for qv in self.query_validation_results],
         }
 
     @property
     def chroms(self) -> List[str]:
         """Chromosome of each reconstructed subsequence (an SV can span multiple)."""
-        return [qv.query.chrom for qv in self.query_validations]
+        return [qv.query.chrom for qv in self.query_validation_results]
 
     @property
     def match_scores(self) -> List[float]:
-        return [qv.lowest_pass_error for qv in self.query_validations]
+        return [qv.lowest_pass_error for qv in self.query_validation_results]
 
     @property
     def subseq_reasons(self) -> List[str]:
-        return [qv.reason.value for qv in self.query_validations]
+        return [qv.reason.value for qv in self.query_validation_results]
 
 
 class CallsetScorer(object):
@@ -303,7 +306,7 @@ class CallsetScorer(object):
             pbar = tqdm(as_completed(futures), total=len(self.variants), desc=f'Scoring SVs', smoothing=0)
 
             for future in pbar:
-                sv_validation: SVValidation = future.result()
+                sv_validation: SVValidationResult = future.result()
                 svid, sv_type, outcome = sv_validation.svid, sv_validation.svtype, sv_validation.outcome
                 line = f'{svid}\t{sv_type}\t{sv_validation.chroms}\t{outcome.value}\t{sv_validation.match_scores}'
                 if outcome == Outcome.HIT:
@@ -322,9 +325,9 @@ class CallsetScorer(object):
                 overall_count += 1
 
                 if self.plot_first_n and total_calls[sv_type] <= self.plot_first_n:
-                    if sv_validation.query_validations:
+                    if sv_validation.query_validation_results:
                         logger.info(f'Producing dot plots for SV {svid} ({sv_type}, '
-                                    f'{len(sv_validation.query_validations)} part(s))')
+                                    f'{len(sv_validation.query_validation_results)} part(s))')
                         outcome_dir = 'validated' if outcome == Outcome.HIT else 'unvalidated'
                         sv_plot_dir = Path(self.plot_out_dir) / outcome_dir / sv_type / svid
                         sv_plot_dir.mkdir(parents=True, exist_ok=True)
@@ -397,7 +400,7 @@ class CallsetScorer(object):
 
         return precision, correct_calls, total_calls, inconclusive_calls, skipped_calls, assembly_hits, read_hits
 
-    def score_sv(self, records: List[VariantRecord]) -> SVValidation:
+    def score_sv(self, records: List[VariantRecord]) -> SVValidationResult:
         """Score one SV: reconstruct its alt allele(s), validate each subsequence with the
         configured scorers, and return the SVValidation."""
         svid = records[0].info['SVID']
@@ -408,10 +411,10 @@ class CallsetScorer(object):
             self._assert_sv_records_contiguous_intervals(records)
 
             sv_buffer = self._resolve_buffer(records)
-            query_validations: List[QueryValidation] = []  # one per reconstructed subsequence of an SV
+            query_validations: List[QueryValidationResult] = []  # one per reconstructed subsequence of an SV
 
             for query in simulate_subsequences(records, sv_buffer, self.chrom_to_ref):
-                query_validation = QueryValidation(query=query)
+                query_validation = QueryValidationResult(query=query)
 
                 for scorer in self.validation_scorer:
                     query_validation.update_validation(scorer.score_query(query))
@@ -424,7 +427,7 @@ class CallsetScorer(object):
 
                 query_validations.append(query_validation)
 
-            return SVValidation(svid, sv_type, query_validations)
+            return SVValidationResult(svid, sv_type, query_validations)
         except Exception as e:
             e.add_note(f'while scoring SV {svid} ({sv_type})')
             raise

@@ -3,7 +3,7 @@ from typing import Dict, Union
 
 from svrecon.constants import SubseqReason, SubseqStatus, ValidationSource
 from svrecon.reconstruct import Query
-from svrecon.scorers.base import Scorer, QueryValidationInput
+from svrecon.scorers.base import Scorer, QueryValidation
 from svrecon.scorers.utils import Cigar, EdlibScoreResult, edlib_score, validate_segments_from_cigar
 from svrecon.utils import load_fasta_to_bytes
 
@@ -67,46 +67,46 @@ class EdlibScorer(Scorer):
         self.edlib_fallback_max_tolerance = config.edlib_fallback_max_tolerance
         self.sample_bytes = load_fasta_to_bytes(fasta_path, chroms)
 
-    def score_query(self, query: Query) -> QueryValidationInput:
+    def score_query(self, query: Query) -> QueryValidation:
         if len(query) >= self.min_edlib_query:  # cost bound: the search is O(len * window)
-            return QueryValidationInput(source=ValidationSource.EDLIB)
+            return QueryValidation(source=ValidationSource.EDLIB)
 
         lowest_pass_error = 1.0
         passed = False
-        validating_seq = None
+        best_matched_seq = None
         segment_validation_results = []
 
         edlib_result = run_edlib_fallback(query.sequence, query.chrom, query.ref_start, query.buffer,
                                           self.edlib_fallback_max_tolerance, self.match_error_threshold,
                                           self.sample_bytes)
         if edlib_result is None:
-            return QueryValidationInput(source=ValidationSource.EDLIB)
+            return QueryValidation(source=ValidationSource.EDLIB)
 
         cigar = Cigar.from_edlib(edlib_result.cigar)
         if edlib_result.error <= self.match_error_threshold:
             segment_validation_results = validate_segments_from_cigar(
                 cigar, query.recon_segments,
                 error_threshold=self.match_error_threshold)
+            best_matched_seq = edlib_result.matched_target_sequence
             if all(s.passed for s in segment_validation_results):
                 passed = True
                 lowest_pass_error = edlib_result.error
-                validating_seq = edlib_result.matched_target_sequence
 
         if passed:
             status, reason = SubseqStatus.PASS, SubseqReason.PASS
         elif segment_validation_results:  # the best window aligned, but a segment failed
-            status, reason = SubseqStatus.FAIL, SubseqReason.SEGMENT_FAILED
+            status, reason = SubseqStatus.MATCH, SubseqReason.SEGMENT_FAILED
         else:  # nothing aligned under the error threshold
             status, reason = SubseqStatus.FAIL, SubseqReason.OTHER
 
-        return QueryValidationInput(
+        return QueryValidation(
             source=ValidationSource.EDLIB,
             passed=passed,
             status=status,
             reason=reason,
             lowest_pass_error=lowest_pass_error,
             lowest_error=edlib_result.error,
-            validating_seq=validating_seq,
+            best_matched_seq=best_matched_seq,
             segment_results=segment_validation_results,
             best_strand_match=1,  # edlib aligns forward only
             cigar=cigar,

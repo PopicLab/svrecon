@@ -7,7 +7,7 @@ import pysam
 
 from svrecon.constants import SubseqReason, SubseqStatus, ValidationSource
 from svrecon.reconstruct import Query
-from svrecon.scorers.base import Scorer, QueryValidationInput
+from svrecon.scorers.base import Scorer, QueryValidation
 from svrecon.scorers.utils import Cigar, EdlibScoreResult, edlib_score, validate_segments_from_cigar
 from svrecon.utils import reverse_complement
 
@@ -94,7 +94,7 @@ class ReadScorer(Scorer):
         self.max_reads_per_site = config.max_reads_per_site
         self.bam_reader = BamReader(config.bam)
 
-    def score_query(self, query: Query) -> QueryValidationInput:
+    def score_query(self, query: Query) -> QueryValidation:
         # collect candidate reads that overlap ref region of interest, then filter by size
         breakpoints = [pos for start, end in query.ref_segments for pos in (start, end)]
         bp_start, bp_stop = min(breakpoints), max(breakpoints)
@@ -102,16 +102,16 @@ class ReadScorer(Scorer):
             query.chrom, bp_start, bp_stop, max_reads=self.max_reads_per_site)
         reads = [r for r in reads if len(r) >= len(query)]
         if not reads:  # no read long enough to span the allele -> untestable, not contradicted
-            return QueryValidationInput(source=ValidationSource.READS,
+            return QueryValidation(source=ValidationSource.READS,
                                         status=SubseqStatus.INCONCLUSIVE,
                                         reason=SubseqReason.INCONCLUSIVE)
 
         passed = False
         lowest_pass_error = 1.0
         lowest_error = 1.0
-        validating_seq = None
         best_validation_results = []  # the adopted read's segments on a pass, else the last read's
         best_cigar = None
+        best_matched_seq = None
 
         read_results = run_read_edlib(query.sequence, reads, self.read_error_threshold)
         for read_res in read_results:
@@ -123,22 +123,23 @@ class ReadScorer(Scorer):
             if all(s.passed for s in segment_validation_results) and read_res.error < lowest_pass_error:
                 passed = True
                 lowest_pass_error = read_res.error
-                validating_seq = read_res.matched_target_sequence
                 best_validation_results = segment_validation_results
                 best_cigar = cigar
-            elif not passed:
+                best_matched_seq = read_res.matched_target_sequence
+            elif not passed and read_res.error <= lowest_error:
                 best_validation_results = segment_validation_results
                 best_cigar = cigar
+                best_matched_seq = read_res.matched_target_sequence  # kept so a MATCH can still be inspected
 
         if passed:
             status, reason = SubseqStatus.PASS, SubseqReason.PASS
-        elif not read_results:  # no read within the error budget
+        elif read_results:  # a read aligned, but none passed segment validation
+            status, reason = SubseqStatus.MATCH, SubseqReason.SEGMENT_FAILED
+        else:  # no read within the error budget
             status, reason = SubseqStatus.FAIL, SubseqReason.OVER_ERROR_THRESHOLD
-        else:  # candidate reads aligned, but none passed segment validation
-            status, reason = SubseqStatus.FAIL, SubseqReason.SEGMENT_FAILED
 
-        return QueryValidationInput(source=ValidationSource.READS, passed=passed,
+        return QueryValidation(source=ValidationSource.READS, passed=passed,
                                     status=status, reason=reason,
                                     lowest_pass_error=lowest_pass_error, lowest_error=lowest_error,
-                                    validating_seq=validating_seq, segment_results=best_validation_results,
+                                    best_matched_seq=best_matched_seq, segment_results=best_validation_results,
                                     cigar=best_cigar)

@@ -10,7 +10,7 @@ import pysam
 
 from svrecon.constants import SubseqReason, SubseqStatus, ValidationSource
 from svrecon.reconstruct import Query
-from svrecon.scorers.base import Scorer, QueryValidationInput
+from svrecon.scorers.base import Scorer, QueryValidation
 from svrecon.scorers.utils import Cigar, SegmentValidation, validate_segments_from_cigar
 from svrecon.utils import reverse_complement
 
@@ -95,8 +95,8 @@ def check_match(alignment, query):
     len_unaligned = len(query) - aligned_query_segment_length
 
     nm_total = alignment.NM + len_unaligned
-    len_norm = alignment.blen + len_unaligned
-
+    len_norm = alignment.blen + len_unaligned # lengh of reference
+    # partition into two checks? size, seq similarity? presence of any large gaps/ insertions, any <50 say unknown, any >50 fail
     return nm_total / len_norm if len_norm > 0 else 1.0
 
 
@@ -110,14 +110,14 @@ class AssemblyScorer(Scorer):
         self.aligners = build_chrom_aligners(fasta_path, chroms, config.cache_dir)
         logger.info(f'Initialized per-chromosome aligners for {fasta_path}')
 
-    def score_query(self, query: Query) -> QueryValidationInput:
+    def score_query(self, query: Query) -> QueryValidation:
         lowest_pass_error = 1.0
         lowest_error = 1.0
         passed = False
-        validating_seq = None
         best_segment_validation_results = []
         best_strand_match = None
         best_cigar = None
+        best_matched_seq = None
 
         chrom_aligner = self.aligners[query.chrom]  
 
@@ -127,45 +127,48 @@ class AssemblyScorer(Scorer):
         if self.forward_match_only:
             alignments = [a for a in alignments if a.strand == 1]
 
-        # pick best candidate alignment based on overall and segment normalized match error
+        # pick best candidate alignment based on overall and segment normalized match error # TODO: ensure mapq 60. something thats repetitive ins unknown
         for alignment in alignments:
             match_err = check_match(alignment, query.sequence)
             lowest_error = min(lowest_error, match_err)
-            if match_err > self.match_error_threshold:
-                continue
+            whole_seq_match = match_err <= self.match_error_threshold
 
             cigar = Cigar.from_mappy(alignment, len(query))
             segment_validation_results: List[SegmentValidation] = \
                 validate_segments_from_cigar(cigar, query.recon_segments,
                                              error_threshold=self.match_error_threshold)
-            if all(s.passed for s in segment_validation_results):
+
+            matched_seq = chrom_aligner.seq(alignment.ctg, alignment.r_st, alignment.r_en)
+            if alignment.strand == -1:
+                matched_seq = reverse_complement(matched_seq)  # orient to the forward query
+            if whole_seq_match and all(s.passed for s in segment_validation_results):
                 passed = True
                 if match_err < lowest_pass_error:
                     lowest_pass_error = match_err
-                    best_strand_match = alignment.strand   # record the best passing match's strand
+                    best_strand_match = alignment.strand  
                     best_segment_validation_results = segment_validation_results
                     best_cigar = cigar
-                    matched_seq = chrom_aligner.seq(alignment.ctg, alignment.r_st, alignment.r_en)
-                    validating_seq = reverse_complement(matched_seq) if alignment.strand == -1 else matched_seq
+                    best_matched_seq = matched_seq
             if not passed and match_err <= lowest_error:
                 best_segment_validation_results = segment_validation_results
                 best_cigar = cigar
+                best_matched_seq = matched_seq  
 
         if passed:
             status, reason = SubseqStatus.PASS, SubseqReason.PASS
-        elif best_segment_validation_results:  # a candidate aligned, but a segment failed
-            status, reason = SubseqStatus.FAIL, SubseqReason.SEGMENT_FAILED
-        else:  # nothing aligned under the error threshold
+        elif best_segment_validation_results:  # aligned to the sample, but a segment failed
+            status, reason = SubseqStatus.MATCH, SubseqReason.SEGMENT_FAILED
+        else:  # nothing aligned at all
             status, reason = SubseqStatus.FAIL, SubseqReason.OTHER
 
-        return QueryValidationInput(
+        return QueryValidation(
             source=ValidationSource.ASSEMBLY,
             passed=passed,
             status=status,
             reason=reason,
             lowest_pass_error=lowest_pass_error,
             lowest_error=lowest_error,
-            validating_seq=validating_seq,
+            best_matched_seq=best_matched_seq,
             segment_results=best_segment_validation_results,
             best_strand_match=best_strand_match,
             cigar=best_cigar,

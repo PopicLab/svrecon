@@ -5,6 +5,7 @@ from enum import Enum
 class SubseqStatus(str, Enum):
     """Per-subsequence verdict."""
     PASS = 'pass'
+    MATCH = 'match'  # aligned somewhere within the error threshold, but a segment failed
     FAIL = 'fail'
     INCONCLUSIVE = 'inconclusive'
     SKIPPED = 'skipped'  # neither --sample nor --bam -- reconstructed but deliberately not validated
