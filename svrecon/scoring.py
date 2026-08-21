@@ -312,11 +312,11 @@ class CallsetScorer(object):
                 elif outcome != Outcome.SKIPPED:  # miss or inconclusive -> show why
                     line += f'\t{sv_validation.subseq_reasons}'
                 if self.verbose:
-                    line += f'\t{json.dumps(sv_validation.get_summary())}'
+                    line += f'\t{json.dumps(sv_validation.get_summary(), default=str)}'
                 logger.info(line)
 
                 if report_fh is not None:
-                    report_fh.write(json.dumps(sv_validation.get_summary()) + '\n')
+                    report_fh.write(json.dumps(sv_validation.get_summary(), default=str) + '\n')
 
                 total_calls[sv_type] += 1
                 overall_count += 1

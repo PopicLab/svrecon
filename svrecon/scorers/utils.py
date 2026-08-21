@@ -24,6 +24,10 @@ class Cigar:
     TARGET_ONLY_OPS = {DEL, REF_SKIP}                                       # query gaps (deletions)
     ERROR_OPS = {INS, SOFT_CLIP, SEQ_MISMATCH}                              # query bases that aren't clean matches
     _EDLIB_OP_CODES = {'M': MATCH, '=': SEQ_MATCH, 'X': SEQ_MISMATCH, 'I': INS, 'D': DEL}
+    _OP_CHARS = 'MIDNSHP=X'  # indexed by op code, for __repr__
+
+    def __repr__(self) -> str:
+        return ''.join(f'{length}{self._OP_CHARS[op]}' for op, length in self.cigartuples)
 
     def __init__(self, cigartuples: List[Tuple[int, int]]):
         self.cigartuples = cigartuples

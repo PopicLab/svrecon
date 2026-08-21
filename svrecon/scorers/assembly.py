@@ -16,6 +16,10 @@ from svrecon.utils import reverse_complement
 
 logger = logging.getLogger(__name__)
 
+# minimap2 --eqx: report =/X instead of M. Without it a mappy CIGAR is all M, so
+# segment validation cannot see substitutions (see experiments/debug/eqx_comparison.py).
+MM_F_EQX = 0x4000000
+
 # Aligner build params, shared by the assembly aligners and (when
 # --check_reference is on) the reference aligners.
 ALIGN_PARAMS = {
@@ -26,6 +30,7 @@ ALIGN_PARAMS = {
     'min_cnt': 1,
     'min_dp_score': 10,
     'min_chain_score': 1,
+    'extra_flags': MM_F_EQX,
 }
 
 
@@ -103,6 +108,7 @@ class AssemblyScorer(Scorer):
         validating_seq = None
         best_segment_validation_results = []
         best_strand_match = None
+        best_cigar = None
 
         chrom_aligner = self.aligners[query.chrom]  
 
@@ -119,9 +125,9 @@ class AssemblyScorer(Scorer):
             if match_err > self.match_error_threshold:
                 continue
 
+            cigar = Cigar.from_mappy(alignment, len(query))
             segment_validation_results: List[SegmentValidation] = \
-                validate_segments_from_cigar(Cigar.from_mappy(alignment, len(query)),
-                                             query.recon_segments,
+                validate_segments_from_cigar(cigar, query.recon_segments,
                                              error_threshold=self.match_error_threshold)
             if all(s.passed for s in segment_validation_results):
                 passed = True
@@ -129,10 +135,12 @@ class AssemblyScorer(Scorer):
                     lowest_pass_error = match_err
                     best_strand_match = alignment.strand   # record the best passing match's strand
                     best_segment_validation_results = segment_validation_results
+                    best_cigar = cigar
                     matched_seq = chrom_aligner.seq(alignment.ctg, alignment.r_st, alignment.r_en)
                     validating_seq = reverse_complement(matched_seq) if alignment.strand == -1 else matched_seq
             if not passed and match_err <= lowest_error:
                 best_segment_validation_results = segment_validation_results
+                best_cigar = cigar
 
         if passed:
             status, reason = SubseqStatus.PASS, SubseqReason.PASS
@@ -151,4 +159,5 @@ class AssemblyScorer(Scorer):
             validating_seq=validating_seq,
             segment_results=best_segment_validation_results,
             best_strand_match=best_strand_match,
+            cigar=best_cigar,
         )

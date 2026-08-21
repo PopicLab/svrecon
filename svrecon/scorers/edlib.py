@@ -82,9 +82,10 @@ class EdlibScorer(Scorer):
         if edlib_result is None:
             return QueryValidationInput(source=ValidationSource.EDLIB)
 
+        cigar = Cigar.from_edlib(edlib_result.cigar)
         if edlib_result.error <= self.match_error_threshold:
             segment_validation_results = validate_segments_from_cigar(
-                Cigar.from_edlib(edlib_result.cigar), query.recon_segments,
+                cigar, query.recon_segments,
                 error_threshold=self.match_error_threshold)
             if all(s.passed for s in segment_validation_results):
                 passed = True
@@ -108,4 +109,5 @@ class EdlibScorer(Scorer):
             validating_seq=validating_seq,
             segment_results=segment_validation_results,
             best_strand_match=1,  # edlib aligns forward only
+            cigar=cigar,
         )

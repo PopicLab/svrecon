@@ -5,7 +5,7 @@ from typing import List, Optional
 from svrecon.config import Config
 from svrecon.constants import SubseqReason, SubseqStatus, ValidationSource
 from svrecon.reconstruct import Query
-from svrecon.scorers.utils import SegmentValidation
+from svrecon.scorers.utils import Cigar, SegmentValidation
 
 
 @dataclass
@@ -20,6 +20,7 @@ class QueryValidationInput:
     validating_seq: Optional[str] = None
     segment_results: List[SegmentValidation] = field(default_factory=list)
     best_strand_match: Optional[int] = None  # alignmet only
+    cigar: Optional[Cigar] = None  # the decisive alignment's CIGAR, for debugging
 
     def jsonify(self) -> dict:
         return {
@@ -27,6 +28,7 @@ class QueryValidationInput:
             'passed': self.passed,
             'status': self.status,
             'reason': self.reason,
+            'cigar': self.cigar,
             'lowest_pass_error': self.lowest_pass_error,
             'lowest_error': self.lowest_error,
             'strand': self.best_strand_match,

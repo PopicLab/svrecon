@@ -111,20 +111,24 @@ class ReadScorer(Scorer):
         lowest_error = 1.0
         validating_seq = None
         best_validation_results = []  # the adopted read's segments on a pass, else the last read's
+        best_cigar = None
 
         read_results = run_read_edlib(query.sequence, reads, self.read_error_threshold)
         for read_res in read_results:
             lowest_error = min(lowest_error, read_res.error)
+            cigar = Cigar.from_edlib(read_res.cigar)
             segment_validation_results = validate_segments_from_cigar(
-                Cigar.from_edlib(read_res.cigar), query.recon_segments,
+                cigar, query.recon_segments,
                 error_threshold=self.read_error_threshold)
             if all(s.passed for s in segment_validation_results) and read_res.error < lowest_pass_error:
                 passed = True
                 lowest_pass_error = read_res.error
                 validating_seq = read_res.matched_target_sequence
                 best_validation_results = segment_validation_results
+                best_cigar = cigar
             elif not passed:
                 best_validation_results = segment_validation_results
+                best_cigar = cigar
 
         if passed:
             status, reason = SubseqStatus.PASS, SubseqReason.PASS
@@ -136,4 +140,5 @@ class ReadScorer(Scorer):
         return QueryValidationInput(source=ValidationSource.READS, passed=passed,
                                     status=status, reason=reason,
                                     lowest_pass_error=lowest_pass_error, lowest_error=lowest_error,
-                                    validating_seq=validating_seq, segment_results=best_validation_results)
+                                    validating_seq=validating_seq, segment_results=best_validation_results,
+                                    cigar=best_cigar)
