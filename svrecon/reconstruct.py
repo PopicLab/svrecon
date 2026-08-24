@@ -109,7 +109,7 @@ def get_operations_from_records(records: list[VariantRecord]) -> list[_Operation
 
     for record in records:
         start, stop = get_start_stop(record)
-        target = record.info.get('TARGET', stop) # NOTE: is there a +1 here?
+        target = record.info.get('TARGET', stop) # already 0-based: TARGET == start + SVLEN for tandem pastes
         insord = record.info.get('INSORD', -1)
 
         if record.info['OP_TYPE'] == 'CUT' or record.info['SVTYPE'] == 'DEL':
@@ -123,7 +123,7 @@ def get_operations_from_records(records: list[VariantRecord]) -> list[_Operation
         elif record.info['OP_TYPE'] == 'CUT-PASTE' or record.info['SVTYPE'] == 'nrTRA':
             operations.append(_Delete(start, start, stop))
             operations.append(_Insert(target, start, stop, insord=insord))
-        elif record.info['OP_TYPE'] == 'COPYinv-PASTE' or record.info['SVTYPE'] == 'INV_dDUP':
+        elif record.info['OP_TYPE'] == 'COPYinv-PASTE' or record.info['SVTYPE'] in ('INV_dDUP', 'INV_DUP'):
             operations.append(_Insert(target, start, stop, invert=True, insord=insord))
         elif record.info['OP_TYPE'] == 'CUTinv-PASTE' or record.info['SVTYPE'] == 'INV_nrTRA':
             operations.append(_Delete(start, start, stop))
@@ -141,31 +141,34 @@ def create_starting_segments(records: list[VariantRecord], buffer: int, ref: Dic
     min_start = starts_stops[0][0]
     max_stop = max(stop for _, stop in starts_stops)
     chrom_len = len(ref[records[0].chrom])
+    targets = sorted({rec.info['TARGET'] for rec in records if 'TARGET' in rec.info})
+    breakpoints = sorted({pos for start, stop in starts_stops for pos in (start, stop)} | set(targets))
+    clamp = lambda pos: min(max(pos, 0), chrom_len)
 
-    # add ref segments
-    segments = [_Segment(start, stop, start, stop, False) for start, stop in starts_stops]
+    # Preliminary buffers surrounding source span and targets
+    windows = [(clamp(min_start - buffer), clamp(max_stop + buffer))]
+    windows += [(clamp(target - buffer), clamp(target + buffer)) for target in targets]
 
-    # create buffer region surrounding ref segments, clamping at chromosome ends
-    left_start, right_end = max(0, min_start - buffer), min(chrom_len, max_stop + buffer)
-    if left_start < min_start:
-        segments.append(_Segment(left_start, min_start, left_start, min_start, False))
-    if max_stop < right_end:
-        segments.append(_Segment(max_stop, right_end, max_stop, right_end, False))
+    # Merge overlapping buffers
+    merged: List[Tuple[int, int]] = []
+    for window_start, window_stop in sorted(windows):
+        if merged and window_start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], window_stop))
+        else:
+            merged.append((window_start, window_stop))
 
-    targets = {rec.info['TARGET'] for rec in records if 'TARGET' in rec.info}
-    for target in sorted(targets):
-        if target < min_start or target > max_stop: # TODO: allow merging of overlaps in the case of short dispersions
-            t_start, t_end = max(0, target - buffer), min(chrom_len, target + buffer)
-            if t_start < target:
-                segments.append(_Segment(t_start, target, t_start, target, False))
-            if target < t_end:
-                segments.append(_Segment(target, t_end, target, t_end, False))
+    # Cut each merged buffer at the breakpoints inside it
+    segments: List[_Segment] = []
+    for window_start, window_stop in merged:
+        cuts = [window_start]
+        for breakpoint_pos in breakpoints:
+            if window_start < breakpoint_pos < window_stop:
+                cuts.append(breakpoint_pos)
+        cuts.append(window_stop)
 
-    segments.sort(key=lambda seg: seg.alt_start)
-    for prev, seg in zip(segments, segments[1:]):
-        if seg.alt_start < prev.alt_end:
-            raise ValueError(f'starting segment [{seg.alt_start},{seg.alt_end}) overlaps preceding segment '
-                             f'[{prev.alt_start},{prev.alt_end}) by {prev.alt_end - seg.alt_start} bp')
+        for segment_start, segment_stop in zip(cuts, cuts[1:]):
+            segments.append(_Segment(ref_start=segment_start, ref_end=segment_stop,
+                                     alt_start=segment_start, alt_end=segment_stop, invert=False))
 
     return segments
 

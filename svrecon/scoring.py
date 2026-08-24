@@ -242,30 +242,41 @@ class CallsetScorer(object):
             return self.auto_buffer_min
         return max(self.auto_buffer_min, int(self.auto_buffer_fraction * max(segment_lengths)))
 
-    def _assert_sv_records_contiguous_intervals(self, records: List[VariantRecord]) -> None:
+    def _assert_sv_records_positive_lengths(self, records: List[VariantRecord]) -> None:
+        """
+        Asserts every [start, stop) interval is non empty. A negative SVLEN -- the VCF convention
+        many callers use for DEL -- otherwise yields an inverted span that slips past the
+        pairwise overlap check.
+        """
+        for rec in records:
+            start, stop = get_start_stop(rec)
+            if stop <= start:
+                raise ValueError(f'{rec.chrom}: record {rec.id} interval [{start},{stop}) is empty; '
+                                 f'stop must exceed start')
+
+    def _assert_sv_records_non_overlapping(self, records: List[VariantRecord]) -> None:
         """
         Asserts the following conditions:
-        - all [start, stop) intervals are non overlapping and contiguous
+        - all [start, stop) intervals are non overlapping
         - all targets are either outside of [min(starts), max(stops)], or land on an existing endpoint
         """
         # Dedupe identical (start, stop) spans -- multiple records can share one source span
-        # for different downstream operations -- before sorting for contiguity.
+        # for different downstream operations -- before sorting.
         by_interval: Dict[Tuple[int, int], VariantRecord] = {}
         for rec in records:
             by_interval.setdefault(get_start_stop(rec), rec)
         intervals = sorted((start, stop, rec) for (start, stop), rec in by_interval.items())
         for (prev_start, prev_stop, prev_rec), (start, stop, rec) in zip(intervals, intervals[1:]):
-            if start != prev_stop:
-                interval_error_type = 'overlap' if start < prev_stop else 'gap'
-                raise ValueError(f'{rec.chrom}: record {rec.id} [{start},{stop}) is not contiguous with '
+            if start < prev_stop:
+                raise ValueError(f'{rec.chrom}: record {rec.id} [{start},{stop}) overlaps '
                                  f'the preceding record {prev_rec.id} [{prev_start},{prev_stop}) '
-                                 f'({interval_error_type} of {abs(prev_stop - start)} bp)')
+                                 f'by {prev_stop - start} bp')
 
         # find min/max start, stops, check target pos
         starts = {start for start, _, _ in intervals}
         stops = {stop for _, stop, _ in intervals}
-        min_start = intervals[0][0]
-        max_stop = max(stop for _, stop, _ in intervals)
+        min_start = min(starts)
+        max_stop = max(stops)
         for rec in records:
             target = rec.info.get('TARGET')
             if target is None:
@@ -414,7 +425,8 @@ class CallsetScorer(object):
 
         try:
             self._assert_sv_records_non_interchromosomal(records)
-            self._assert_sv_records_contiguous_intervals(records)
+            self._assert_sv_records_positive_lengths(records)
+            self._assert_sv_records_non_overlapping(records)
 
             sv_buffer = self._resolve_buffer(records)
             query_validations: List[QueryValidationResult] = []  # one per reconstructed subsequence of an SV
