@@ -28,6 +28,9 @@ DEFAULTS = {
     'plot_first_n': 0,
     'plot_aspect': 'auto',
     'plot_substitute_bases': False,
+    'plot_title_svid': False,
+    'plot_title_location': False,
+    'plot_axis_length': False,
 
     # Shared parameters for validation
     'buffer': 500,
@@ -78,6 +81,9 @@ VALID_PARAM_FNS = {
     'plot_first_n': lambda arg: isinstance(arg, int),
     'plot_aspect': lambda arg: arg in ('equal', 'auto'),
     'plot_substitute_bases': lambda arg: isinstance(arg, bool),
+    'plot_title_svid': lambda arg: isinstance(arg, bool),
+    'plot_title_location': lambda arg: isinstance(arg, bool),
+    'plot_axis_length': lambda arg: isinstance(arg, bool),
 
     # Shared parameters for validation
     'buffer': lambda arg: arg == 'auto' or isinstance(arg, int),

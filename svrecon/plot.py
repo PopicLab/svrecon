@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 K = 15  # wotplot k-mer size
 TICK_COUNT = 8  # target ticks per axis, regardless of sequence length
+AXIS_FONTSIZE = 18 
 PLOTTABLE_BASES = 'ACGT'  # wotplot rejects N and every other IUPAC code
 UNPLOTTABLE_BASE = re.compile(f'[^{PLOTTABLE_BASES}]')
 
@@ -23,13 +24,16 @@ def plot_dot_plot(s1: str, s2: str, title: str, output_path: str,
                   s1_name: str = 'reconstructed', s2_name: str = 'validating',
                   segment_boundaries: Optional[Sequence[int]] = None,
                   ref_segment_boundaries: Optional[Sequence[int]] = None,
-                  x_offset: int = 0, y_offset: int = 0, aspect: str = 'auto') -> None:
+                  x_offset: int = 0, y_offset: int = 0, aspect: str = 'auto',
+                  axis_length: bool = False) -> None:
     """Renders a k-mer dot plot of s1 (x) vs s2 (y) to output_path, with optional dashed
     boundary lines per axis and x/y tick offsets for genomic coordinates."""
     matrix = wp.DotPlotMatrix(s1.upper(), s2.upper(), K)
 
     num_rows = matrix.mat.shape[0]
     fig, ax = wp.viz_spy(matrix, markersize=1.0, aspect=aspect, title=title, s1_name=s1_name, s2_name=s2_name)     # Ticks scale with sequence length instead of wotplot's default density.
+    ax.set_xlabel(f'{s1_name} ({len(s1):,} nt)' if axis_length else s1_name, fontsize=AXIS_FONTSIZE)
+    ax.set_ylabel(f'{s2_name} ({len(s2):,} nt)' if axis_length else s2_name, fontsize=AXIS_FONTSIZE)
     ax.xaxis.tick_bottom()  # spy() defaults to top-side ticks; move them to match the x-label below
     ax.xaxis.set_major_locator(MaxNLocator(nbins=TICK_COUNT, integer=True))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=TICK_COUNT, integer=True))
@@ -47,15 +51,19 @@ def plot_dot_plot(s1: str, s2: str, title: str, output_path: str,
 
 
 def plot_sv_validation(sv_validation: 'SVValidationResult', output_dir: str, aspect: str = 'auto',
-                       substitute_bases: bool = False) -> None:
+                       substitute_bases: bool = False, title_svid: bool = False,
+                       title_location: bool = False, axis_length: bool = False) -> None:
     """Plots each subsequence of one SV vs the reference and (when found) its matched
     sequence, into an existing output_dir -- the caller owns directory layout and gating."""
     out_dir = Path(output_dir)
     for part, query_validation in enumerate(sv_validation.query_validation_results):
         query = query_validation.query
         alt_boundaries = sorted({pos for start, end in query.recon_segments for pos in (start, end)})
-        locus = f'{query.chrom}:{query.ref_start:,}-{query.ref_end:,}'
-        title = f'{query.svtype} {query.svid}_{part} ({locus})'
+        title = query.svtype
+        if title_svid:
+            title += f' {query.svid}_{part}'
+        if title_location:
+            title += f' ({query.chrom}:{query.ref_start:,}-{query.ref_end:,})'
 
         recon_seq = query.sequence.upper()
         ref_seq = query.ref_sequence.upper()
@@ -82,18 +90,21 @@ def plot_sv_validation(sv_validation: 'SVValidationResult', output_dir: str, asp
                                  for start, end in query.ref_segments for pos in (start, end)})
         plot_dot_plot(recon_seq, ref_seq, title, str(out_dir / f'{part}_reference.png'),
                       s2_name='reference', segment_boundaries=alt_boundaries,
-                      ref_segment_boundaries=ref_boundaries, y_offset=query.ref_start, aspect=aspect)
+                      ref_segment_boundaries=ref_boundaries, y_offset=query.ref_start, aspect=aspect,
+                      axis_length=axis_length)
 
         # reconstructed vs the matched sequence, when a scorer found one (a pass or a match)
         if matched_seq:
             source = query_validation.source.value
             plot_dot_plot(recon_seq, matched_seq, title,
                         str(out_dir / f'{part}_matched_{source}.png'),
-                        s2_name=f'matched ({source})', segment_boundaries=alt_boundaries, aspect=aspect)
+                        s2_name=source, segment_boundaries=alt_boundaries, aspect=aspect,
+                        axis_length=axis_length)
 
             # matched vs the reference: shows what the target actually carries at this locus,
             # which is what distinguishes a wrong call from a wrongly scored one on a match
             plot_dot_plot(matched_seq, ref_seq, title,
                         str(out_dir / f'{part}_matched_{source}_reference.png'),
-                        s1_name=f'matched ({source})', s2_name='reference',
-                        ref_segment_boundaries=ref_boundaries, y_offset=query.ref_start, aspect=aspect)
+                        s1_name=source, s2_name='reference',
+                        ref_segment_boundaries=ref_boundaries, y_offset=query.ref_start, aspect=aspect,
+                        axis_length=axis_length)

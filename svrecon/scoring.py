@@ -186,6 +186,9 @@ class CallsetScorer(object):
         self.plot_out_dir = config.img_dir
         self.plot_aspect = config.plot_aspect
         self.plot_substitute_bases = config.plot_substitute_bases
+        self.plot_title_svid = config.plot_title_svid
+        self.plot_title_location = config.plot_title_location
+        self.plot_axis_length = config.plot_axis_length
 
         # Parse and group records by svid
         self.variants = group_variants_by_id(config.calls, config.gap_file)
@@ -332,7 +335,10 @@ class CallsetScorer(object):
                         sv_plot_dir = Path(self.plot_out_dir) / outcome_dir / sv_type / svid
                         sv_plot_dir.mkdir(parents=True, exist_ok=True)
                         plot_sv_validation(sv_validation, str(sv_plot_dir), aspect=self.plot_aspect,
-                                           substitute_bases=self.plot_substitute_bases)
+                                           substitute_bases=self.plot_substitute_bases,
+                                           title_svid=self.plot_title_svid,
+                                           title_location=self.plot_title_location,
+                                           axis_length=self.plot_axis_length)
 
                 if outcome == Outcome.HIT:
                     correct_calls[sv_type] += 1
