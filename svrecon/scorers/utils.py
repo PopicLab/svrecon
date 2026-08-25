@@ -56,6 +56,11 @@ class Cigar:
         """Target bases the query skips over (deletions)."""
         return self.deletion_prefix[-1]
 
+    @property
+    def error_rate(self) -> float:
+        """Bulk error over the whole query: (error bases + deletions) / query length."""
+        return (self.total_error_bases + self.total_deleted_bases) / self.query_length
+
     def _errors_anchored(self, lo: int, hi: int) -> int:
         """Error bases among query bases [lo, hi), the end exclusive -- an error op occupies
         query positions, so only the bases inside the range count."""
@@ -125,23 +130,6 @@ class Cigar:
         if read.is_reverse:
             tuples.reverse()
         return cls(tuples)
-
-
-@dataclass
-class SegmentValidation:
-    error: float
-    passed: bool
-
-    def jsonify(self) -> dict:
-        return {'error': self.error, 'passed': self.passed}
-
-
-def validate_segments_from_cigar(cigar: Cigar, segments: List[Tuple[int, int]],
-                                 error_threshold: float = 0.1) -> List[SegmentValidation]:
-    """Scores each segment [start, end) against the same error threshold; one result per segment."""
-    rates = [cigar.get_window_error_rate(start, end) for start, end in segments]
-    return [SegmentValidation(error=float(f'{rate:.4g}'), passed=rate <= error_threshold)
-            for rate in rates]
 
 
 @dataclass

@@ -10,8 +10,8 @@ import pysam
 
 from svrecon.constants import SubseqReason, SubseqStatus, ValidationSource
 from svrecon.reconstruct import Query
-from svrecon.scorers.base import Scorer, QueryValidation
-from svrecon.scorers.utils import Cigar, SegmentValidation, validate_segments_from_cigar
+from svrecon.scorers.base import CigarValidationResult, Scorer, QueryValidation
+from svrecon.scorers.utils import Cigar
 from svrecon.utils import reverse_complement
 
 logger = logging.getLogger(__name__)
@@ -87,19 +87,6 @@ def build_chrom_aligners(fasta_path: str, chroms: Iterable[str], cache_dir: Path
     return {chrom: get_chrom_aligner(fasta_path, chrom, str(fa_cache), ALIGN_PARAMS, threads=32)
             for chrom in chroms}
 
-
-# TODO: rename to something like get normalized score, change query param from str to query object
-def check_match(alignment, query):
-    """Calculate the independent error rate of a mappy alignment with the query sequence"""
-    aligned_query_segment_length = alignment.q_en - alignment.q_st
-    len_unaligned = len(query) - aligned_query_segment_length
-
-    nm_total = alignment.NM + len_unaligned
-    len_norm = alignment.blen + len_unaligned # lengh of reference
-    # partition into two checks? size, seq similarity? presence of any large gaps/ insertions, any <50 say unknown, any >50 fail
-    return nm_total / len_norm if len_norm > 0 else 1.0
-
-
 class AssemblyScorer(Scorer):
     """Validates a query against a FASTA (sample assembly, or the reference for the
     ambiguity check) via per-chromosome mappy alignments."""
@@ -114,12 +101,12 @@ class AssemblyScorer(Scorer):
         lowest_pass_error = 1.0
         lowest_error = 1.0
         passed = False
-        best_segment_validation_results = []
+        best_cigar_results = []
         best_strand_match = None
         best_cigar = None
         best_matched_seq = None
 
-        chrom_aligner = self.aligners[query.chrom]  
+        chrom_aligner = self.aligners[query.chrom]
 
         # gather and filter candidate alignments
         alignments: List[mappy.Alignment] = list(chrom_aligner.map(query.sequence)) # .map returns possible alignments, esp repetitive alignments?
@@ -127,37 +114,33 @@ class AssemblyScorer(Scorer):
         if self.forward_match_only:
             alignments = [a for a in alignments if a.strand == 1]
 
-        # pick best candidate alignment based on overall and segment normalized match error # TODO: ensure mapq 60. something thats repetitive ins unknown
+        # pick best candidate alignment by bulk error; every configured check must pass # TODO: ensure mapq 60. something thats repetitive ins unknown
         for alignment in alignments:
-            match_err = check_match(alignment, query.sequence)
-            lowest_error = min(lowest_error, match_err)
-            whole_seq_match = match_err <= self.match_error_threshold
-
             cigar = Cigar.from_mappy(alignment, len(query))
-            segment_validation_results: List[SegmentValidation] = \
-                validate_segments_from_cigar(cigar, query.recon_segments,
-                                             error_threshold=self.match_error_threshold)
+            cigar_results: List[CigarValidationResult] = self.score_cigar(cigar, query)
+            match_err = cigar.error_rate
+            lowest_error = min(lowest_error, match_err)
 
             matched_seq = chrom_aligner.seq(alignment.ctg, alignment.r_st, alignment.r_en)
             if alignment.strand == -1:
                 matched_seq = reverse_complement(matched_seq)  # orient to the forward query
-            if whole_seq_match and all(s.passed for s in segment_validation_results):
+            if all(r.passed for r in cigar_results):
                 passed = True
                 if match_err < lowest_pass_error:
                     lowest_pass_error = match_err
-                    best_strand_match = alignment.strand  
-                    best_segment_validation_results = segment_validation_results
+                    best_strand_match = alignment.strand
+                    best_cigar_results = cigar_results
                     best_cigar = cigar
                     best_matched_seq = matched_seq
             if not passed and match_err <= lowest_error:
-                best_segment_validation_results = segment_validation_results
+                best_cigar_results = cigar_results
                 best_cigar = cigar
-                best_matched_seq = matched_seq  
+                best_matched_seq = matched_seq
 
         if passed:
             status, reason = SubseqStatus.PASS, SubseqReason.PASS
-        elif best_segment_validation_results:  # aligned to the sample, but a segment failed
-            status, reason = SubseqStatus.MATCH, SubseqReason.SEGMENT_FAILED
+        elif best_cigar_results:  # aligned to the sample, but a check failed
+            status, reason = SubseqStatus.MATCH, SubseqReason.CIGAR_FAILED
         else:  # nothing aligned at all
             status, reason = SubseqStatus.FAIL, SubseqReason.OTHER
 
@@ -169,7 +152,7 @@ class AssemblyScorer(Scorer):
             lowest_pass_error=lowest_pass_error,
             lowest_error=lowest_error,
             best_matched_seq=best_matched_seq,
-            segment_results=best_segment_validation_results,
+            cigar_results=best_cigar_results,
             best_strand_match=best_strand_match,
             cigar=best_cigar,
         )

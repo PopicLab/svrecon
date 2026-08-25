@@ -1,12 +1,4 @@
-"""Alt-allele reconstruction: transform the reference window into the SV's alt allele and record,
-for each piece of the result, a ``(start, end)`` segment (in alt-allele coordinates) for scoring's
-``validate_segments_from_cigar`` to check locally.
-
-Segments cover the whole allele: inserted and inverted pieces, and the untouched reference runs
-between them (including the left/right context buffer). A deletion simply removes its segment,
-joining its neighbors directly. Segments are independent, non-overlapping ranges; an overlap
-(e.g. from imprecise caller coordinates) raises ValueError rather than being silently resolved.
-"""
+"""Sequence reconstruction"""
 import bisect
 import logging
 from dataclasses import dataclass
