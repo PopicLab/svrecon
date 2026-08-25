@@ -93,16 +93,15 @@ def plot_sv_validation(sv_validation: 'SVValidationResult', output_dir: str, asp
                       ref_segment_boundaries=ref_boundaries, y_offset=query.ref_start, aspect=aspect,
                       axis_length=axis_length)
 
-        # reconstructed vs the matched sequence, when a scorer found one (a pass or a match)
         if matched_seq:
             source = query_validation.source.value
+            # reconstructed vs the matched sequence, when a scorer found one (a pass or a match)
             plot_dot_plot(recon_seq, matched_seq, title,
                         str(out_dir / f'{part}_matched_{source}.png'),
                         s2_name=source, segment_boundaries=alt_boundaries, aspect=aspect,
                         axis_length=axis_length)
 
-            # matched vs the reference: shows what the target actually carries at this locus,
-            # which is what distinguishes a wrong call from a wrongly scored one on a match
+            # matched vs the reference:
             plot_dot_plot(matched_seq, ref_seq, title,
                         str(out_dir / f'{part}_matched_{source}_reference.png'),
                         s1_name=source, s2_name='reference',

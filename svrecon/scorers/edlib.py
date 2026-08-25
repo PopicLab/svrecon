@@ -1,7 +1,7 @@
 """Edlib-based validation: the expanding-window fallback search and the EdlibScorer."""
 from typing import Dict, List, Union
 
-from svrecon.constants import SubseqReason, SubseqStatus, ValidationSource
+from svrecon.constants import QueryValidationReason, QueryValidationStatus, ValidationSource
 from svrecon.reconstruct import Query
 from svrecon.scorers.base import CigarValidationResult, Scorer, QueryValidation
 from svrecon.scorers.utils import Cigar, EdlibScoreResult, edlib_score
@@ -82,9 +82,9 @@ class EdlibScorer(Scorer):
         passed = all(r.passed for r in cigar_results)
 
         if passed:  # a window aligned and every check passed
-            status, reason = SubseqStatus.PASS, SubseqReason.PASS
+            status, reason = QueryValidationStatus.PASS, QueryValidationReason.PASS
         else:  # the best window aligned, but a check failed
-            status, reason = SubseqStatus.MATCH, SubseqReason.CIGAR_FAILED
+            status, reason = QueryValidationStatus.FAIL, QueryValidationReason.CIGAR_FAILED
 
         return QueryValidation(
             source=ValidationSource.EDLIB,

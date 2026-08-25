@@ -30,7 +30,7 @@ def main():
                              'default unbounded (recommended for per-contig/unscaffolded assemblies '
                              'whose hit coordinates are contig-local, not genomic)',
                         type=float, default=None)
-    parser.add_argument('--buffer', help="Subsequence context buffer, in bp (default 500), or 'auto' to size "
+    parser.add_argument('--buffer', help="Query context buffer, in bp (default 500), or 'auto' to size "
                         "it per-SV to max(50, 10%% of that SV's own longest segment).", dest='buffer', default=None)
     parser.add_argument('--gap-file', help='Tab-delimited file containing regions to omit (e.g., centromere and telomere)',
                         default=None)
@@ -47,22 +47,22 @@ def main():
                         help='Max error rate for an assembly/edlib/reference alignment to validate a '
                              'reconstruction (default 0.1).')
     parser.add_argument('--n-threads', type=int, default=None,
-                        help='Worker threads for scoring SVs (default 40).')
+                        help='Worker threads for scoring SVs (default: half the CPU count).')
     parser.add_argument('--verbose', action='store_true', default=None,
                         help='Log more detail per SV.')
     parser.add_argument('--max-reads-per-site', type=int, default=None,
                         help='Cap on candidate reads gathered per SV locus (read modes; default 1000); '
                              'bounds work on deep read pileups.')
     parser.add_argument('--report', choices=['none', 'json'], default=None,
-                        help="Write a per-SV evaluation sidecar. 'json' emits "
-                             "<logbasename>.eval.jsonl next to the log (one JSON record per SV: "
-                             "svid, outcome, tier, and per-query status/reason/source/error/"
-                             "segments). Default 'none' (log and score table are unchanged).")
+                        help="Write a per-SV evaluation sidecar. 'json' emits svrecon.report.jsonl "
+                             "next to the log (one JSON record per SV: svid, outcome, tier, and "
+                             "each query's status/reason/source/errors/checks). Default 'none' "
+                             "(log and score table are unchanged).")
     parser.add_argument('--check-reference', action='store_true', default=None,
-                        help="Also validate each passing allele against the reference (bulk + segments); "
-                             "if it also validates there (the match isn't specific to the SV -- common "
-                             "in repetitive / segmental-dup regions), mark the call inconclusive "
-                             "(reason 'reference_match'). Off by default; builds a reference aligner set.")
+                        help="Also validate each passing allele against the reference; if it validates "
+                             "there too (the alignment isn't specific to the SV -- common in repetitive "
+                             "/ segmental-dup regions), mark the call inconclusive "
+                             "(reference_ambiguous). Off by default; builds a reference aligner set.")
     parser.add_argument('--plot-first-n', type=int, default=None,
                         help="Write a dot-plot PNG (reconstructed subsequence vs. the validating real-data "
                              "sequence) for the first N SV calls of each SV type, into <output_dir>/img/ "
@@ -89,19 +89,18 @@ def main():
     config = Config(args)
     scorer = CallsetScorer(config)
 
-    precision, correct_calls, total_calls, inconclusive_calls, skipped_calls, assembly_hits, read_hits = scorer.score_all()
+    precision, correct_calls, total_calls, inconclusive_calls, assembly_hits, read_hits = scorer.score_all()
 
     df = pd.DataFrame({
         'correct_calls': correct_calls,
         'total_calls': total_calls,
         'inconclusive': inconclusive_calls,
-        'skipped': skipped_calls,
         'precision': precision,
         'assembly_hits': assembly_hits,
         'read_hits': read_hits,
     })
     # count columns: missing SV-type keys (e.g. a type with 0 hits) -> 0, not NaN
-    for col in ('correct_calls', 'total_calls', 'inconclusive', 'skipped', 'assembly_hits', 'read_hits'):
+    for col in ('correct_calls', 'total_calls', 'inconclusive', 'assembly_hits', 'read_hits'):
         df[col] = df[col].fillna(0).astype(int)
     df.sort_values('total_calls', ascending=False, inplace=True)
 

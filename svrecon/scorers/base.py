@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from svrecon.config import Config
-from svrecon.constants import SubseqReason, SubseqStatus, ValidationSource
+from svrecon.constants import QueryValidationReason, QueryValidationStatus, ValidationSource
 from svrecon.reconstruct import Query
 from svrecon.scorers.utils import Cigar
 
@@ -78,19 +78,35 @@ class QueryValidation:
     """One scorer's self-classified result."""
     source: ValidationSource
     passed: bool = False
-    status: SubseqStatus = SubseqStatus.FAIL
-    reason: SubseqReason = SubseqReason.OTHER
+    status: QueryValidationStatus = QueryValidationStatus.FAIL
+    reason: QueryValidationReason = QueryValidationReason.OTHER
     lowest_pass_error: float = 1.0
     lowest_error: float = 1.0
-    best_matched_seq: Optional[str] = None  # target sequence of the adopted alignment, kept on MATCH too
+    best_matched_seq: Optional[str] = None  # target sequence of the adopted alignment, kept on an aligned fail too
     cigar_results: List[CigarValidationResult] = field(default_factory=list)
     best_strand_match: Optional[int] = None  # alignmet only
     cigar: Optional[Cigar] = None  # the decisive alignment's CIGAR, for debugging
 
+    @property
+    def aligned(self) -> bool:
+        """Whether an alignment was found -- a CIGAR failure is one a check then rejected."""
+        return self.passed or self.reason is QueryValidationReason.CIGAR_FAILED
+
+    @property
+    def rank(self) -> int:
+        """How much this result settles the query, least to most. The FAIL/OTHER default a scorer
+        that never ran reports is lowest; an aligned fail contradicts, so it beats inconclusive."""
+        if self.status is QueryValidationStatus.PASS:
+            return 3
+        if self.status is QueryValidationStatus.FAIL and self.aligned:
+            return 2
+        if self.status is QueryValidationStatus.INCONCLUSIVE:
+            return 1
+        return 0
+
     def __gt__(self, other: 'QueryValidation') -> bool:
-        """Ranks by status, then by lower error"""
-        return ((_STATUS_RANK[self.status], -self.lowest_error)
-                > (_STATUS_RANK[other.status], -other.lowest_error))
+        """Ranks by how much the result settles the query, then by lower error"""
+        return (self.rank, -self.lowest_error) > (other.rank, -other.lowest_error)
 
     def jsonify(self) -> dict:
         return {
@@ -98,23 +114,13 @@ class QueryValidation:
             'passed': self.passed,
             'status': self.status,
             'reason': self.reason,
+            'aligned': self.aligned,
             'cigar': self.cigar,
             'lowest_pass_error': self.lowest_pass_error,
             'lowest_error': self.lowest_error,
             'strand': self.best_strand_match,
             'checks': [r.jsonify() for r in self.cigar_results],
         }
-
-
-# How much a status settles a query, least to most. A scorer that never ran reports the
-# FAIL default, so it must rank below any scorer that actually looked at the sample.
-_STATUS_RANK = {
-    SubseqStatus.SKIPPED: 0,
-    SubseqStatus.FAIL: 1,
-    SubseqStatus.INCONCLUSIVE: 2,
-    SubseqStatus.MATCH: 3,
-    SubseqStatus.PASS: 4,
-}
 
 class Scorer:
     """Base for per-query validators; subclasses implement score_query(query) -> QueryValidation."""

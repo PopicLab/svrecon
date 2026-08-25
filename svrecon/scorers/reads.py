@@ -5,7 +5,7 @@ import threading
 from typing import List
 import pysam
 
-from svrecon.constants import SubseqReason, SubseqStatus, ValidationSource
+from svrecon.constants import QueryValidationReason, QueryValidationStatus, ValidationSource
 from svrecon.reconstruct import Query
 from svrecon.scorers.base import CigarValidationResult, Scorer, QueryValidation
 from svrecon.scorers.utils import Cigar, EdlibScoreResult, edlib_score
@@ -103,8 +103,8 @@ class ReadScorer(Scorer):
         reads = [r for r in reads if len(r) >= len(query)]
         if not reads:  # no read long enough to span the allele -> untestable, not contradicted
             return QueryValidation(source=ValidationSource.READS,
-                                        status=SubseqStatus.INCONCLUSIVE,
-                                        reason=SubseqReason.INCONCLUSIVE)
+                                        status=QueryValidationStatus.INCONCLUSIVE,
+                                        reason=QueryValidationReason.OTHER)
 
         passed = False
         lowest_pass_error = 1.0
@@ -127,14 +127,14 @@ class ReadScorer(Scorer):
             elif not passed and read_res.error <= lowest_error:
                 best_cigar_results = cigar_results
                 best_cigar = cigar
-                best_matched_seq = read_res.matched_target_sequence  # kept so a MATCH can still be inspected
+                best_matched_seq = read_res.matched_target_sequence  # kept so an aligned fail can still be inspected
 
         if passed:
-            status, reason = SubseqStatus.PASS, SubseqReason.PASS
+            status, reason = QueryValidationStatus.PASS, QueryValidationReason.PASS
         elif read_results:  # a read aligned, but none passed every check
-            status, reason = SubseqStatus.MATCH, SubseqReason.CIGAR_FAILED
+            status, reason = QueryValidationStatus.FAIL, QueryValidationReason.CIGAR_FAILED
         else:  # no read within the error budget
-            status, reason = SubseqStatus.FAIL, SubseqReason.OVER_ERROR_THRESHOLD
+            status, reason = QueryValidationStatus.FAIL, QueryValidationReason.OTHER
 
         return QueryValidation(source=ValidationSource.READS, passed=passed,
                                     status=status, reason=reason,

@@ -8,7 +8,7 @@ from typing import Dict, Iterable, List
 import mappy
 import pysam
 
-from svrecon.constants import SubseqReason, SubseqStatus, ValidationSource
+from svrecon.constants import QueryValidationReason, QueryValidationStatus, ValidationSource
 from svrecon.reconstruct import Query
 from svrecon.scorers.base import CigarValidationResult, Scorer, QueryValidation
 from svrecon.scorers.utils import Cigar
@@ -138,11 +138,11 @@ class AssemblyScorer(Scorer):
                 best_matched_seq = matched_seq
 
         if passed:
-            status, reason = SubseqStatus.PASS, SubseqReason.PASS
+            status, reason = QueryValidationStatus.PASS, QueryValidationReason.PASS
         elif best_cigar_results:  # aligned to the sample, but a check failed
-            status, reason = SubseqStatus.MATCH, SubseqReason.CIGAR_FAILED
+            status, reason = QueryValidationStatus.FAIL, QueryValidationReason.CIGAR_FAILED
         else:  # nothing aligned at all
-            status, reason = SubseqStatus.FAIL, SubseqReason.OTHER
+            status, reason = QueryValidationStatus.FAIL, QueryValidationReason.OTHER
 
         return QueryValidation(
             source=ValidationSource.ASSEMBLY,

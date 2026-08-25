@@ -2,36 +2,29 @@
 from enum import Enum
 
 
-class SubseqStatus(str, Enum):
-    """Per-subsequence verdict."""
+class QueryValidationStatus(str, Enum):
+    """Per-query verdict."""
     PASS = 'pass'
-    MATCH = 'match'  # aligned somewhere within the error threshold, but a segment failed
     FAIL = 'fail'
     INCONCLUSIVE = 'inconclusive'
-    SKIPPED = 'skipped'  # neither --sample nor --bam -- reconstructed but deliberately not validated
 
 
-class SubseqReason(str, Enum):
-    """Why a subsequence received its SubseqStatus."""
+class QueryValidationReason(str, Enum):
+    """Why a query received its QueryValidationStatus."""
     PASS = 'pass'
-    REFERENCE_MATCH = 'reference_match'
     CIGAR_FAILED = 'cigar_failed'
-    OVER_ERROR_THRESHOLD = 'over_error_threshold'
-    INCONCLUSIVE = 'inconclusive'
-    SKIPPED = 'skipped'  # neither --sample nor --bam
     OTHER = 'other'
 
 
 class Outcome(str, Enum):
-    """SV-level roll-up outcome across all of its reconstructed subsequences."""
+    """SV-level roll-up outcome across all of its reconstructed queries."""
     HIT = 'hit'
     MISS = 'miss'
-    INCONCLUSIVE = 'inconclusive'
-    SKIPPED = 'skipped'  # neither --sample nor --bam -- reconstructed but deliberately not validated
+    INCONCLUSIVE = 'inconclusive'  # untestable: no scorer reached a verdict, or none was configured
 
 
 class ValidationSource(str, Enum):
-    """Which tier ultimately validated (or was attempted for) a subsequence."""
+    """Which tier ultimately validated (or was attempted for) a query."""
     READS = 'reads'
     ASSEMBLY = 'assembly'
     EDLIB = 'edlib'

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class QueryValidationResult:
-    """Every scorer's result for one reconstructed subsequence, in the order they ran.
+    """Every scorer's result for one reconstructed query, in the order they ran.
     Scoring stops at the first pass; on a failure every scorer runs, so the decisive
     result is the highest-ranked one, not the last."""
     query: Query
@@ -45,6 +45,8 @@ class QueryValidationResult:
             'ref_start': self.query.ref_start,
             'status': self.status,
             'reason': self.reason,
+            'aligned': self.aligned,
+            'reference_ambiguous': bool(self.reference_matches),
             'source': self.source,
             'strand': self.decisive_strand,
             'validations': [v.jsonify() for v in self.validations],
@@ -65,16 +67,21 @@ class QueryValidationResult:
         return [v for v in self.ambiguity_validations if v.passed]
 
     @property
-    def status(self) -> SubseqStatus:
-        if self.reference_matches:
-            return SubseqStatus.INCONCLUSIVE
-        return self.decisive.status if self.decisive else SubseqStatus.SKIPPED
+    def status(self) -> QueryValidationStatus:
+        # No decisive result means no scorer was configured -- untestable, like a reference match.
+        if self.reference_matches or not self.decisive:
+            return QueryValidationStatus.INCONCLUSIVE
+        return self.decisive.status
 
     @property
-    def reason(self) -> SubseqReason:
-        if self.reference_matches:
-            return SubseqReason.REFERENCE_MATCH
-        return self.decisive.reason if self.decisive else SubseqReason.SKIPPED
+    def reason(self) -> QueryValidationReason:
+        if self.reference_matches or not self.decisive:
+            return QueryValidationReason.OTHER
+        return self.decisive.reason
+
+    @property
+    def aligned(self) -> bool:
+        return bool(self.decisive and self.decisive.aligned)
 
     @property
     def source(self) -> Optional[ValidationSource]:
@@ -100,7 +107,7 @@ class QueryValidationResult:
 
 
 class SVValidationResult:
-    """SV-level roll-up of one call's per-subsequence validations."""
+    """SV-level roll-up of one call's per-query validations."""
 
     def __init__(self, svid: str, svtype: str, query_validations_results: List[QueryValidationResult]):
         self.svid = svid
@@ -108,27 +115,23 @@ class SVValidationResult:
         self.query_validation_results = query_validations_results
 
         # SV-level roll-up:
-        #   skipped      -> no validation scorers configured: reconstructed but never
-        #                   validated at all -- distinct from "inconclusive" (which
-        #                   means validation was attempted but couldn't reach a verdict)
-        #   hit          -> every subsequence passed
-        #   miss         -> at least one subsequence was contradicted (spanning
-        #                   reads / assembly aligned but didn't match)
-        #   inconclusive -> no contradiction, but at least one subsequence could
-        #                   not be tested (reads mode: no read spans the full allele)
-        subseq_status = [qvr.status for qvr in query_validations_results]
-        if len(subseq_status) > 0 and all(s == SubseqStatus.SKIPPED for s in subseq_status):
-            self.outcome = Outcome.SKIPPED
-        elif len(subseq_status) > 0 and all(s == SubseqStatus.PASS for s in subseq_status):
+        #   hit          -> every query passed
+        #   miss         -> at least one query was contradicted (spanning reads /
+        #                   assembly aligned but didn't match, or nothing aligned)
+        #   inconclusive -> no contradiction, but at least one query could not be
+        #                   tested: no read spans the full allele, the allele also
+        #                   matches the reference, or no scorer was configured at all
+        query_statuses = [qvr.status for qvr in query_validations_results]
+        if query_statuses and all(s is QueryValidationStatus.PASS for s in query_statuses):
             self.outcome = Outcome.HIT
-        elif any(s in (SubseqStatus.FAIL, SubseqStatus.MATCH) for s in subseq_status):
-            self.outcome = Outcome.MISS  # MATCH aligned but a segment failed: still contradicted
-        elif SubseqStatus.INCONCLUSIVE in subseq_status:
+        elif any(s is QueryValidationStatus.FAIL for s in query_statuses):
+            self.outcome = Outcome.MISS
+        elif QueryValidationStatus.INCONCLUSIVE in query_statuses:
             self.outcome = Outcome.INCONCLUSIVE
         else:
             self.outcome = Outcome.MISS
 
-        # Per-SV provenance: the highest tier any passing subsequence needed.
+        # Per-SV provenance: the highest tier any passing query needed.
         # 'reads' implies the SV would have been an assembly-miss without reads.
         self.validation_source = None
         if self.outcome == Outcome.HIT:
@@ -166,7 +169,7 @@ class SVValidationResult:
 
     @property
     def chroms(self) -> List[str]:
-        """Chromosome of each reconstructed subsequence (an SV can span multiple)."""
+        """Chromosome of each reconstructed query (an SV can span multiple)."""
         return [qv.query.chrom for qv in self.query_validation_results]
 
     @property
@@ -174,8 +177,9 @@ class SVValidationResult:
         return [qv.lowest_pass_error for qv in self.query_validation_results]
 
     @property
-    def subseq_reasons(self) -> List[str]:
-        return [qv.reason.value for qv in self.query_validation_results]
+    def query_diagnostics(self) -> List[str]:
+        """Per-query '<status>:<reason>' tags for the non-hit log lines."""
+        return [f'{qv.status.value}:{qv.reason.value}' for qv in self.query_validation_results]
 
 
 class CallsetScorer(object):
@@ -298,15 +302,13 @@ class CallsetScorer(object):
     def score_all(self):
         total_calls = Counter()
         correct_calls = Counter()
-        inconclusive_calls = Counter()  # reads mode: no read spans the full resulting allele
-        skipped_calls = Counter()   # neither --sample nor --bam: reconstructed but never validated
+        inconclusive_calls = Counter()  # untestable: no spanning read, reference-ambiguous, or no scorer
         assembly_hits = Counter()   # hits validated by the assembly (mappy or edlib)
         read_hits = Counter()       # hits validated only by reads
         source_counts = Counter()   # overall hit provenance: assembly | edlib | reads
         overall_count = 0
         overall_correct = 0
         overall_inconclusive = 0
-        overall_skipped = 0
         edlib_rescues = 0
         precision = {}
 
@@ -326,8 +328,8 @@ class CallsetScorer(object):
                 if outcome == Outcome.HIT:
                     # Tier 1 (read) vs Tier 2 (assembly), plus the detailed source.
                     line += f'\t{sv_validation.tier}\t{sv_validation.validation_source}'
-                elif outcome != Outcome.SKIPPED:  # miss or inconclusive -> show why
-                    line += f'\t{sv_validation.subseq_reasons}'
+                else:  # miss or inconclusive -> show why
+                    line += f'\t{sv_validation.query_diagnostics}'
                 if self.verbose:
                     line += f'\t{json.dumps(sv_validation.get_summary(), default=str)}'
                 logger.info(line)
@@ -365,23 +367,18 @@ class CallsetScorer(object):
                 elif outcome == Outcome.INCONCLUSIVE:
                     inconclusive_calls[sv_type] += 1
                     overall_inconclusive += 1
-                elif outcome == Outcome.SKIPPED:
-                    skipped_calls[sv_type] += 1
-                    overall_skipped += 1
-                # else: miss -> counts toward total but not correct/inconclusive/skipped
+                # else: miss -> counts toward total but not correct/inconclusive
 
-                # precision is over CONCLUSIVE calls only (hits + misses; inconclusive and
-                # skipped -- never validated at all -- are excluded from the denominator)
-                conclusive = overall_count - overall_inconclusive - overall_skipped
+                # precision is over CONCLUSIVE calls only (hits + misses; inconclusive calls,
+                # which no scorer could test, are excluded from the denominator)
+                conclusive = overall_count - overall_inconclusive
                 if conclusive:
                     desc = (f'Scoring SVs. Precision {overall_correct / conclusive:.2f} '
                            f'({overall_correct}/{conclusive}); inconclusive {overall_inconclusive}')
-                    if overall_skipped:
-                        desc += f'; skipped {overall_skipped}'
                 else:
-                    desc = f'Scoring SVs. {overall_skipped} skipped so far, 0 conclusive'
+                    desc = f'Scoring SVs. {overall_inconclusive} inconclusive so far, 0 conclusive'
                 pbar.set_description(desc)
-                denom = total_calls[sv_type] - inconclusive_calls[sv_type] - skipped_calls[sv_type]
+                denom = total_calls[sv_type] - inconclusive_calls[sv_type]
                 precision[sv_type] = correct_calls[sv_type] / denom if denom else 0
 
         if report_fh is not None:
@@ -389,12 +386,12 @@ class CallsetScorer(object):
             logger.info(f'Wrote per-SV eval report: {self.report_path}')
 
         logger.info(f'Total SVs rescued by edlib fallback: {edlib_rescues}')
-        overall_miss = overall_count - overall_correct - overall_inconclusive - overall_skipped
+        overall_miss = overall_count - overall_correct - overall_inconclusive
         logger.info(
             f"Outcomes: hit={overall_correct} miss={overall_miss} inconclusive={overall_inconclusive} "
-            f"skipped={overall_skipped} "
-            f"(inconclusive = no read spans the full resulting allele; skipped = neither --sample "
-            f"nor --bam given; both excluded from precision)")
+            f"(inconclusive = no scorer could test the call -- no read spans the full resulting "
+            f"allele, the allele also matches the reference, or neither --sample nor --bam was "
+            f"given; excluded from precision)")
         logger.info(
             f"Hits by validation source: assembly={source_counts['assembly']} "
             f"edlib={source_counts['edlib']} reads={source_counts['reads']}")
@@ -405,20 +402,18 @@ class CallsetScorer(object):
 
         total_all = sum(total_calls.values())
         inc_all = sum(inconclusive_calls.values())
-        skip_all = sum(skipped_calls.values())
-        conclusive_all = total_all - inc_all - skip_all
+        conclusive_all = total_all - inc_all
         precision['ALL'] = sum(correct_calls.values()) / conclusive_all if conclusive_all else 0
         correct_calls['ALL'] = sum(correct_calls.values())
         total_calls['ALL'] = total_all
         inconclusive_calls['ALL'] = inc_all
-        skipped_calls['ALL'] = skip_all
         assembly_hits['ALL'] = sum(assembly_hits.values())
         read_hits['ALL'] = sum(read_hits.values())
 
-        return precision, correct_calls, total_calls, inconclusive_calls, skipped_calls, assembly_hits, read_hits
+        return precision, correct_calls, total_calls, inconclusive_calls, assembly_hits, read_hits
 
     def score_sv(self, records: List[VariantRecord]) -> SVValidationResult:
-        """Score one SV: reconstruct its alt allele(s), validate each subsequence with the
+        """Score one SV: reconstruct its alt allele(s), validate each query with the
         configured scorers, and return the SVValidation."""
         svid = records[0].info['SVID']
         sv_type = records[0].info['SVTYPE']
@@ -429,7 +424,7 @@ class CallsetScorer(object):
             self._assert_sv_records_non_overlapping(records)
 
             sv_buffer = self._resolve_buffer(records)
-            query_validations: List[QueryValidationResult] = []  # one per reconstructed subsequence of an SV
+            query_validations: List[QueryValidationResult] = []  # one per reconstructed query of an SV
 
             for query in simulate_subsequences(records, sv_buffer, self.chrom_to_ref):
                 query_validation = QueryValidationResult(query=query)
