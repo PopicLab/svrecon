@@ -1,6 +1,6 @@
 # svrecon
 
-**svrecon** — structural-variant reconstruction scoring. Validate called SVs by rebuilding each variant's alt allele and checking whether real sequence supports it: long reads (`--bam`), a sample assembly (`--sample`), or both.
+**svrecon** — an SV callset validation framework based on reconstruction scoring. svrecon validates a callset (`--calls`) by reconstructing each alt sequence, then scoring it against provided long reads (`--bam`), a sample assembly (`--sample`), or both.
 
 ## Installation
 
@@ -12,12 +12,27 @@ pip install -e .                                    # editable/dev install
 pip install git+https://github.com/PopicLab/svrecon.git
 ```
 
-This puts an `svrecon` command on your `PATH` (equivalently `python -m svrecon`). The C-extension dependencies (`mappy`, `pysam`, `edlib`) ship prebuilt wheels for common Linux/Python combinations; on an unusual platform they build from source and need a C toolchain.
+This puts an `svrecon` command on your `PATH` (equivalently `python -m svrecon`).
+
+## Tests
+
+A small suite over 20 SVs that insilicoSV simulates in a 200 kb synthetic genome — two instances of 10 classes each (20 total), each checked in both directions: the rebuilt allele must validate, the
+unrearranged reference must not.
+
+```bash
+pytest
+```
+
+The fixture in `tests/data/` is committed. To regenerate it (needs `insilicosv` on `PATH`):
+
+```bash
+tests/generators/generate_data.sh
+```
 
 ## Running
 
 Three things are always required: `--reference`, `--calls`, and at least one validation source.
-**The validation mode is inferred from which sources you give** — there is no mode flag.
+**The validation mode is inferred from which sources you give**.
 
 ```bash
 # reads only -- validate each allele against the long reads in the BAM
@@ -211,7 +226,6 @@ coordinates, types, and operations.
       {"passed": true, "detail": "overall error 0.0696 <= 0.1"},
       {"passed": true, "detail": "junction errors {0:0.0, 812:0.01}, worst 812:0.01 <= 0.1"}]}],
    "ambiguity_validations": []}]}  // same shape, against the reference (--check-reference only)
-}
 ```
 
 `ref_start` is the window anchor (≈ breakpoint − buffer), not an exact breakpoint, and a
@@ -224,7 +238,7 @@ VCF record.
 checks buy you. It simulates 330 SVs (22 types x 3 size classes x 5) on hg38 chr21 with
 insilicoSV, then scores two callsets against one assembly:
 
-| arm | callset | assembly | expected |
+| arm | callset | assembly | ideal |
 | --- | --- | --- | --- |
 | positive | seed 0 | seed 0 | 330/330 hits |
 | negative | seed 1 | seed 0 | 0/330 hits |
@@ -232,7 +246,8 @@ insilicoSV, then scores two callsets against one assembly:
 Each arm is scored under three check configurations — `similarity-only`,
 `similarity-no-large-indels` (`max_indel_size: 50`), and `similarity-junction`
 (`junction_radius: 100`) — so a hit in the negative arm is a false positive attributable to that
-configuration. Run it from the repo root with `insilicosv` and `svrecon` installed; the configs
+configuration. All three reach 330/330 on the positive arm; on the negative arm they leave 34, 32,
+and 0 false positives respectively. Run it from the repo root with `insilicosv` and `svrecon` installed; the configs
 live in `workflows/`, and the last cell deletes everything generated.
 
 ## Notes

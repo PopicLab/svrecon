@@ -13,6 +13,10 @@ dependencies = ["edlib", "intervaltree", "mappy", "matplotlib", "pandas", "pysam
 [project.scripts]
 svrecon = "svrecon.cli:main"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests", "tests/generators"]
+
 [tool.setuptools]
 packages = ["svrecon", "svrecon.scorers"]
 
