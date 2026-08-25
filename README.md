@@ -1,10 +1,10 @@
 # svrecon
 
-**svrecon** — structural-variant reconstruction scoring. Validate called SVs by rebuilding each variant's alt allele and checking whether real sequence supports it, against a sample assembly (`assembly`), long reads (`reads`), or reads-first with assembly fallback (`both`).
+**svrecon** — structural-variant reconstruction scoring. Validate called SVs by rebuilding each variant's alt allele and checking whether real sequence supports it: long reads (`--bam`), a sample assembly (`--sample`), or both.
 
 ## Installation
 
-svrecon is a Python package (Python ≥ 3.9). Install it and its dependencies from a clone:
+svrecon is a Python package (Python ≥ 3.11). Install from a clone:
 
 ```bash
 pip install -e .                                    # editable/dev install
@@ -14,190 +14,231 @@ pip install git+https://github.com/PopicLab/svrecon.git
 
 This puts an `svrecon` command on your `PATH` (equivalently `python -m svrecon`). The C-extension dependencies (`mappy`, `pysam`, `edlib`) ship prebuilt wheels for common Linux/Python combinations; on an unusual platform they build from source and need a C toolchain.
 
-## Instructions for running:
+## Running
 
-There are two ways to supply parameters:
+Three things are always required: `--reference`, `--calls`, and at least one validation source.
+**The validation mode is inferred from which sources you give** — there is no mode flag.
 
-- **`--config <experiment>.yaml`** (recommended): an svrecon YAML config whose keys mirror the flags below (e.g. `reference:`, `sample:`, `calls:`, `eval_mode:`, `report:`). **Logs and reports are written to the config file's directory**, so each run is self-contained — create `experiments/hg002_max_support/config.yaml`, then `svrecon --config experiments/hg002_max_support/config.yaml` writes `svrecon.log` (and `svrecon.report.jsonl` when `report: json`) right beside it. Re-running in the same directory overwrites those outputs; use a separate config/directory to keep runs side by side.
-- **Explicit flags** (below): usable on their own, or to override individual config values. Precedence is **CLI flag > `--config` value > `--groovi_config` inference > default**. Without `--config`, outputs go to `./logs/`.
+```bash
+# reads only -- validate each allele against the long reads in the BAM
+svrecon --reference ref.fa --calls calls.vcf --bam sample.bam
 
-Run with the following parameters.
-- `--reference`: Path to .fa file containing the reference genome
-- `--sample`: Path to .fa file containing the sample genome (on which SVs have been called)
-- `--calls`: Path to .vcf file containing called SVs in InsilicoSV format
-- `--buffer`:  Subsequence context buffer size, number of bps before and after reconstructed SV to compare
-- `--gap_file`: (Optional) Tab-delimited file containing regions to omit (e.g., centromere and telomere)
-- `--location_tolerance`: (Optional) Max bp between a mappy hit's reference start and the expected SV locus for the hit to count; default **unbounded**. Bounding it is only safe for well-scaffolded assemblies — for per-contig/unscaffolded assemblies, whose hit coordinates are contig-local rather than genomic, a bounded tolerance rejects valid matches. In a `--config` YAML, write infinity as `.inf` (bare `inf` is parsed as a string).
-- `--chrom_cache`: (Optional) Directory to save/load the per-chromosome `.mmi` indices (defaults to temporary space).
-- `--report`: (Optional) `none` (default) or `json`. `json` writes a per-SV evaluation sidecar (see "Per-SV evaluation report" below) alongside the log. Off by default; the log and score table are identical either way.
-- `--check_reference`: (Optional) flag. Also align each passing reconstructed allele to the **reference** (which lacks the SV); if it maps within the error threshold, the match is not specific to the SV — common in repetitive / segmental-dup regions — so the call is marked **inconclusive** (`reference_match`) instead of a hit. Off by default. See "Reference-ambiguity check" below.
+# assembly only -- validate against the sample assembly
+svrecon --reference ref.fa --calls calls.vcf --sample sample.fa
 
-Read-based evaluation parameters (see "Read-based evaluation" below):
-- `--eval_mode`: `assembly` (default), `reads`, or `both`. `reads` validates each call against the long reads in `--bam` instead of the assembly; `both` is **reads-first** — it consults the reads (Tier 1) and only falls back to the assembly (Tier 2) for events no single read can span.
-- `--bam`: BAM of long reads aligned to `--reference` (required for `reads`/`both`).
-- `--read_error_threshold`: max edlib error for a read to confirm a reconstruction (default 0.1; keep ≤ the assembly threshold).
-- `--min_read_support`: min number of spanning reads that must clear the threshold (default 1).
-- `--max_reads_per_site`: cap on candidate reads gathered per locus (default 1000).
-
-- `--groovi_config`: (Optional) A groovi *call* config used to **infer** unset params (`bam`, `classified`, `reference`, `sample`, `calls`) from groovi's internal folder layout, so those can be omitted. This was the old `--config`. See notes.
-
-Optionally include the following parameters to generate IGV session xmls to visualize the predictions
-- `--bam`: (Optional) BAM file for generating IGV config
-- `--classified`: (Optional) VCF file of groovi-style classified breakpoints for IGV config
-- `--igv_prefix`: (Optional) Path prefix prepended to file paths in the generated IGV session XMLs (e.g., a local mount point for files that live on a remote server).
-
-Path resolution when inferring from a `--groovi_config` file is sensitive to how those files are organized internally, so it may not work in other environments. It is just a shortcut for supplying each parameter manually (or in an svrecon `--config`), so it can be worked around.
-
-## Example calls 
-- `svrecon --config experiments/hg002_max_support/config.yaml`
-- `svrecon --reference ./data/genome.chr21.fa --sample ./sim_data/sim.combined.fa --calls ./sim_data/sim.vcf --buffer 500`
-- `svrecon --reference /data/refs/refdata-hg19-2.1.0/fasta/genome.fa --sample /data/refs/HG002/hg002v1.1.fasta --calls /data/bert/groovi/vcf_export_debug/results/groovi.vcf --gap_file /data/bert/datasets/hg19.gap.txt`
-
-
-
-
-**Reconstruction evaluation procedure**
-
-Given a set of called (and stitched) SVs on a genome, we take the fully assembled genomes and measure 
-how frequently the called SVs generate actual subsequences in the sample genome.
-
-**Subsequence reconstruction**
-
-Complex SVs may include multiple operations, so we extract the subsequence surrounding the 
-positions and targets of the included operations, and implement the resulting subsequence after transformation. We extract the sequence plus and minus a buffer of bps around the endpoints. This results in a subsequence that, if the SV is correctly called, should appear in the indicated chromosome of the sample.
-
-- To search the sample for the subsequence, we load the sample into a minimap2 aligner.
-    - Current implementation uses the map-hifi preset for mappy, but this may not be the best setting. The disconnect is that we are seeking the best full match to the query subsequence created by the SV, but aligner objectives can highly score partial matches. We don’t want partial matches, since they will be good partial matches with or without the SV transformations.
-    - After finding alignments, we compute the full edit distance between the query and the match, and a match requires **both** (a) the ratio of edit distance to the query length below a threshold, **and** (b) every reconstructed segment to validate — each segment of the rebuilt allele must align cleanly over its own extent, scored against the same error threshold. Only then is the SV considered **correct**. The segment check catches alignments whose overall error is diluted below threshold by the flanking buffer but that are wrong precisely where the SV rearranges the sequence.
-- We run each SV alone, which means the effects of other SVs in the genome (called or not) are ignored. Thus, the raw location of the SV may not be accurate, so we are searching the full chromosome for occurrences of the resulting sequence.
-- This evaluation is usually correct, but it can be wrong in a few circumstances
-    - The resulting sequence is in the sample by coincidence, not because of an SV. This likely happens in highly repetitive regions.
-    - The SV being measured is near other SV. This happens often with nearby deletions. The buffer regions before and after the SV in question would be wrong if they do not also consider the changes caused by nearby SVs. This only occurs with very close SVs, but they do happen.
-- For dispersions, we search for the resulting subsequence at the source and target of the dispersion (if there is also a change at the source).
-
-**Read-based evaluation (`--eval_mode reads` / `both`)**
-
-Assembly-based scoring is only as good as the sample assembly. For samples whose
-assembly is fragmented, divergent, or coarsely scaffolded, a correct SV can fail
-to reconstruct simply because the assembly is a poor target. Read-based mode
-sidesteps the assembly: it validates each reconstructed allele directly against
-the long reads in the BAM.
-
-How it works:
-For each SV, we build the same reconstructed allele (`simulate_subsequences`),
-  then gather candidate reads: any read whose alignment (primary or
-  supplementary) overlaps the SV position.
-
-Outcomes. Each SV is one of:
-- **hit** — a read contains the full reconstructed allele within the error
-  threshold (and its segments validate).
-- **miss** — reads that are long enough to contain the whole resulting allele
-  exist, but none match it. The reads genuinely contradict the call.
-- **inconclusive** — reads overlap the locus, but none is long enough to
-  contain the full resulting allele, so a single read cannot confirm or refute
-  it. These are excluded from the precision denominator (precision = hits /
-  (hits + misses)), and reported separately.
-
-A read can fully span the reference source (reach both breakpoints) while
-containing only part of the resulting allele, so source-region coverage is
-not a valid test of whether the read spans the called variant. We therefore require a read's
-molecule length ≥ the full resulting-allele length before
-it can validate. Events whose resulting allele is longer than any read are
-inherently inconclusive under single-read validation.
-
-Miss / inconclusive diagnostics are appended to each non-hit log line as a
-per-subsequence list, one tag per reconstructed subsequence:
-- `no_reads` — no read overlaps the locus (coverage gap).
-- `inconclusive` — reads overlap but none span the full resulting allele.
-- `over_error_threshold:<err>` — a spanning read aligned, 1×–2× threshold.
-- `over_error_threshold:aborted` — spanning reads aligned worse than 2× threshold (edlib aborted).
-- `segment_failed:<err>` — aligned within the overall threshold but a reconstructed segment failed.
-
-Hit log lines instead carry the **evaluation tier** and the detailed source:
-`read` (Tier 1 — a single real read contained the allele; the strongest evidence,
-independent of assembly quality) or `assembly` (Tier 2 — confirmed only against the
-reconstructed assembly, via `assembly`/`edlib`). The score table's `read_hits` and
-`assembly_hits` columns are the per-tier hit counts, and the summary logs a
-`Hits by tier` line. In `assembly` mode nothing is inconclusive and every hit is
-Tier 2 — behavior is unchanged.
-
-**Two-tier rationale (`both` mode).** Even a T2T-grade assembly is itself a
-reconstruction, so a call confirmed by an actual read is stronger evidence than
-one confirmed only against an assembly. `both` mode therefore tries reads first and
-attributes each hit to the highest tier that confirmed it, falling back to the
-assembly only for alleles longer than any single read. In `both` mode, an SV is
-`inconclusive` only when neither tier could test it (no read spans the allele and
-the assembly produced no candidate alignment); if either tier aligns a candidate
-that disagrees, it is a genuine `miss`.
-
-**Per-SV evaluation report (`--report json`)**
-
-The score table and log summarize the run; the log's per-SV lines give one outcome
-(plus tier or a compact diagnostic) per call. For deeper inspection — *which checks
-ran, which passed, and the local errors at each breakpoint* — pass `--report json`.
-It writes a JSONL sidecar next to the log (`svrecon.report.jsonl` beside a `--config`,
-else `logs/<name>.report.jsonl`), one record per SV. This is additive: the log and
-score table are byte-for-byte identical whether or not it is enabled.
-
-Each record holds only what the *evaluation* concluded; join back to the call VCF on
-`svid` for coordinates, types, and operations (which are not duplicated here):
-
-```json
-{"svid": "sv10319",
- "svtype": "dupINVdup",         // redundant with the VCF; included for quick scanning
- "outcome": "hit",              // hit | miss | inconclusive
- "tier": "assembly",            // read | assembly | null (null unless hit)
- "segments": [                  // one entry per reconstructed subsequence
-   {"chrom": "chr3",            // chromosome the subsequence maps to (pairs with ref_start)
-    "ref_start": 187135426,     // reference coord of the subsequence window's left anchor
-    "status": "pass",           // pass | fail | inconclusive
-    "reason": "pass",           // pass | segment_failed | over_error_threshold |
-                                //   no_reads | inconclusive | no_aligner | no_alignment_in_window
-    "source": "assembly",       // reads | assembly | edlib | null (tier that decided it)
-    "error": 0.0696,            // number, 4 sig figs: winning error if pass, best failing error if
-                                //   fail, null if untestable. Tiny rates keep precision and serialize
-                                //   in exponent form (e.g. 8.6e-06).
-    "segments": [               // per-segment results in the order checked; truncated at the
-      {"error": 0.0, "passed": true}, ...]}]}  // first failure. Empty if no segment in scope.
+# both -- reads first (Tier 1), assembly as fallback (Tier 2) for alleles no read spans
+svrecon --reference ref.fa --calls calls.vcf --bam sample.bam --sample sample.fa
 ```
 
-Note the `ref_start` is the window anchor (≈ breakpoint − buffer), not an exact
-breakpoint, and a multi-operation complex SV produces one `segments` entry per
-reconstructed subsequence, not per VCF record.
+Give neither `--bam` nor `--sample` and every call comes back `inconclusive` — nothing was
+validated.
 
-**Reference-ambiguity check (`--check_reference`)**
+For a repeatable run, put the same keys in a YAML config and pass `--config`. **Logs and reports
+are written to the config file's directory**, so each experiment is self-contained; without
+`--config` they go to the working directory.
 
-Assembly/read validation confirms the reconstructed allele exists in the sample —
-but in repetitive or segmental-duplication regions the allele can exist in the
-**reference** too, in which case finding it in the sample says nothing about whether
-the SV occurred. With `--check_reference`, each passing allele is also aligned to the
-reference; if it matches within the same error threshold, the call is not SV-specific
-and is downgraded from a hit to **inconclusive** with reason `reference_match`.
+```yaml
+# experiments/hg002/config.yaml
+reference: /data/refs/hg38.fa
+calls:     /data/groovi/groovi.vcf
+bam:       /data/HG002/hifi.bam
+sample:    /data/HG002/hg002v1.1.fasta
+report:    json
+```
 
-The check aligns with **mappy** (the same aligner as the assembly validation), because
-a large or compound allele needs chained alignment — plain edlib cannot align a
-multi-junction allele and would spuriously report "absent" (edlib is used only as the
-short-allele fallback, `< 5000 bp`). Enabling it therefore builds a second per-chromosome
-aligner set over the reference (extra build time + memory), so it is best used
-deliberately (e.g. auditing suspicious large calls) rather than on every routine run.
-It caught, for example, a 29 kb chr16 dupINVdup whose allele maps to the reference at
-0.019 error — below the 0.034 assembly match — i.e. a coincidental, non-SV-specific hit.
+```bash
+svrecon --config experiments/hg002/config.yaml   # -> experiments/hg002/svrecon.log, svrecon.report.jsonl
+```
 
-**Dot plots (`--plot_first_n`, `--plot_substitute_bases`)**
+Config keys mirror the flag names with underscores (`read_error_threshold`, not
+`--read-error-threshold`). Precedence is **CLI flag > config value > default**; setting the same
+key in both places is an error.
 
-`--plot_first_n N` writes k-mer dot plots for the first N calls of each SV type. Plotting
-uses wotplot, which accepts only `A`/`C`/`G`/`T`, so a subsequence containing `N` is skipped
-by default. `--plot_substitute_bases` replaces non-ACGT bases with random ACGT bases so the
-plot can be drawn, logging how many were substituted.
+### All parameters
 
-Base pair substitution is for plotting only, not for validation: scoring never sees the substituted sequence,
+Inputs:
 
-**Notes**
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--reference` | — | Reference genome `.fa`. Required. |
+| `--calls` | — | VCF of called SVs, in InsilicoSV format. Required. |
+| `--bam` | — | Long reads aligned to `--reference`. Enables read validation. Indexed on first use if no `.bai`/`.csi` exists. |
+| `--sample` | — | Sample genome `.fa`. Enables assembly validation. |
+| `--gap-file` | — | Tab-delimited regions to omit (e.g. centromere, telomere). |
+| `--config` | — | YAML config; also sets the output directory. |
 
-- `--groovi_config` inference is very dependent on groovi's expected folder structure and likely to break.
-  - It expects remote servers to be mounted locally
-  - It expects a fasta file to be located in a sibling folder of the .bam file, which typically only occurs for synthetic training data.
-  - It expects the call file to be `groovi.vcf` in the groovi config's results directory
-  - Each of these parameters should be overridden (via `--config` or a flag) if these conditions aren't met.
-- Outputs go to the `--config` file's directory; without a `--config`, the tool writes to a `logs` directory in the working directory, creating it if absent.
-- If the tool doesn't find a `.mmi` index file attached to the `.fa` sample assembly, it creates one as a cache and stores it in temporary space
+Validation thresholds:
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--buffer` | `500` | Reference context, in bp, kept on each side of the rebuilt allele. `auto` sizes it per SV to `max(50, 10% of that SV's longest segment)`. |
+| `--match-error-threshold` | `0.1` | Max error rate for an assembly / edlib / reference alignment to validate a query. |
+| `--read-error-threshold` | `0.1` | Max error rate for a read to validate a query. Keep ≤ `--match-error-threshold` for consistent hit/miss calls. |
+| `--location-tolerance` | unbounded | Max bp between a mappy hit's reference start and the expected locus. Bounding it is only safe for well-scaffolded assemblies — per-contig assemblies report contig-local coordinates, so a bound rejects valid alignments. In YAML write infinity as `.inf` (bare `inf` parses as a string). |
+| `--max-reads-per-site` | `1000` | Cap on candidate reads gathered per locus; bounds work on deep pileups. |
+| `--assembly-forward-match-only` | off | Drop reverse-strand assembly alignments before the CIGAR checks. |
+| `--check-reference` | off | Also align each passing allele to the reference; if it validates there too, downgrade the call to `inconclusive`. See below. |
+
+Output:
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--report` | `none` | `json` writes `svrecon.report.jsonl` beside the log. See below. |
+| `--verbose` | off | Append the full JSON summary to each per-SV log line. |
+| `--n-threads` | half the CPUs | Worker threads for scoring SVs. |
+| `--chrom-cache` | temp dir | Where to keep per-chromosome `.mmi` indices between runs. |
+| `--plot-first-n` | `0` | Write k-mer dot plots for the first N calls of each SV type, into `<output_dir>/sv_recon_img/`. |
+| `--plot-substitute-bases` | off | Replace non-ACGT bases with random ACGT so a plot can be drawn (otherwise that plot is skipped). Plotting only — scoring never sees substituted bases. |
+| `--plot-aspect` | `auto` | `auto` keeps the plot square; `equal` is true-to-scale but squeezes asymmetric SVs into a sliver. |
+| `--plot-title-svid`, `--plot-title-location`, `--plot-axis-length` | off | Extra labels on the plots. |
+| `--classified`, `--igv-prefix` | — | groovi-style classified-breakpoint VCF, and a path prefix, for the generated IGV session XMLs. |
+
+Config-file only (no CLI flag):
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `max_indel_size` | unset | If set, fail any alignment carrying an indel at least this long. |
+| `junction_radius` | unset | If set, additionally check the error rate within this radius of every breakpoint. |
+| `auto_buffer_min`, `auto_buffer_fraction` | `50`, `0.1` | Floor and fraction used by `buffer: auto`. |
+| `min_edlib_query` | `5000` | Queries at least this long skip the edlib fallback (cost bound). |
+| `edlib_fallback_max_tolerance` | `10000000` | Search-window radius cap for the edlib fallback. A cost bound on an otherwise unbounded O(n·m) search, kept separate from `location_tolerance`. |
+
+## Procedure
+
+For each SV, svrecon reconstructs the sequence the call implies and asks whether that sequence
+exists in the sample.
+
+**1. Reconstruct.** A complex SV may carry several operations, so each SV yields one or more
+**queries**: the reference spanning the operations' positions and targets, transformed as the call
+describes, plus `--buffer` bp of reference context on each side. If the call is correct, that
+query should appear in the sample. Dispersions produce a query at both the source and the target.
+Each SV is reconstructed in isolation, so nearby SVs — called or not — are ignored.
+
+**2. Align.** Each query is aligned against the configured sources in tier order, stopping at the
+first pass:
+
+- **reads** (`--bam`) — fetch reads overlapping the locus, keep those at least as long as the
+  query, and align the query into each with edlib, trying both orientations. A read can span the
+  reference source and still contain only part of the rebuilt allele, so covering the source
+  region is *not* sufficient; the read molecule must be at least the full allele length.
+- **assembly** (`--sample`) — minimap2/mappy (`map-hifi`, `--eqx`) against a per-chromosome index,
+  then filter hits by `--location-tolerance`.
+- **edlib fallback** (`--sample`) — for queries shorter than `min_edlib_query`, an
+  expanding-window edlib search of the sample bytes, catching short alleles mappy missed.
+
+**3. Check the CIGAR.** An alignment alone is not enough — every configured check must pass on it.
+This catches alignments whose overall error is diluted below threshold by the flanking buffer but
+that are wrong precisely where the SV rearranges the sequence.
+
+- *sequence similarity* (always) — total error over the whole query ≤ the threshold.
+- *no large indels* (if `max_indel_size` is set) — no single indel that long.
+- *junctions* (if `junction_radius` is set) — local error within that radius of every breakpoint.
+
+**4. Classify.** Each query gets a status and a reason:
+
+| status | reason | meaning |
+| --- | --- | --- |
+| `pass` | `pass` | Aligned, and every check passed. |
+| `fail` | `cigar_failed` | **Aligned**, then a check rejected it — the sample contradicts the call. |
+| `fail` | `other` | Nothing aligned within the error budget. |
+| `inconclusive` | `other` | Untestable: no read long enough to span the allele, the allele also matches the reference, or no validation source was configured. |
+
+`cigar_failed` is exactly the marker that the query **aligned**; the report exposes it directly as
+`"aligned": true`. When several scorers run, the decisive result is the most settling one:
+`pass` > aligned `fail` > `inconclusive` > unaligned `fail`, ties broken by lower error.
+
+**5. Roll up to the SV.** `hit` if every query passed, `miss` if any query failed, else
+`inconclusive`. Precision counts only conclusive calls — `hits / (hits + misses)` — so
+inconclusive calls are excluded from the denominator and reported in their own column.
+
+Hits also carry an **evaluation tier**: `read` (Tier 1 — a single real read contained the allele;
+the strongest evidence, independent of assembly quality) or `assembly` (Tier 2 — confirmed only
+against the reconstruction, via mappy or edlib). Even a T2T-grade assembly is itself a
+reconstruction, which is why a read-confirmed call ranks higher. The score table's `read_hits` and
+`assembly_hits` columns are the per-tier counts.
+
+Two failure modes this cannot rule out on its own: an allele present in the sample by coincidence
+rather than by an SV (likely in repetitive regions — see `--check-reference`), and a call adjacent
+to another SV, which corrupts its buffer.
+
+## Reference-ambiguity check (`--check-reference`)
+
+Validation confirms the allele exists in the sample — but in repetitive or segmental-duplication
+regions the allele can exist in the **reference** too, in which case finding it in the sample says
+nothing about whether the SV occurred. With `--check-reference`, each *passing* allele is also
+aligned to the reference; if it validates there as well, the call is downgraded from a hit to
+`inconclusive`, flagged `"reference_ambiguous": true` in the report.
+
+The check uses mappy, not edlib, because a large or compound allele needs chained alignment —
+plain edlib cannot align a multi-junction allele and would spuriously report "absent". It
+therefore builds a second per-chromosome aligner set over the reference (extra build time and
+memory), so use it deliberately (auditing suspicious large calls) rather than on every run. It
+caught, for example, a 29 kb chr16 dupINVdup whose allele maps to the reference at 0.019 error —
+below its 0.034 assembly match — i.e. a coincidental, non-SV-specific hit.
+
+## Per-SV report (`--report json`)
+
+The log's per-SV lines give one outcome per call, plus either the tier (on a hit) or a
+`status:reason` tag per query (on a miss or inconclusive). For deeper inspection — *which checks
+ran, which passed, and what each measured* — pass `--report json`. It writes one JSON record per
+SV to `svrecon.report.jsonl` beside the log. This is additive: the log and score table are
+identical whether or not it is enabled.
+
+Each record holds only what the *evaluation* concluded; join back to the call VCF on `svid` for
+coordinates, types, and operations.
+
+```jsonc
+{"svid": "sv10319",
+ "svtype": "dupINVdup",          // redundant with the VCF; included for quick scanning
+ "outcome": "hit",               // hit | miss | inconclusive
+ "tier": "assembly",             // read | assembly | miss
+ "query_validations": [          // one entry per reconstructed query
+  {"chrom": "chr3",              // chromosome the query maps to (pairs with ref_start)
+   "ref_start": 187135426,       // reference coord of the query window's left anchor
+   "status": "pass",             // decisive verdict: pass | fail | inconclusive
+   "reason": "pass",             // pass | cigar_failed | other
+   "aligned": true,              // whether an alignment was found at all
+   "reference_ambiguous": false, // true if the allele also validated against the reference
+   "source": "assembly",         // reads | assembly | edlib | null (which scorer decided)
+   "strand": 1,                  // 1 | -1 | null (null for reads -- randomly oriented)
+   "validations": [              // every scorer that ran, in order; the decisive one is ranked, not last
+    {"source": "assembly", "passed": true, "status": "pass", "reason": "pass", "aligned": true,
+     "cigar": "500=3X2I495=",      // the decisive alignment's CIGAR, for debugging
+     "lowest_pass_error": 0.0696,  // error of the adopted alignment (1.0 if none passed)
+     "lowest_error": 0.0696,       // best error seen, pass or fail
+     "strand": 1,
+     "checks": [                   // one per configured CIGAR check, in configured order
+      {"passed": true, "detail": "overall error 0.0696 <= 0.1"},
+      {"passed": true, "detail": "junction errors {0:0.0, 812:0.01}, worst 812:0.01 <= 0.1"}]}],
+   "ambiguity_validations": []}]}  // same shape, against the reference (--check-reference only)
+}
+```
+
+`ref_start` is the window anchor (≈ breakpoint − buffer), not an exact breakpoint, and a
+multi-operation complex SV produces one `query_validations` entry per reconstructed query, not per
+VCF record.
+
+## Benchmark
+
+[`workflows/svrecon_benchmark.ipynb`](workflows/svrecon_benchmark.ipynb) measures what the CIGAR
+checks buy you. It simulates 330 SVs (22 types x 3 size classes x 5) on hg38 chr21 with
+insilicoSV, then scores two callsets against one assembly:
+
+| arm | callset | assembly | expected |
+| --- | --- | --- | --- |
+| positive | seed 0 | seed 0 | 330/330 hits |
+| negative | seed 1 | seed 0 | 0/330 hits |
+
+Each arm is scored under three check configurations — `similarity-only`,
+`similarity-no-large-indels` (`max_indel_size: 50`), and `similarity-junction`
+(`junction_radius: 100`) — so a hit in the negative arm is a false positive attributable to that
+configuration. Run it from the repo root with `insilicosv` and `svrecon` installed; the configs
+live in `workflows/`, and the last cell deletes everything generated.
+
+## Notes
+
+- Outputs go to the `--config` file's directory; without a `--config`, to the working directory.
+- Per-chromosome `.mmi` indices are cached (in temp space unless `--chrom-cache` is set) and
+  rebuilt automatically when the source FASTA changes.
+- Dot plots use wotplot, which accepts only `A`/`C`/`G`/`T`; a query containing `N` is skipped
+  unless `--plot-substitute-bases` is given.
