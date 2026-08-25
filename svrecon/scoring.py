@@ -331,7 +331,7 @@ class CallsetScorer(object):
                 else:  # miss or inconclusive -> show why
                     line += f'\t{sv_validation.query_diagnostics}'
                 if self.verbose:
-                    line += f'\t{json.dumps(sv_validation.get_summary(), default=str)}'
+                    line += f'\t{json.dumps(sv_validation.get_summary(), default=str, indent=2)}'
                 logger.info(line)
 
                 if report_fh is not None:
