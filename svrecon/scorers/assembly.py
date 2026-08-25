@@ -10,7 +10,7 @@ import pysam
 
 from svrecon.constants import QueryValidationReason, QueryValidationStatus, ValidationSource
 from svrecon.reconstruct import Query
-from svrecon.scorers.base import CigarValidationResult, Scorer, QueryValidation
+from svrecon.scorers.base import Scorer, QueryValidation
 from svrecon.scorers.utils import Cigar
 from svrecon.utils import reverse_complement
 
@@ -101,6 +101,7 @@ class AssemblyScorer(Scorer):
         lowest_pass_error = 1.0
         lowest_error = 1.0
         passed = False
+        inconclusive = False
         best_cigar_results = []
         best_strand_match = None
         best_cigar = None
@@ -117,14 +118,16 @@ class AssemblyScorer(Scorer):
         # pick best candidate alignment by bulk error; every configured check must pass # TODO: ensure mapq 60. something thats repetitive ins unknown
         for alignment in alignments:
             cigar = Cigar.from_mappy(alignment, len(query))
-            cigar_results: List[CigarValidationResult] = self.score_cigar(cigar, query)
+            cigar_status, cigar_results = self.score_cigar(cigar, query)
             match_err = cigar.error_rate
             lowest_error = min(lowest_error, match_err)
 
             matched_seq = chrom_aligner.seq(alignment.ctg, alignment.r_st, alignment.r_en)
             if alignment.strand == -1:
                 matched_seq = reverse_complement(matched_seq)  # orient to the forward query
-            if all(r.passed for r in cigar_results):
+            if cigar_status is QueryValidationStatus.INCONCLUSIVE:
+                inconclusive = True
+            if cigar_status is QueryValidationStatus.PASS:
                 passed = True
                 if match_err < lowest_pass_error:
                     lowest_pass_error = match_err
@@ -139,6 +142,8 @@ class AssemblyScorer(Scorer):
 
         if passed:
             status, reason = QueryValidationStatus.PASS, QueryValidationReason.PASS
+        elif inconclusive:  # aligned, but a check could not judge the query
+            status, reason = QueryValidationStatus.INCONCLUSIVE, QueryValidationReason.OTHER
         elif best_cigar_results:  # aligned to the sample, but a check failed
             status, reason = QueryValidationStatus.FAIL, QueryValidationReason.CIGAR_FAILED
         else:  # nothing aligned at all

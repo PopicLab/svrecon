@@ -7,7 +7,7 @@ import pysam
 
 from svrecon.constants import QueryValidationReason, QueryValidationStatus, ValidationSource
 from svrecon.reconstruct import Query
-from svrecon.scorers.base import CigarValidationResult, Scorer, QueryValidation
+from svrecon.scorers.base import Scorer, QueryValidation
 from svrecon.scorers.utils import Cigar, EdlibScoreResult, edlib_score
 from svrecon.utils import reverse_complement
 
@@ -107,6 +107,7 @@ class ReadScorer(Scorer):
                                         reason=QueryValidationReason.OTHER)
 
         passed = False
+        inconclusive = False
         lowest_pass_error = 1.0
         lowest_error = 1.0
         best_cigar_results = []  # the adopted read's checks on a pass, else the best-scoring read's
@@ -117,8 +118,10 @@ class ReadScorer(Scorer):
         for read_res in read_results:
             lowest_error = min(lowest_error, read_res.error)
             cigar = Cigar.from_edlib(read_res.cigar)
-            cigar_results: List[CigarValidationResult] = self.score_cigar(cigar, query)
-            if all(r.passed for r in cigar_results) and read_res.error < lowest_pass_error:
+            cigar_status, cigar_results = self.score_cigar(cigar, query)
+            if cigar_status is QueryValidationStatus.INCONCLUSIVE:
+                inconclusive = True
+            if cigar_status is QueryValidationStatus.PASS and read_res.error < lowest_pass_error:
                 passed = True
                 lowest_pass_error = read_res.error
                 best_cigar_results = cigar_results
@@ -131,6 +134,8 @@ class ReadScorer(Scorer):
 
         if passed:
             status, reason = QueryValidationStatus.PASS, QueryValidationReason.PASS
+        elif inconclusive:  # a read aligned, but a check could not judge the query
+            status, reason = QueryValidationStatus.INCONCLUSIVE, QueryValidationReason.OTHER
         elif read_results:  # a read aligned, but none passed every check
             status, reason = QueryValidationStatus.FAIL, QueryValidationReason.CIGAR_FAILED
         else:  # no read within the error budget

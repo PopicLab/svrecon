@@ -1,9 +1,9 @@
 """Edlib-based validation: the expanding-window fallback search and the EdlibScorer."""
-from typing import Dict, List, Union
+from typing import Dict, Union
 
 from svrecon.constants import QueryValidationReason, QueryValidationStatus, ValidationSource
 from svrecon.reconstruct import Query
-from svrecon.scorers.base import CigarValidationResult, Scorer, QueryValidation
+from svrecon.scorers.base import Scorer, QueryValidation
 from svrecon.scorers.utils import Cigar, EdlibScoreResult, edlib_score
 from svrecon.utils import load_fasta_to_bytes
 
@@ -78,11 +78,13 @@ class EdlibScorer(Scorer):
             return QueryValidation(source=ValidationSource.EDLIB)
 
         cigar = Cigar.from_edlib(edlib_result.cigar)
-        cigar_results: List[CigarValidationResult] = self.score_cigar(cigar, query)
-        passed = all(r.passed for r in cigar_results)
+        cigar_status, cigar_results = self.score_cigar(cigar, query)
+        passed = cigar_status is QueryValidationStatus.PASS
 
         if passed:  # a window aligned and every check passed
             status, reason = QueryValidationStatus.PASS, QueryValidationReason.PASS
+        elif cigar_status is QueryValidationStatus.INCONCLUSIVE:  # a check could not judge the query
+            status, reason = QueryValidationStatus.INCONCLUSIVE, QueryValidationReason.OTHER
         else:  # the best window aligned, but a check failed
             status, reason = QueryValidationStatus.FAIL, QueryValidationReason.CIGAR_FAILED
 
