@@ -1,19 +1,25 @@
 """Shared alignment primitives: normalized CIGAR representation, per-segment validation,
 and edlib HW scoring."""
 import re
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from typing import List, Tuple, Union
 
 import edlib
 import mappy
-import numpy as np
 import pysam
 
-# TODO: manually review conversion
+
 class Cigar:
     """A CIGAR in normal form: pysam-ordered ``(op, length)`` tuples, forward-query
     orientation, 0 indexed, accounting for the full query (clipped flanks as explicit soft clips).
     Intervals are half-open [start, end)
+
+    Range queries run on three prefix arrays sized by the op count, not the query length:
+    ``query_starts[i]`` is the query index where op i begins (``query_starts[n]`` is the
+    query length), ``error_prefix[i]`` / ``deletion_prefix[i]`` are the error / deleted
+    bases in ops [0, i). Error ops are homogeneous, so a window that splits an op counts
+    exactly its overlap.
 
     Official SAM/BAM CIGAR specification: https://samtools.github.io/hts-specs/SAMv1.pdf
     """
@@ -31,25 +37,58 @@ class Cigar:
 
     def __init__(self, cigartuples: List[Tuple[int, int]]):
         self.cigartuples = cigartuples
-        # Total query bases the CIGAR accounts for, clips included.
-        self.query_length = sum(length for op, length in cigartuples if op in self.QUERY_CONSUMING_OPS)
-        self.error_mask = np.zeros(self.query_length, dtype=np.uint8) # mask[i] = 1 iff query base i is clipped, inserted, or mismatched.
-        self.deletion_lengths = np.zeros(self.query_length + 1, dtype=np.int32) # dels[i] = n: a deletion of n target bases immediately precedes query base i.
-        pos = 0
+        self.query_starts = [0]
+        self.error_prefix = [0]
+        self.deletion_prefix = [0]
         for op, length in cigartuples:
-            if op in self.TARGET_ONLY_OPS:
-                self.deletion_lengths[pos] += length
-            elif op in self.QUERY_CONSUMING_OPS:
-                if op in self.ERROR_OPS:
-                    self.error_mask[pos:pos + length] = 1
-                pos += length
+            self.query_starts.append(self.query_starts[-1] + (length if op in self.QUERY_CONSUMING_OPS else 0))
+            self.error_prefix.append(self.error_prefix[-1] + (length if op in self.ERROR_OPS else 0))
+            self.deletion_prefix.append(self.deletion_prefix[-1] + (length if op in self.TARGET_ONLY_OPS else 0))
+        self.query_length = self.query_starts[-1]  # total query bases accounted for, clips included
 
-    def get_window_error_rate(self, start: int, end: int) -> float:
-        """Error rate over [start, end):
-        (error bases + deletions anchored in [start, end)) / ((end - start) + those deletions)."""
-        del_len = int(self.deletion_lengths[start:end].sum())
-        errors = int(self.error_mask[start:end].sum()) + del_len
-        return errors / ((end - start) + del_len)
+    @property
+    def total_error_bases(self) -> int:
+        """Query bases that are clipped, inserted, or mismatched."""
+        return self.error_prefix[-1]
+
+    @property
+    def total_deleted_bases(self) -> int:
+        """Target bases the query skips over (deletions)."""
+        return self.deletion_prefix[-1]
+
+    def _errors_anchored(self, lo: int, hi: int) -> int:
+        """Error bases among query bases [lo, hi), the end exclusive -- an error op occupies
+        query positions, so only the bases inside the range count."""
+        bounds = []
+        for pos in (lo, hi):
+            op_idx = bisect_right(self.query_starts, pos) - 1  # last op starting at or before pos
+            if op_idx >= len(self.cigartuples):  # pos == query_length
+                bounds.append(self.error_prefix[-1])
+                continue
+            # A split op contributes its overlap when it is an error op; ties on query_starts are
+            # deletion ops, which consume no query and contribute 0 here.
+            op = self.cigartuples[op_idx][0]
+            partial = pos - self.query_starts[op_idx] if op in self.ERROR_OPS else 0
+            bounds.append(self.error_prefix[op_idx] + partial)
+        return bounds[1] - bounds[0]
+
+    def _deletions_anchored(self, lo: int, hi: int) -> int:
+        """Deleted target bases whose anchor -- the query base following the gap,
+        ``query_starts[j]`` for deletion op j -- falls in [lo, hi], both ends inclusive: a
+        deletion is a point between bases, so a gap sitting on either bound belongs to the
+        range. ``hi == query_length`` therefore reaches a trailing deletion."""
+        op_starts = self.query_starts[:-1]  # query_starts[j] is op j's anchor; drop the sentinel
+        return self.deletion_prefix[bisect_right(op_starts, hi)] - self.deletion_prefix[bisect_left(op_starts, lo)]
+
+    def get_junction_error_rate(self, point: int, radius: int) -> float:
+        """Error rate over the window [point - radius, point + radius] clamped to the query:
+        (error bases + deletions anchored in the window) / (window width + those deletions).
+        Deletions at either edge count -- a junction's bounding gaps belong to it."""
+        start = max(0, point - radius)
+        end = min(self.query_length, point + radius)
+        deletions = self._deletions_anchored(start, end)
+        errors = self._errors_anchored(start, end) + deletions
+        return errors / ((end - start) + deletions)
 
     @classmethod
     def from_mappy(cls, alignment: mappy.Alignment, query_len: int) -> 'Cigar':

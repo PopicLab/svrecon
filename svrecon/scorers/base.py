@@ -59,6 +59,60 @@ class Scorer:
         self.match_error_threshold = config.match_error_threshold # for both reference and assembly alignment
         self.location_tolerance = config.location_tolerance
         self.chroms = chroms
+        # Sequence similarity always runs; the other two are opt-in via config.
+        self.cigar_query_validations: List[CigarQueryValidation] = [
+            SequenceSimilarityValidation(match_error_threshold=config.match_error_threshold),
+        ]
+        if config.max_indel_size is not None:
+            self.cigar_query_validations.append(
+                NoLargeIndelsValidation(max_size=config.max_indel_size))
+        if config.junction_radius is not None:
+            self.cigar_query_validations.append(
+                JunctionValidation(radius=config.junction_radius,
+                                   match_error_threshold=config.match_error_threshold))
 
     def score_query(self, query: Query) -> QueryValidation:
         raise NotImplementedError("Implement in subclass")
+
+# TODO: look 
+# Cigar Query Validations
+@dataclass
+class CigarQueryValidation:
+    def validate(self, cigar: Cigar, query: Query) -> bool:
+        raise NotImplementedError("Implement in Subclass")
+
+@dataclass
+class SequenceSimilarityValidation(CigarQueryValidation):
+    """Bulk divergence over the whole query."""
+    match_error_threshold: float
+
+    def validate(self, cigar: Cigar, query: Query) -> bool:
+        errors = cigar.total_error_bases + cigar.total_deleted_bases
+        return errors / len(query) <= self.match_error_threshold
+
+@dataclass
+class NoLargeIndelsValidation(CigarQueryValidation):
+    """Checks that no indel is size greater than ```max_size```"""
+    max_size: int
+
+    def validate(self, cigar: Cigar, query: Query) -> bool:
+        indel_ops = {Cigar.INS} | Cigar.TARGET_ONLY_OPS
+        return not any(length >= self.max_size
+                       for op, length in cigar.cigartuples if op in indel_ops)
+
+@dataclass
+class JunctionValidation(CigarQueryValidation):
+    """Local error around each breakpoint, where a wrong reconstruction shows up even when the
+    allele as a whole aligns well."""
+    radius: int
+    match_error_threshold: float
+
+    def validate(self, cigar: Cigar, query: Query) -> bool:
+        breakpoints = {pos for start, end in query.recon_segments for pos in (start, end)}
+        assert all(0 <= pos <= cigar.query_length for pos in breakpoints), \
+            f'breakpoints {sorted(breakpoints)} outside the query [0,{cigar.query_length}]'
+
+        for breakpoint_pos in sorted(breakpoints):
+            if cigar.get_junction_error_rate(breakpoint_pos, self.radius) > self.match_error_threshold:
+                return False
+        return True

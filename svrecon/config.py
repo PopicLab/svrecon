@@ -37,6 +37,8 @@ DEFAULTS = {
     'auto_buffer_min': 50,        # floor for buffer='auto', also its no-segments fallback
     'auto_buffer_fraction': 0.1,  # buffer='auto' sizes to this fraction of the SV's longest segment
     'match_error_threshold': 0.1,
+    'max_indel_size': None,   # if set, fail an alignment carrying an indel at least this long
+    'junction_radius': None,  # if set, check the error rate within this radius of every breakpoint
 
     # Scoring parameters: read-based validation
     'read_error_threshold': 0.1,
@@ -90,6 +92,8 @@ VALID_PARAM_FNS = {
     'auto_buffer_min': lambda arg: isinstance(arg, int),
     'auto_buffer_fraction': lambda arg: isinstance(arg, (int, float)),
     'match_error_threshold': lambda arg: isinstance(arg, (int, float)),
+    'max_indel_size': lambda arg: arg is None or isinstance(arg, int),
+    'junction_radius': lambda arg: arg is None or isinstance(arg, int),
 
     # Scoring parameters: read-based validation
     'read_error_threshold': lambda arg: isinstance(arg, (int, float)),
