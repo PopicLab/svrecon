@@ -164,7 +164,7 @@ def create_starting_segments(records: list[VariantRecord], buffer: int, ref: Dic
 
     return segments
 
-def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[str, bytearray]) -> List[Query]:
+def construct_queries(records: List[VariantRecord], buffer: int, ref: Dict[str, bytearray]) -> List[Query]:
     """
     Given records of operations, recreate the resulting subsequences and metadata 
     """
@@ -192,7 +192,7 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
         else:
             runs.append([seg])
 
-    subsequences = []
+    queries = []
     for run in runs:
         offset = run[0].alt_start
         pieces = []
@@ -208,11 +208,11 @@ def simulate_subsequences(records: List[VariantRecord], buffer: int, ref: Dict[s
 
         sequence = ''.join(pieces)
         query_ref_start, query_ref_end = run[0].ref_start, run[-1].ref_end
-        subsequences.append(Query(
+        queries.append(Query(
             chrom=chrom, svtype=sv_type, svid=svid, sequence=sequence,
             ref_start=query_ref_start, ref_end=query_ref_end, recon_segments=covering_segments,
             ref_segments=covering_ref_segments,
             ref_sequence=ref[chrom][query_ref_start:query_ref_end].decode('ascii'),
             buffer=buffer))
 
-    return subsequences
+    return queries

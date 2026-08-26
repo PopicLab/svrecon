@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from svrecon.constants import *
 from svrecon.plot import plot_sv_validation
-from svrecon.reconstruct import Query, simulate_subsequences
+from svrecon.reconstruct import Query, construct_queries
 from svrecon.scorers.assembly import AssemblyScorer
 from svrecon.scorers.base import Scorer, QueryValidation
 from svrecon.scorers.edlib import EdlibScorer
@@ -457,7 +457,7 @@ class CallsetScorer(object):
             sv_buffer = self._resolve_buffer(records)
             query_validations: List[QueryValidationResult] = []  # one per reconstructed query of an SV
 
-            for query in simulate_subsequences(records, sv_buffer, self.chrom_to_ref):
+            for query in construct_queries(records, sv_buffer, self.chrom_to_ref):
                 query_validation = QueryValidationResult(query=query)
 
                 for scorer in self.validation_scorer:
