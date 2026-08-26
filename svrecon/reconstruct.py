@@ -1,14 +1,11 @@
 """Sequence reconstruction"""
 import bisect
-import logging
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
 from pysam import VariantRecord
 
 from svrecon.utils import get_start_stop, reverse_complement
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -103,25 +100,26 @@ def get_operations_from_records(records: list[VariantRecord]) -> list[_Operation
         start, stop = get_start_stop(record)
         target = record.info.get('TARGET', stop) # already 0-based: TARGET == start + SVLEN for tandem pastes
         insord = record.info.get('INSORD', -1)
+        op_type = record.alts[0].strip('<>')  # insilicoSV's symbolic ALT is the per-record operation
 
-        if record.info['OP_TYPE'] == 'CUT' or record.info['SVTYPE'] == 'DEL':
+        if op_type in ('CUT', 'DEL'):
             operations.append(_Delete(start, start, stop))
-        elif record.info['OP_TYPE'] == 'INV' or record.info['SVTYPE'] == 'INV':
+        elif op_type == 'INV':
             operations.append(_Invert(start, start, stop))
-        elif record.info['OP_TYPE'] == 'DUP' or record.info['SVTYPE'] == 'DUP':
+        elif op_type == 'DUP':
             operations.append(_Insert(stop, start, stop))
-        elif record.info['OP_TYPE'] == 'COPY-PASTE' or record.info['SVTYPE'] == 'dDUP':
+        elif op_type == 'COPY-PASTE':
             operations.append(_Insert(target, start, stop, insord=insord))
-        elif record.info['OP_TYPE'] == 'CUT-PASTE' or record.info['SVTYPE'] == 'nrTRA':
+        elif op_type == 'CUT-PASTE':
             operations.append(_Delete(start, start, stop))
             operations.append(_Insert(target, start, stop, insord=insord))
-        elif record.info['OP_TYPE'] == 'COPYinv-PASTE' or record.info['SVTYPE'] in ('INV_dDUP', 'INV_DUP'):
+        elif op_type == 'COPYinv-PASTE':
             operations.append(_Insert(target, start, stop, invert=True, insord=insord))
-        elif record.info['OP_TYPE'] == 'CUTinv-PASTE' or record.info['SVTYPE'] == 'INV_nrTRA':
+        elif op_type == 'CUTinv-PASTE':
             operations.append(_Delete(start, start, stop))
             operations.append(_Insert(target, start, stop, invert=True, insord=insord))
         else:
-            logger.warning(f'Unknown OP_TYPE: {record.info["OP_TYPE"]}')
+            raise ValueError(f'Unknown ALT operation type: {op_type}')
 
     return operations
 
