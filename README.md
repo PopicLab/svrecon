@@ -7,7 +7,8 @@
 svrecon is a Python package (Python ≥ 3.11). Install from a clone:
 
 ```bash
-pip install -e .                                    # editable/dev install
+# pip install
+pip install -e .                                    
 # or straight from the source repo:
 pip install git+https://github.com/PopicLab/svrecon.git
 ```
@@ -114,6 +115,7 @@ Config-file only (no CLI flag):
 | --- | --- | --- |
 | `max_indel_size` | unset | If set, fail any alignment carrying an indel at least this long. |
 | `junction_radius` | unset | If set, additionally check the error rate within this radius of every breakpoint. |
+| `min_mappable_fraction` | `0.95` | A query with less than this fraction of mappable (ACGT) bases is inconclusive rather than pass/fail. Set to `null` to disable. Only bites above `1 - error threshold` — see below. |
 | `auto_buffer_min`, `auto_buffer_fraction` | `50`, `0.1` | Floor and fraction used by `buffer: auto`. |
 | `min_edlib_query` | `5000` | Queries at least this long skip the edlib fallback (cost bound). |
 | `edlib_fallback_max_tolerance` | `10000000` | Search-window radius cap for the edlib fallback. A cost bound on an otherwise unbounded O(n·m) search, kept separate from `location_tolerance`. |
@@ -148,6 +150,11 @@ that are wrong precisely where the SV rearranges the sequence.
 - *sequence similarity* (always) — total error over the whole query ≤ the threshold.
 - *no large indels* (if `max_indel_size` is set) — no single indel that long.
 - *junctions* (if `junction_radius` is set) — local error within that radius of every breakpoint.
+- *mappable* (on by default, `min_mappable_fraction: 0.95`) — proportion of query sequence that must be mappable bases (ACGT) for the query to not be marked inconclusive
+
+
+A check returns `pass`, `fail`, or `inconclusive`, and the alignment's verdict is the roll-up:
+`inconclusive` if any check could not judge the query, else `fail` if any failed, else `pass`.
 
 **4. Classify.** Each query gets a status and a reason:
 
@@ -156,7 +163,7 @@ that are wrong precisely where the SV rearranges the sequence.
 | `pass` | `pass` | Aligned, and every check passed. |
 | `fail` | `cigar_failed` | **Aligned**, then a check rejected it — the sample contradicts the call. |
 | `fail` | `other` | Nothing aligned within the error budget. |
-| `inconclusive` | `other` | Untestable: no read long enough to span the allele, the allele also matches the reference, or no validation source was configured. |
+| `inconclusive` | `other` | Untestable: no read long enough to span the allele, a check could not judge the query (too little of it mappable), the allele also matches the reference, or no validation source was configured. |
 
 `cigar_failed` is exactly the marker that the query **aligned**; the report exposes it directly as
 `"aligned": true`. When several scorers run, the decisive result is the most settling one:
@@ -223,8 +230,8 @@ coordinates, types, and operations.
      "lowest_error": 0.0696,       // best error seen, pass or fail
      "strand": 1,
      "checks": [                   // one per configured CIGAR check, in configured order
-      {"passed": true, "detail": "overall error 0.0696 <= 0.1"},
-      {"passed": true, "detail": "junction errors {0:0.0, 812:0.01}, worst 812:0.01 <= 0.1"}]}],
+      {"status": "pass", "detail": "overall error 0.0696 <= 0.1"},
+      {"status": "pass", "detail": "junction errors {0:0.0, 812:0.01}, worst 812:0.01 <= 0.1"}]}],
    "ambiguity_validations": []}]}  // same shape, against the reference (--check-reference only)
 ```
 
@@ -235,18 +242,18 @@ VCF record.
 ## Benchmark
 
 [`workflows/svrecon_benchmark.ipynb`](workflows/svrecon_benchmark.ipynb) measures what the CIGAR
-checks buy you. It simulates 330 SVs (22 types x 3 size classes x 5) on hg38 chr21 with
+checks buy you. It simulates 120 SVs (8 in-place types x 3 size classes x 5) on hg38 chr21 with
 insilicoSV, then scores two callsets against one assembly:
 
 | arm | callset | assembly | ideal |
 | --- | --- | --- | --- |
-| positive | seed 0 | seed 0 | 330/330 hits |
-| negative | seed 1 | seed 0 | 0/330 hits |
+| positive | seed 0 | seed 0 | 120/120 hits |
+| negative | seed 1 | seed 0 | 0/120 hits |
 
 Each arm is scored under three check configurations — `similarity-only`,
 `similarity-no-large-indels` (`max_indel_size: 50`), and `similarity-junction`
 (`junction_radius: 100`) — so a hit in the negative arm is a false positive attributable to that
-configuration. All three reach 330/330 on the positive arm; on the negative arm they leave 34, 32,
+configuration. All three reach 120/120 on the positive arm; on the negative arm they leave 12, 12,
 and 0 false positives respectively. Run it from the repo root with `insilicosv` and `svrecon` installed; the configs
 live in `workflows/`, and the last cell deletes everything generated.
 
