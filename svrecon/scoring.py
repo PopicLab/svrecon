@@ -289,6 +289,36 @@ class CallsetScorer(object):
                 raise ValueError(f'{rec.chrom}: record {rec.id} TARGET={target} falls inside the SV\'s '
                                  f'span [{min_start},{max_stop}) but does not land on an existing interval boundary')
 
+    def _assert_sv_records_contiguous(self, records: List[VariantRecord]) -> None:
+        """
+        Asserts the following conditions:
+        - the [start, stop) intervals tile one span, leaving no gap between consecutive records
+        - every target lands on one of those intervals' endpoints
+
+        Together these reject dispersed events, unsupported for now: their target sits away from
+        the source span, so the allele lands in a window of its own rather than in this one.
+        """
+        # Dedupe identical (start, stop) spans -- multiple records can share one source span
+        # for different downstream operations -- before sorting.
+        by_interval: Dict[Tuple[int, int], VariantRecord] = {}
+        for rec in records:
+            by_interval.setdefault(get_start_stop(rec), rec)
+        intervals = sorted((start, stop, rec) for (start, stop), rec in by_interval.items())
+        for (prev_start, prev_stop, prev_rec), (start, stop, rec) in zip(intervals, intervals[1:]):
+            if start != prev_stop:
+                raise ValueError(f'{rec.chrom}: record {rec.id} [{start},{stop}) is not contiguous '
+                                 f'with the preceding record {prev_rec.id} [{prev_start},{prev_stop}); '
+                                 f'gap of {start - prev_stop} bp; dispered events are currently not fully supported')
+
+        endpoints = {pos for start, stop, _ in intervals for pos in (start, stop)}
+        for rec in records:
+            target = rec.info.get('TARGET')
+            if target is None:
+                continue
+            if target not in endpoints:
+                raise ValueError(f'{rec.chrom}: record {rec.id} TARGET={target} does not land on an '
+                                 f'interval boundary {sorted(endpoints)}; dispersed events are currently not fully supported')
+
     def _assert_sv_records_non_interchromosomal(self, records: List[VariantRecord]) -> None:
         """
         Raises ValueError if records contains more than one unique chromosome
@@ -422,6 +452,7 @@ class CallsetScorer(object):
             self._assert_sv_records_non_interchromosomal(records)
             self._assert_sv_records_positive_lengths(records)
             self._assert_sv_records_non_overlapping(records)
+            self._assert_sv_records_contiguous(records) # NOTE: temporary assertion while dispersed events are not fully supported
 
             sv_buffer = self._resolve_buffer(records)
             query_validations: List[QueryValidationResult] = []  # one per reconstructed query of an SV
