@@ -4,7 +4,7 @@ import pytest
 from generate_small_bam import ASSEMBLY_VCF
 from generate_small_genome import CHROM, REFERENCE_FASTA
 from helpers import BUFFER, EXPECTED, SVID_IDS, SVIDS
-from svrecon.reconstruct import simulate_subsequences
+from svrecon.reconstruct import construct_queries
 from svrecon.utils import group_variants_by_id, load_fasta_to_bytes
 
 
@@ -31,7 +31,7 @@ def test_reconstruction_matches_assembly(records_by_svid, reference_bytes, refer
     sv = svs_by_svid[svid]
     assert sv.svtype == EXPECTED[svid].svtype
 
-    queries = simulate_subsequences(records_by_svid[svid], BUFFER, reference_bytes)
+    queries = construct_queries(records_by_svid[svid], BUFFER, reference_bytes)
 
     assert len(queries) == 1
     assert queries[0].sequence == get_expected_sequence(sv, reference)
