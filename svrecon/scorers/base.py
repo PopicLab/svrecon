@@ -69,6 +69,7 @@ class CigarQueryJunctionValidation(CigarQueryValidation):
         breakpoints = {pos for start, end in query.recon_segments for pos in (start, end)}
         assert all(0 <= pos <= cigar.query_length for pos in breakpoints), \
             f'breakpoints {sorted(breakpoints)} outside the query [0,{cigar.query_length}]'
+        breakpoints -= {0, cigar.query_length} # exclude start and end of query in the check
         if not breakpoints:
             return CigarQueryValidationResult(PASS, 'no breakpoints')
 
