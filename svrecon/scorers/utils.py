@@ -184,8 +184,7 @@ def edlib_score(query_seq: str, target_seq: str, k: int = -1) -> Union[EdlibScor
         return None
 
     matched_target_sequence = target_seq[match_start:match_end + 1]
-    target_match_len = match_end - match_start + 1
     # TODO: revisit scoring. currently, normalize by the longer of query and matched span, so deletions widen thedenominator instead of inflating the rate.
-    denominator = max(len(query_seq), target_match_len)
+    denominator = len(query_seq)
     error_rate = result['editDistance'] / denominator
     return EdlibScoreResult(error=error_rate, cigar=result['cigar'], matched_target_sequence=matched_target_sequence)
