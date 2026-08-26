@@ -6,15 +6,19 @@ build-backend = "setuptools.build_meta"
 name = "svrecon"
 description = "Structural-variant reconstruction scoring"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dynamic = ["version"]
-dependencies = ["edlib", "intervaltree", "mappy", "pandas", "pysam", "pyyaml", "tqdm"]
+dependencies = ["edlib", "intervaltree", "mappy", "matplotlib", "pandas", "pysam", "pyyaml", "tqdm", "wotplot"]
 
 [project.scripts]
 svrecon = "svrecon.cli:main"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests", "tests/generators"]
+
 [tool.setuptools]
-packages = ["svrecon"]
+packages = ["svrecon", "svrecon.scorers"]
 
 [tool.setuptools.dynamic]
 version = {attr = "svrecon.__version__"}

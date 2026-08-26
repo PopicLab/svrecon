@@ -1,20 +1,20 @@
-"""Small shared helpers: sequence ops, FASTA loading, IGV session export."""
+"""Small shared helpers: sequence ops, FASTA/VCF loading, IGV session export."""
 import os
-from typing import Dict, List, Tuple, Union
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple, Union
 
 import pysam
+from intervaltree import IntervalTree
 from pysam import VariantRecord
 
-
-_RC_TRANS = str.maketrans('ACGTNacgtn', 'TGCANtgcan')
-
+_COMPLEMENT_TRANS = str.maketrans('ACGTNacgtn', 'TGCANtgcan')
 
 def reverse_complement(seq: Union[str, List[str]]) -> str:
     """Reverse complement of a DNA sequence (unknown bases -> N). Accepts a str or
     a list of single-character strings; always returns a str."""
     if not isinstance(seq, str):
         seq = ''.join(seq)
-    return seq.translate(_RC_TRANS)[::-1]
+    return seq.translate(_COMPLEMENT_TRANS)[::-1]
 
 
 def load_fasta_to_bytes(filename: str, chroms) -> Dict[str, bytearray]:
@@ -33,10 +33,51 @@ def load_fasta_to_bytes(filename: str, chroms) -> Dict[str, bytearray]:
 
 
 def get_start_stop(rec: VariantRecord) -> Tuple[int, int]:
-    """Converts VCF start/stop coordinates to Python style"""
-    start = rec.start - 1
-    stop = rec.stop
+    """Obtains VCF start/stop coordinates. If SVLEN is available, calculate stop (due to pysam bug in shifting stop)"""
+    start = rec.start
+    stop = start + rec.info['SVLEN'] if rec.info.get('SVLEN') else rec.stop
     return start, stop
+
+
+def load_exclude_list(gap_file: str) -> Dict[str, IntervalTree]:
+    exclude_list = defaultdict(IntervalTree)
+    with open(gap_file, 'r') as f:
+        for line in f:
+            row = line.strip().split()
+            chrom = row[1]
+            start, stop = int(row[2]), int(row[3])
+            region_type = row[7]
+            exclude_list[chrom][start:stop] = region_type
+    return exclude_list
+
+
+def group_variants_by_id(vcf_path: str, gap_file: Optional[str] = None) -> Dict[str, List[VariantRecord]]:
+    """Group a callset VCF's records by SVID, optionally dropping any SV with a record
+    (its own span, or its TARGET) overlapping an excluded region (e.g. centromere/telomere)."""
+    grouped_variants: Dict[str, List[VariantRecord]] = defaultdict(list)
+    for rec in pysam.VariantFile(vcf_path).fetch():
+        svid = rec.info.get('SVID')
+        if svid:
+            grouped_variants[svid].append(rec)
+
+    if not gap_file:
+        return grouped_variants
+
+    exclude_list = load_exclude_list(gap_file)
+    filtered_variants: Dict[str, List[VariantRecord]] = {}
+    for svid, records in grouped_variants.items():
+        allowed = True
+        for rec in records:
+            target_chrom = rec.info['TARGET_CHROM'] if 'TARGET_CHROM' in rec.info else None
+            if exclude_list[rec.chrom].overlap(rec.start, rec.stop) or \
+                    target_chrom and exclude_list[target_chrom].overlap(rec.info['TARGET'],
+                                                                        rec.info['TARGET'] + 1):
+                allowed = False
+                break
+        if allowed:
+            filtered_variants[svid] = records
+
+    return filtered_variants
 
 
 def export_igv_session(calls, bam, classified, timestamp, igv_prefix):

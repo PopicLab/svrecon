@@ -1,0 +1,43 @@
+# Two of each of 10 SV types on the synthetic chrT. Homozygous, so one haplotype carries all.
+# Symbol lengths are fixed and distinct (A=300, B=500, C=400) so a swapped segment is detectable.
+
+reference: reference.fa
+random_seed: 0
+homozygous_only: true
+min_intersv_dist: 5000
+max_tries: 1000
+
+variant_sets:
+
+  - type: "DEL"        # A -> ''
+    number: 2
+    length_ranges: [[300, 300]]
+  - type: "INV"        # A -> a
+    number: 2
+    length_ranges: [[300, 300]]
+  - type: "DUP"        # A -> A A+
+    number: 2
+    length_ranges: [[300, 300]]
+  - type: "DUP_INV"    # A -> a a+
+    number: 2
+    length_ranges: [[300, 300]]
+
+  - type: "delINV"     # A B -> b
+    number: 2
+    length_ranges: [[300, 300], [500, 500]]
+  - type: "INVdel"     # A B -> a
+    number: 2
+    length_ranges: [[300, 300], [500, 500]]
+
+  - type: "delINVdel"  # A B C -> b
+    number: 2
+    length_ranges: [[300, 300], [500, 500], [400, 400]]
+  - type: "delINVdup"  # A B C -> c b C
+    number: 2
+    length_ranges: [[300, 300], [500, 500], [400, 400]]
+  - type: "dupINVdel"  # A B C -> A b a
+    number: 2
+    length_ranges: [[300, 300], [500, 500], [400, 400]]
+  - type: "dupINVdup"  # A B C -> A c b a C
+    number: 2
+    length_ranges: [[300, 300], [500, 500], [400, 400]]
