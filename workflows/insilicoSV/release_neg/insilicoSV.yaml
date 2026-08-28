@@ -1,9 +1,3 @@
-# 8 SV types x 3 size classes x 5 = 120 SVs on hg38 chr21, seed 1.
-# The negative callset (scored against the seed-0 assembly; expect 0/120).
-# Restricted to in-place types (svrecon does not yet support dispersed events).
-# Size classes are half-open [50,500) [500,5000) [5000,20000); insilicoSV bounds are
-# inclusive, hence the -1 upper bounds. Run from this directory.
-
 reference: ../../data/chr21.fa
 random_seed: 1
 homozygous_only: true
@@ -14,108 +8,103 @@ th_proportion_N: 0.001
 blacklist_regions:
   - ../../data/chr21.rmsk.bed
 
-# blacklist_region_type is required on every variant set, else blacklist_regions is ignored.
-
 variant_sets:
 
-  # ---- small [50, 500) ----
-  - type: "DEL"  # A -> ''
+  - type: "DEL"
     number: 5
     length_ranges: [[50, 499]]
     blacklist_region_type: "all"
-  - type: "INV"  # A -> a
+  - type: "INV"
     number: 5
     length_ranges: [[50, 499]]
     blacklist_region_type: "all"
-  - type: "DUP"  # A -> AA+
+  - type: "DUP"
     number: 5
     length_ranges: [[50, 499]]
     blacklist_region_type: "all"
-  - type: "DUP_INV"  # A -> aa+
+  - type: "DUP_INV"
     number: 5
     length_ranges: [[50, 499]]
     blacklist_region_type: "all"
-  - type: "delINVdel"  # ABC -> b
+  - type: "delINVdel"
     number: 5
     length_ranges: [[50, 499], [50, 499], [50, 499]]
     blacklist_region_type: "all"
-  - type: "delINVdup"  # ABC -> cbC
+  - type: "delINVdup"
     number: 5
     length_ranges: [[50, 499], [50, 499], [50, 499]]
     blacklist_region_type: "all"
-  - type: "dupINVdel"  # ABC -> Aba
+  - type: "dupINVdel"
     number: 5
     length_ranges: [[50, 499], [50, 499], [50, 499]]
     blacklist_region_type: "all"
-  - type: "dupINVdup"  # ABC -> AcbaC
+  - type: "dupINVdup"
     number: 5
     length_ranges: [[50, 499], [50, 499], [50, 499]]
     blacklist_region_type: "all"
 
-  # ---- medium [500, 5000) ----
-  - type: "DEL"  # A -> ''
+  - type: "DEL"
     number: 5
     length_ranges: [[500, 4999]]
     blacklist_region_type: "all"
-  - type: "INV"  # A -> a
+  - type: "INV"
     number: 5
     length_ranges: [[500, 4999]]
     blacklist_region_type: "all"
-  - type: "DUP"  # A -> AA+
+  - type: "DUP"
     number: 5
     length_ranges: [[500, 4999]]
     blacklist_region_type: "all"
-  - type: "DUP_INV"  # A -> aa+
+  - type: "DUP_INV"
     number: 5
     length_ranges: [[500, 4999]]
     blacklist_region_type: "all"
-  - type: "delINVdel"  # ABC -> b
+  - type: "delINVdel"
     number: 5
     length_ranges: [[500, 4999], [500, 4999], [500, 4999]]
     blacklist_region_type: "all"
-  - type: "delINVdup"  # ABC -> cbC
+  - type: "delINVdup"
     number: 5
     length_ranges: [[500, 4999], [500, 4999], [500, 4999]]
     blacklist_region_type: "all"
-  - type: "dupINVdel"  # ABC -> Aba
+  - type: "dupINVdel"
     number: 5
     length_ranges: [[500, 4999], [500, 4999], [500, 4999]]
     blacklist_region_type: "all"
-  - type: "dupINVdup"  # ABC -> AcbaC
+  - type: "dupINVdup"
     number: 5
     length_ranges: [[500, 4999], [500, 4999], [500, 4999]]
     blacklist_region_type: "all"
 
-  # ---- large [5000, 20000) ----
-  - type: "DEL"  # A -> ''
+  - type: "DEL"
     number: 5
     length_ranges: [[5000, 19999]]
     blacklist_region_type: "all"
-  - type: "INV"  # A -> a
+  - type: "INV"
     number: 5
     length_ranges: [[5000, 19999]]
     blacklist_region_type: "all"
-  - type: "DUP"  # A -> AA+
+  - type: "DUP"
     number: 5
     length_ranges: [[5000, 19999]]
     blacklist_region_type: "all"
-  - type: "DUP_INV"  # A -> aa+
+  - type: "DUP_INV"
     number: 5
     length_ranges: [[5000, 19999]]
     blacklist_region_type: "all"
-  - type: "delINVdel"  # ABC -> b
+  - type: "delINVdel"
     number: 5
     length_ranges: [[5000, 19999], [5000, 19999], [5000, 19999]]
     blacklist_region_type: "all"
-  - type: "delINVdup"  # ABC -> cbC
+  - type: "delINVdup"
     number: 5
     length_ranges: [[5000, 19999], [5000, 19999], [5000, 19999]]
     blacklist_region_type: "all"
-  - type: "dupINVdel"  # ABC -> Aba
+  - type: "dupINVdel"
     number: 5
     length_ranges: [[5000, 19999], [5000, 19999], [5000, 19999]]
     blacklist_region_type: "all"
-  - type: "dupINVdup"  # ABC -> AcbaC
+  - type: "dupINVdup"
     number: 5
     length_ranges: [[5000, 19999], [5000, 19999], [5000, 19999]]
     blacklist_region_type: "all"

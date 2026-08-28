@@ -149,11 +149,10 @@ that are wrong precisely where the SV rearranges the sequence.
 
 - *alignment error* (always) — divergence within the aligned block (mismatches + indels /
   aligned length) ≤ `match_error_threshold`; clips don't count.
-- *no large errors* (if `max_indel_size` is set) — no single indel or soft-clipped flank that long.
+- *no large errors* (if `max_indel_size` is set) — max allowable size for single indel or soft-clipped.
 - *maximum error window* (on by default, `max_window_size: 100` / `max_window_error: 25`) — no
   window of `max_window_size` alignment columns holds `max_window_error` or more error columns
-  (mismatches, insertions, deletions, clips), catching clustered small defects that dilute below
-  threshold over the whole query.
+  (mismatches, insertions, deletions, clips)
 - *mappable* (on by default, `min_mappable_fraction: 0.95`) — proportion of query sequence that must be mappable bases (ACGT) for the query to not be marked inconclusive.
 
 A check returns `pass`, `fail`, or `inconclusive`, and the alignment's verdict is the roll-up:
@@ -254,22 +253,20 @@ insilicoSV, then scores two callsets against one assembly:
 | positive | seed 0 | seed 0 | 120/120 hits |
 | negative | seed 1 | seed 0 | 0/120 hits |
 
-Each arm is scored under two check configurations — `similarity-only` (bulk alignment error alone;
-every opt-in check disabled) and `full-validation` (adds `max_indel_size: 50`, plus the
-error-window check at `max_window_size: 100` / `max_window_error: 25`) — so a hit in the negative
-arm is a false positive attributable to that configuration:
+Each arm is scored under three check configurations, each adding one more check — `similarity-only`
+(bulk alignment error alone; every opt-in check disabled), `similarity-no-large-errors` (adds
+`max_indel_size: 50`), and `similarity-max-error-window` (adds the error-window check at
+`max_window_size: 100` / `max_window_error: 25`) — so a hit in the negative arm is a false positive
+attributable to that configuration:
 
 | arm | mode | small | medium | large | total | precision |
 | --- | --- | --- | --- | --- | --- | --- |
 | positive | similarity-only | 40/40 | 40/40 | 40/40 | 120/120 | 1.00 |
-| positive | full-validation | 40/40 | 40/40 | 40/40 | 120/120 | 1.00 |
+| positive | similarity-no-large-errors | 40/40 | 40/40 | 40/40 | 120/120 | 1.00 |
+| positive | similarity-max-error-window | 40/40 | 40/40 | 40/40 | 120/120 | 1.00 |
 | negative | similarity-only | 33/40 | 37/40 | 39/40 | 109/120 | 0.91 |
-| negative | full-validation | 0/40 | 0/40 | 0/40 | 0/120 | 0.00 |
-
-Both reach the 120/120 ceiling on the positive arm; on the negative arm, `similarity-only` leaks
-109 false positives (its bulk error is diluted by the 500 bp buffer regardless of SV size) while
-`full-validation` catches every one. Run it from the repo root with `insilicosv` and `svrecon`
-installed; the configs live in `workflows/`, and the last cell deletes everything generated.
+| negative | similarity-no-large-errors | 6/40 | 0/40 | 0/40 | 6/120 | 0.05 |
+| negative | similarity-max-error-window | 0/40 | 0/40 | 0/40 | 0/120 | 0.00 |
 
 ## Notes
 
