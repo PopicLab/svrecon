@@ -2,6 +2,7 @@
 and edlib HW scoring."""
 import re
 from bisect import bisect_right
+from collections import deque
 from dataclasses import dataclass
 from typing import List, Tuple, Union
 
@@ -12,31 +13,7 @@ import pysam
 
 class Cigar:
     """A CIGAR in normal form: pysam-ordered ``(op, length)`` tuples, forward-query orientation,
-    0 indexed, full query length (clipped flanks as explicit soft clips). Intervals are half-open
-    [start, end).
-
-    Two coordinate systems, one per prefix-array pair below, sized by op count (not length):
-
-    - query position: index into the query sequence. Only query-consuming ops advance it, so a
-      deletion (target-only) has no query position of its own.
-    - alignment column: index into the alignment itself. Query-consuming and target-only ops
-      both advance it, so a deletion occupies columns despite consuming no query.
-
-    Each array below is indexed by op index i in ``cigartuples``. Worked example throughout:
-    ``2S3=2D1X4=`` (ops 0-4: soft clip, match, deletion, mismatch, match).
-
-    - ``query_starts[i]`` -- the query position where op i begins (``query_starts[n]`` is the
-      total query length).
-        ex. ``query_starts = [0,2,5,5,6,10]``
-    - ``column_starts[i]`` -- the column where op i begins (``column_starts[n]`` is the total
-      column count).
-        ex. ``column_starts = [0,2,5,7,8,12]``
-    - ``error_prefix[i]`` -- error bases accumulated over ops [0, i).
-        ex. ``error_prefix = [0,2,2,2,3,3]``
-    - ``deletion_prefix[i]`` -- deleted (target-only) bases accumulated over ops [0, i).
-        ex. ``deletion_prefix = [0,0,0,2,2,2]``
-
-    Ops are homogeneous, so a window that splits one counts exactly its overlap.
+    0 indexed, full query length (clipped flanks as explicit soft clips).
 
     Official SAM/BAM CIGAR specification: https://samtools.github.io/hts-specs/SAMv1.pdf
     """
@@ -47,6 +24,7 @@ class Cigar:
     TARGET_ONLY_OPS = {DEL, REF_SKIP}                                       # query gaps (deletions)
     ERROR_OPS = {INS, SOFT_CLIP, SEQ_MISMATCH}                              # query bases that aren't clean matches
     COLUMN_CONSUMING_OPS = QUERY_CONSUMING_OPS | TARGET_ONLY_OPS            # advance the column cursor
+    COLUMN_ERROR_OPS = ERROR_OPS | TARGET_ONLY_OPS          # error columns: query-side errors + deletions
     _EDLIB_OP_CODES = {'M': MATCH, '=': SEQ_MATCH, 'X': SEQ_MISMATCH, 'I': INS, 'D': DEL}
     _OP_CHARS = 'MIDNSHP=X'  # indexed by op code, for __repr__
 
@@ -55,69 +33,72 @@ class Cigar:
 
     def __init__(self, cigartuples: List[Tuple[int, int]]):
         self.cigartuples = cigartuples
-        self.query_starts = [0]
-        self.column_starts = [0]
-        self.error_prefix = [0]
-        self.deletion_prefix = [0]
-        for op, length in cigartuples:
-            self.query_starts.append(self.query_starts[-1] + (length if op in self.QUERY_CONSUMING_OPS else 0))
-            self.column_starts.append(self.column_starts[-1] + (length if op in self.COLUMN_CONSUMING_OPS else 0))
-            self.error_prefix.append(self.error_prefix[-1] + (length if op in self.ERROR_OPS else 0))
-            self.deletion_prefix.append(self.deletion_prefix[-1] + (length if op in self.TARGET_ONLY_OPS else 0))
-        self.query_length = self.query_starts[-1]  # total query bases accounted for, clips included
-        self.column_length = self.column_starts[-1]  # total alignment columns, query bases and gaps alike
-
-    @property
-    def total_error_bases(self) -> int:
-        """Query bases that are clipped, inserted, or mismatched."""
-        return self.error_prefix[-1]
-
-    @property
-    def total_deleted_bases(self) -> int:
-        """Target bases the query skips over (deletions)."""
-        return self.deletion_prefix[-1]
+        # mappy-equivalent alignment stats. A plain M is trusted as a match -- a hidden mismatch
+        # inside it (no --eqx, no MD tag) isn't visible from the CIGAR alone.
+        self.blen = sum(op_len for op, op_len in cigartuples  # aligned block: M/I/D/=/X, clips excluded
+                        if op in self.COLUMN_CONSUMING_OPS and op != self.SOFT_CLIP)
+        self.NM = sum(op_len for op, op_len in cigartuples    # edit distance: mismatches + ins + del
+                      if op in {self.SEQ_MISMATCH, self.INS, self.DEL})
 
     @property
     def error_rate(self) -> float:
-        """Bulk error over the whole query: (error bases + deletions) / query length."""
-        return (self.total_error_bases + self.total_deleted_bases) / self.query_length
+        """Divergence within the aligned block: NM / blen. Clips don't count."""
+        return self.NM / self.blen
 
-    def _column_of(self, query_pos: int) -> int:
-        """The alignment column occupied by query base ``query_pos``. bisect_right (not _left)
-        skips past any zero-query-width deletion ops tied at the same query_starts value, landing
-        on the op that actually holds the base."""
-        op_idx = bisect_right(self.query_starts, query_pos) - 1
-        return self.column_starts[op_idx] + (query_pos - self.query_starts[op_idx])
+    def get_left_clip(self) -> int:
+        """Length of the leading soft clip"""
+        op, length = self.cigartuples[0]
+        return length if op == self.SOFT_CLIP else 0
 
-    def _at_column(self, column: int) -> Tuple[int, int]:
-        """``(error columns, query columns)`` in the half-open range [0, column). A column is an
-        error if it's a deletion or an error base -- anything that isn't a clean match."""
-        op_idx = bisect_right(self.column_starts, column) - 1
-        if op_idx >= len(self.cigartuples):  # column == column_length
-            return self.error_prefix[-1] + self.deletion_prefix[-1], self.query_starts[-1]
-        op = self.cigartuples[op_idx][0]
-        partial = column - self.column_starts[op_idx]  # a split op contributes its overlap
-        errors = self.error_prefix[op_idx] + self.deletion_prefix[op_idx]
-        if op in self.ERROR_OPS or op in self.TARGET_ONLY_OPS:
-            errors += partial
-        queries = self.query_starts[op_idx] + (partial if op in self.QUERY_CONSUMING_OPS else 0)
-        return errors, queries
+    def get_right_clip(self) -> int:
+        """Length of the trailing soft clip"""
+        op, length = self.cigartuples[-1]
+        return length if op == self.SOFT_CLIP else 0
 
-    def get_junction_error_rate(self, point: int, radius: int) -> float:
-        """Error rate around query base ``point``: from its alignment column, expand ``radius``
-        columns each way (closed, clamped to the alignment), score (error columns) / (query bases)
-        in that span.
+    def get_error_windows(self, window_size: int, error: int) -> List[Tuple[int, int]]:
+        """return all window ofs ``window_size`` alignment columns across the CIGAR"""
+        windows = []
+        # op_capacity is consumed as the window pulls an operation's columns in
+        cigar_operations = [[op, op_capacity] for op, op_capacity in self.cigartuples if op in self.COLUMN_CONSUMING_OPS]
+        window: deque = deque()                 # [op, columns] pieces currently in the window
+        window_columns = window_errors = 0
+        query_pos = 0                           # query coordinate at the window's left edge
+        cigar_idx = 0                           # first operation with capacity left to consume
 
-        e.g. ``3D5=`` (columns ``DDD=====``), point=0 (the first ``=``), radius=1 spans ``D==``:
-        one deletion column reached out of three, over two query bases -- 1/2, not 3/2 or 0."""
-        assert 0 <= point < self.query_length, f'point {point} outside the query [0,{self.query_length})'
-        center = self._column_of(point)
-        start = max(0, center - radius)
-        end = min(self.column_length - 1, center + radius)  # closed: the column at `end` counts
-        errors_end, queries_end = self._at_column(end + 1)
-        errors_start, queries_start = self._at_column(start)
-        # `center` is a query-consuming column inside the window, so the denominator is never 0
-        return (errors_end - errors_start) / (queries_end - queries_start)
+        # build the initial window, consuming all we can of each operation
+        while window_columns < window_size and cigar_idx < len(cigar_operations):
+            op, op_capacity = cigar_operations[cigar_idx]
+            take = min(op_capacity, window_size - window_columns)
+            window.append([op, take])
+            window_columns += take
+            window_errors += take if op in self.COLUMN_ERROR_OPS else 0
+            cigar_operations[cigar_idx][1] -= take
+            if cigar_operations[cigar_idx][1] == 0:
+                cigar_idx += 1
+        windows.append((query_pos, window_errors))
+        if window_columns < window_size:        # fewer columns than one window
+            return windows
+
+        # traverse: drop the window's leading piece, refill from the remaining capacity, emit
+        while cigar_idx < len(cigar_operations):
+            op, dropped = window.popleft()
+            window_columns -= dropped
+            window_errors -= dropped if op in self.COLUMN_ERROR_OPS else 0
+            query_pos += dropped if op in self.QUERY_CONSUMING_OPS else 0
+
+            while window_columns < window_size and cigar_idx < len(cigar_operations):
+                op, op_capacity = cigar_operations[cigar_idx]
+                take = min(op_capacity, window_size - window_columns)
+                window.append([op, take])
+                window_columns += take
+                window_errors += take if op in self.COLUMN_ERROR_OPS else 0
+                cigar_operations[cigar_idx][1] -= take
+                if cigar_operations[cigar_idx][1] == 0:
+                    cigar_idx += 1
+            if window_columns < window_size:    # out of columns; no further full window exists
+                return windows
+            windows.append((query_pos, window_errors))
+        return windows
 
     @classmethod
     def from_mappy(cls, alignment: mappy.Alignment, query_len: int) -> 'Cigar':

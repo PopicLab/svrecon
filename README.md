@@ -113,8 +113,8 @@ Config-file only (no CLI flag):
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `max_indel_size` | unset | If set, fail any alignment carrying an indel at least this long. |
-| `junction_radius` | unset | If set, additionally check the error rate within this radius of every breakpoint. |
+| `max_indel_size` | unset | If set, fail any alignment carrying an indel or a soft-clipped flank at least this long. |
+| `max_window_size`, `max_window_error` | `100`, `25` | If both are set, fail any alignment where some window of `max_window_size` alignment columns holds at least `max_window_error` error columns (mismatches, insertions, deletions, clips). Must be set together; set both to `null` to disable. |
 | `min_mappable_fraction` | `0.95` | A query with less than this fraction of mappable (ACGT) bases is inconclusive rather than pass/fail. Set to `null` to disable. Only bites above `1 - error threshold` — see below. |
 | `auto_buffer_min`, `auto_buffer_fraction` | `50`, `0.1` | Floor and fraction used by `buffer: auto`. |
 | `min_edlib_query` | `5000` | Queries at least this long skip the edlib fallback (cost bound). |
@@ -147,9 +147,13 @@ first pass:
 This catches alignments whose overall error is diluted below threshold by the flanking buffer but
 that are wrong precisely where the SV rearranges the sequence.
 
-- *sequence similarity* (always) — total error over the whole query ≤ the threshold.
-- *no large indels* (if `max_indel_size` is set) — no single indel that long.
-- *junctions* (if `junction_radius` is set) — local error within that radius of every breakpoint.
+- *alignment error* (always) — divergence within the aligned block (mismatches + indels /
+  aligned length) ≤ `match_error_threshold`; clips don't count.
+- *no large errors* (if `max_indel_size` is set) — no single indel or soft-clipped flank that long.
+- *maximum error window* (on by default, `max_window_size: 100` / `max_window_error: 25`) — no
+  window of `max_window_size` alignment columns holds `max_window_error` or more error columns
+  (mismatches, insertions, deletions, clips), catching clustered small defects that dilute below
+  threshold over the whole query.
 - *mappable* (on by default, `min_mappable_fraction: 0.95`) — proportion of query sequence that must be mappable bases (ACGT) for the query to not be marked inconclusive.
 
 A check returns `pass`, `fail`, or `inconclusive`, and the alignment's verdict is the roll-up:
@@ -209,28 +213,30 @@ Each record holds only what the *evaluation* concluded; join back to the call VC
 coordinates, types, and operations.
 
 ```jsonc
-{"svid": "sv10319",
- "svtype": "dupINVdup",          // redundant with the VCF; included for quick scanning
- "outcome": "hit",               // hit | miss | inconclusive
- "tier": "assembly",             // read | assembly | miss
+{"svid": "sv95",
+ "svtype": "DUP_INV",            // redundant with the VCF; included for quick scanning
+ "outcome": "hit",                // hit | miss | inconclusive
+ "tier": "assembly",               // read | assembly | miss
  "query_validations": [          // one entry per reconstructed query
-  {"chrom": "chr3",              // chromosome the query maps to (pairs with ref_start)
-   "ref_start": 187135426,       // reference coord of the query window's left anchor
+  {"chrom": "chr21",             // chromosome the query maps to (pairs with ref_start)
+   "ref_start": 15791280,        // reference coord of the query window's left anchor
    "status": "pass",             // decisive verdict: pass | fail | inconclusive
    "reason": "pass",             // pass | cigar_failed | other
-   "aligned": true,              // whether an alignment was found at all
+   "aligned": true,              // whether an alignment to a source was found at all
    "reference_ambiguous": false, // true if the allele also validated against the reference
    "source": "assembly",         // reads | assembly | edlib | null (which scorer decided)
-   "strand": 1,                  // 1 | -1 | null (null for reads -- randomly oriented)
-   "validations": [              // every scorer that ran, in order; the decisive one is ranked, not last
+   "strand": 1,                  // 1 | -1
+   "validations": [              // every scorer that ran, in order
     {"source": "assembly", "passed": true, "status": "pass", "reason": "pass", "aligned": true,
-     "cigar": "500=3X2I495=",      // the decisive alignment's CIGAR, for debugging
-     "lowest_pass_error": 0.0696,  // error of the adopted alignment (1.0 if none passed)
-     "lowest_error": 0.0696,       // best error seen, pass or fail
+     "cigar": "22216=",            // the decisive alignment's CIGAR, for debugging
+     "lowest_pass_error": 0.0,     // error of the adopted alignment (1.0 if none passed)
+     "lowest_error": 0.0,          // best error seen, pass or fail
      "strand": 1,
      "checks": [                   // one per configured CIGAR check, in configured order
-      {"status": "pass", "detail": "overall error 0.0696 <= 0.1"},
-      {"status": "pass", "detail": "junction errors {0:0.0, 812:0.01}, worst 812:0.01 <= 0.1"}]}],
+      {"status": "pass", "detail": "alignment error 0 <= 0.1"},
+      {"status": "pass", "detail": "no error run >= 50"},
+      {"status": "pass", "detail": "no window >= 25 errors per 100 (worst 0:0)"},
+      {"status": "pass", "detail": "mappable 1 >= 0.95"}]}],
    "ambiguity_validations": []}]}  // same shape, against the reference (--check-reference only)
 ```
 
@@ -248,12 +254,22 @@ insilicoSV, then scores two callsets against one assembly:
 | positive | seed 0 | seed 0 | 120/120 hits |
 | negative | seed 1 | seed 0 | 0/120 hits |
 
-Each arm is scored under three check configurations — `similarity-only`,
-`similarity-no-large-indels` (`max_indel_size: 50`), and `similarity-junction`
-(`junction_radius: 100`) — so a hit in the negative arm is a false positive attributable to that
-configuration. All three reach 120/120 on the positive arm; on the negative arm they leave 12, 12,
-and 0 false positives respectively. Run it from the repo root with `insilicosv` and `svrecon` installed; the configs
-live in `workflows/`, and the last cell deletes everything generated.
+Each arm is scored under two check configurations — `similarity-only` (bulk alignment error alone;
+every opt-in check disabled) and `full-validation` (adds `max_indel_size: 50`, plus the
+error-window check at `max_window_size: 100` / `max_window_error: 25`) — so a hit in the negative
+arm is a false positive attributable to that configuration:
+
+| arm | mode | small | medium | large | total | precision |
+| --- | --- | --- | --- | --- | --- | --- |
+| positive | similarity-only | 40/40 | 40/40 | 40/40 | 120/120 | 1.00 |
+| positive | full-validation | 40/40 | 40/40 | 40/40 | 120/120 | 1.00 |
+| negative | similarity-only | 33/40 | 37/40 | 39/40 | 109/120 | 0.91 |
+| negative | full-validation | 0/40 | 0/40 | 0/40 | 0/120 | 0.00 |
+
+Both reach the 120/120 ceiling on the positive arm; on the negative arm, `similarity-only` leaks
+109 false positives (its bulk error is diluted by the 500 bp buffer regardless of SV size) while
+`full-validation` catches every one. Run it from the repo root with `insilicosv` and `svrecon`
+installed; the configs live in `workflows/`, and the last cell deletes everything generated.
 
 ## Notes
 

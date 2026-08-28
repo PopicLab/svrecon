@@ -40,6 +40,8 @@ DEFAULTS = {
     'max_indel_size': None,   # if set, fail an alignment carrying an indel at least this long
     'junction_radius': None,  # if set, check the error rate within this radius of every breakpoint
     'min_mappable_fraction': 0.95,  # a query below this fraction of ACGT is inconclusive; null disables
+    'max_window_size': 100,   # error-window check: window size in alignment columns; null disables
+    'max_window_error': 25,   # error-window check: fail when a window holds at least this many error columns
 
     # Scoring parameters: read-based validation
     'read_error_threshold': 0.1,
@@ -95,6 +97,8 @@ VALID_PARAM_FNS = {
     'match_error_threshold': lambda arg: isinstance(arg, (int, float)),
     'max_indel_size': lambda arg: arg is None or isinstance(arg, int),
     'junction_radius': lambda arg: arg is None or isinstance(arg, int),
+    'max_window_size': lambda arg: arg is None or isinstance(arg, int),
+    'max_window_error': lambda arg: arg is None or isinstance(arg, int),
     'min_mappable_fraction': lambda arg: arg is None or (isinstance(arg, (int, float))
                                                          and 0 <= arg <= 1),
 
