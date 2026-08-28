@@ -131,6 +131,16 @@ describes, plus `--buffer` bp of reference context on each side. If the call is 
 query should appear in the sample. Dispersions produce a query at both the source and the target.
 Each SV is reconstructed in isolation, so nearby SVs — called or not — are ignored.
 
+The reconstruction process parses a VCF in insilicoSV format to produce an initial set of disjoint
+reference segments, as well as a sequence of deletion, insertion, and inversion operations, where a
+complex record can produce more than one. To apply them unambiguously, these operations operations are ordered:
+
+1. Rightmost-first, so an applied edit never shifts a still-pending operation's coordinates.
+2. At a tied position, invert/delete before insert -- they need an untouched segment boundary,
+   which a same-position insert would shift.
+3. Among tied inserts, by descending INSORD (insilicoSV's insertion-order field) -- each insert at a
+   shared position lands to the left of ones already placed there, thus processing operations in reverse results in placements of increasing INSORD order, left to right.
+
 **2. Align.** Each query is aligned against the configured sources in tier order, stopping at the
 first pass:
 
