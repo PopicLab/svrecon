@@ -1,6 +1,6 @@
 # svrecon
 
-**svrecon** — an SV callset validation framework based on reconstruction scoring. svrecon validates a callset (`--calls`) by reconstructing each alt sequence, then scoring it against provided long reads (`--bam`), a sample assembly (`--sample`), or both.
+**svrecon** — a complex SV callset validation framework based on reconstruction scoring. svrecon validates a callset (`--calls`) by reconstructing each alt sequence from a composable sequence of operations — capable of expressing any complex variant — then scoring it against provided long reads (`--bam`), a sample assembly (`--sample`), or both.
 
 ## Installation
 
@@ -47,7 +47,7 @@ svrecon --reference ref.fa --calls calls.vcf --bam sample.bam --sample sample.fa
 ```
 
 Give neither `--bam` nor `--sample` and every call comes back `inconclusive` — nothing was
-validated.
+validated. `--calls` must be a VCF in [insilicoSV](https://github.com/PopicLab/insilicoSV) format.
 
 For a repeatable run, put the same keys in a YAML config and pass `--config`. **Logs and reports
 are written to the config file's directory**, so each experiment is self-contained; without
@@ -77,7 +77,7 @@ Inputs:
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--reference` | — | Reference genome `.fa`. Required. |
-| `--calls` | — | VCF of called SVs, in InsilicoSV format. Required. |
+| `--calls` | — | VCF of called SVs, in [insilicoSV](https://github.com/PopicLab/insilicoSV) format. Required. |
 | `--bam` | — | Long reads aligned to `--reference`. Enables read validation. Indexed on first use if no `.bai`/`.csi` exists. |
 | `--sample` | — | Sample genome `.fa`. Enables assembly validation. |
 | `--gap-file` | — | Tab-delimited regions to omit (e.g. centromere, telomere). |
@@ -150,8 +150,7 @@ that are wrong precisely where the SV rearranges the sequence.
 - *sequence similarity* (always) — total error over the whole query ≤ the threshold.
 - *no large indels* (if `max_indel_size` is set) — no single indel that long.
 - *junctions* (if `junction_radius` is set) — local error within that radius of every breakpoint.
-- *mappable* (on by default, `min_mappable_fraction: 0.95`) — proportion of query sequence that must be mappable bases (ACGT) for the query to not be marked inconclusive
-
+- *mappable* (on by default, `min_mappable_fraction: 0.95`) — proportion of query sequence that must be mappable bases (ACGT) for the query to not be marked inconclusive.
 
 A check returns `pass`, `fail`, or `inconclusive`, and the alignment's verdict is the roll-up:
 `inconclusive` if any check could not judge the query, else `fail` if any failed, else `pass`.
@@ -235,9 +234,8 @@ coordinates, types, and operations.
    "ambiguity_validations": []}]}  // same shape, against the reference (--check-reference only)
 ```
 
-`ref_start` is the window anchor (≈ breakpoint − buffer), not an exact breakpoint, and a
-multi-operation complex SV produces one `query_validations` entry per reconstructed query, not per
-VCF record.
+A multi-operation complex SV produces one `SVValidationResult` with multiple query entries — one
+per reconstructed query, not per VCF record. The nesting of the output json mirrors the pipeline: **SV → queries** (one or more reconstructed queries per call, per step 1 above) **→ validations** (one per scorer that ran on that query -- reads, assembly, edlib -- per step 2) **→ checks** (one per configured CIGAR check within that scorer's alignment, per step 3).
 
 ## Benchmark
 
@@ -264,3 +262,6 @@ live in `workflows/`, and the last cell deletes everything generated.
   rebuilt automatically when the source FASTA changes.
 - Dot plots use wotplot, which accepts only `A`/`C`/`G`/`T`; a query containing `N` is skipped
   unless `--plot-substitute-bases` is given.
+- Dispersed events (dDUP, nrTRA, rTRA, and their inverted variants) are not currently supported --
+  specifically, a call's records' [start, stop) intervals must be contiguous and non-overlapping,
+  and every TARGET must land on one of those intervals' boundaries; otherwise svrecon raises.
