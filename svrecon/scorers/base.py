@@ -1,4 +1,5 @@
 """Scorer contract: the Scorer base class and the QueryValidation result it returns."""
+import re
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -79,18 +80,34 @@ class CigarQueryMaximumErrorWindowCheck(CigarQueryCheck):
 
 @dataclass
 class CigarQueryMappableCheck(CigarQueryCheck):
-    """Inconclusive if fraction of mappable bases of the query (A/C/G/T) is not above ```min_mappable_fraction```"""
-    min_mappable_fraction: float
+    """
+    pass if every configured condition is met 
+    - fraction of mappable bases of the query (A/C/G/T) is above ```min_mappable_fraction```
+    - no large contiguous nonmappable region of at least length ```max_unmappable_size```
+    otherwise inconclusive
+    """
+    min_mappable_fraction: Optional[float]
+    max_unmappable_size: Optional[int]
 
     def validate(self, cigar: Cigar, query: Query) -> CigarQueryCheckResult:
         sequence = query.sequence.upper()
-        # str.count runs in C; a per-base Python loop would rerun for every candidate alignment
-        mappable = sum(sequence.count(base) for base in MAPPABLE_BASES)
-        fraction = mappable / len(sequence) if sequence else 0.0
-        passed = fraction >= self.min_mappable_fraction
-        return CigarQueryCheckResult(
-            PASS if passed else INCONCLUSIVE,
-            f'mappable {fraction:.4g} {">=" if passed else "<"} {self.min_mappable_fraction}')
+        checks = []  # (passed, detail) pairs, one per condition that's actually configured
+
+        if self.min_mappable_fraction is not None:
+            mappable = sum(sequence.count(base) for base in MAPPABLE_BASES)
+            mappable_fraction = mappable / len(sequence) if sequence else 0.0
+            mapple_fraction_pass = mappable_fraction >= self.min_mappable_fraction
+            checks.append((mapple_fraction_pass, f'mappable {mappable_fraction:.4g} '
+                          f'{">=" if mapple_fraction_pass else "<"} {self.min_mappable_fraction}'))
+
+        if self.max_unmappable_size is not None:
+            longest_gap = max((len(m.group()) for m in re.finditer(f'[^{MAPPABLE_BASES}]+', sequence)), default=0)
+            gap_pass = longest_gap < self.max_unmappable_size
+            checks.append((gap_pass, f'longest nonmappable run {longest_gap} '
+                          f'{"<" if gap_pass else ">="} {self.max_unmappable_size}'))
+
+        passed = all(check_pass for check_pass, _ in checks)
+        return CigarQueryCheckResult(PASS if passed else INCONCLUSIVE, ', '.join(d for _, d in checks))
 
 @dataclass
 class QueryValidation:
@@ -165,9 +182,10 @@ class Scorer:
             self.cigar_query_checks.append(
                 CigarQueryMaximumErrorWindowCheck(max_window_size=config.max_window_size,
                                                   max_window_error=config.max_window_error))
-        if config.min_mappable_fraction is not None:
+        if config.min_mappable_fraction is not None or config.max_unmappable_size is not None:
             self.cigar_query_checks.append(
-                CigarQueryMappableCheck(min_mappable_fraction=config.min_mappable_fraction))
+                CigarQueryMappableCheck(min_mappable_fraction=config.min_mappable_fraction,
+                                        max_unmappable_size=config.max_unmappable_size))
 
     def score_cigar(self, cigar: Cigar,
                     query: Query) -> Tuple[QueryValidationStatus, List[CigarQueryCheckResult]]:
