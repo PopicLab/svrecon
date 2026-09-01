@@ -58,46 +58,45 @@ class Cigar:
     def get_error_windows(self, window_size: int, error: int) -> List[Tuple[int, int]]:
         """return all window ofs ``window_size`` alignment columns across the CIGAR"""
         windows = []
-        # op_capacity is consumed as the window pulls an operation's columns in
         cigar_operations = [[op, op_capacity] for op, op_capacity in self.cigartuples if op in self.COLUMN_CONSUMING_OPS]
-        window: deque = deque()                 # [op, columns] pieces currently in the window
-        window_columns = window_errors = 0
-        query_pos = 0                           # query coordinate at the window's left edge
-        cigar_idx = 0                           # first operation with capacity left to consume
+        window: deque = deque()                 
+        num_window_columns = num_window_errors = 0
+        query_pos = 0                           
+        cigar_idx = 0                           
 
         # build the initial window, consuming all we can of each operation
-        while window_columns < window_size and cigar_idx < len(cigar_operations):
+        while num_window_columns < window_size and cigar_idx < len(cigar_operations):
             op, op_capacity = cigar_operations[cigar_idx]
-            take = min(op_capacity, window_size - window_columns)
+            take = min(op_capacity, window_size - num_window_columns)
             window.append([op, take])
-            window_columns += take
-            window_errors += take if op in self.COLUMN_ERROR_OPS else 0
+            num_window_columns += take
+            num_window_errors += take if op in self.COLUMN_ERROR_OPS else 0
             cigar_operations[cigar_idx][1] -= take
             if cigar_operations[cigar_idx][1] == 0:
                 cigar_idx += 1
-        windows.append((query_pos, window_errors))
-        if window_columns < window_size:        # fewer columns than one window
+        windows.append((query_pos, num_window_errors))
+        if num_window_columns < window_size:        # fewer columns than one window
             return windows
 
-        # traverse: drop the window's leading piece, refill from the remaining capacity, emit
+        # traverse cigar: drop the window's trailing piece, refill from the remaining capacity from the right
         while cigar_idx < len(cigar_operations):
-            op, dropped = window.popleft()
-            window_columns -= dropped
-            window_errors -= dropped if op in self.COLUMN_ERROR_OPS else 0
-            query_pos += dropped if op in self.QUERY_CONSUMING_OPS else 0
+            op, num_dropped_ops = window.popleft()
+            num_window_columns -= num_dropped_ops
+            num_window_errors -= num_dropped_ops if op in self.COLUMN_ERROR_OPS else 0
+            query_pos += num_dropped_ops if op in self.QUERY_CONSUMING_OPS else 0
 
-            while window_columns < window_size and cigar_idx < len(cigar_operations):
+            while num_window_columns < window_size and cigar_idx < len(cigar_operations):
                 op, op_capacity = cigar_operations[cigar_idx]
-                take = min(op_capacity, window_size - window_columns)
+                take = min(op_capacity, window_size - num_window_columns)
                 window.append([op, take])
-                window_columns += take
-                window_errors += take if op in self.COLUMN_ERROR_OPS else 0
+                num_window_columns += take
+                num_window_errors += take if op in self.COLUMN_ERROR_OPS else 0
                 cigar_operations[cigar_idx][1] -= take
                 if cigar_operations[cigar_idx][1] == 0:
                     cigar_idx += 1
-            if window_columns < window_size:    # out of columns; no further full window exists
+            if num_window_columns < window_size:    # out of columns; no further full window exists
                 return windows
-            windows.append((query_pos, window_errors))
+            windows.append((query_pos, num_window_errors))
         return windows
 
     @classmethod
