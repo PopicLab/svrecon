@@ -20,21 +20,20 @@ class Cigar:
 
     # CIGAR operation codes (SAM/BAM spec), in code order.
     MATCH, INS, DEL, REF_SKIP, SOFT_CLIP, HARD_CLIP, PAD, SEQ_MATCH, SEQ_MISMATCH = range(9)
-    QUERY_CONSUMING_OPS = {MATCH, INS, SOFT_CLIP, SEQ_MATCH, SEQ_MISMATCH}  # advance the query cursor
-    TARGET_ONLY_OPS = {DEL, REF_SKIP}                                       # query gaps (deletions)
+    QUERY_CONSUMING_OPS = {MATCH, INS, SOFT_CLIP, SEQ_MATCH, SEQ_MISMATCH}  # advances the query cursor
+    TARGET_ONLY_OPS = {DEL, REF_SKIP}                                       # query gaps
     ERROR_OPS = {INS, SOFT_CLIP, SEQ_MISMATCH}                              # query bases that aren't clean matches
-    COLUMN_CONSUMING_OPS = QUERY_CONSUMING_OPS | TARGET_ONLY_OPS            # advance the column cursor
-    COLUMN_ERROR_OPS = ERROR_OPS | TARGET_ONLY_OPS          # error columns: query-side errors + deletions
+    COLUMN_CONSUMING_OPS = QUERY_CONSUMING_OPS | TARGET_ONLY_OPS            # advances the column cursor
+    COLUMN_ERROR_OPS = ERROR_OPS | TARGET_ONLY_OPS                          # error columns: query-side errors + deletions
     _EDLIB_OP_CODES = {'M': MATCH, '=': SEQ_MATCH, 'X': SEQ_MISMATCH, 'I': INS, 'D': DEL}
-    _OP_CHARS = 'MIDNSHP=X'  # indexed by op code, for __repr__
+    _OP_CHARS = 'MIDNSHP=X'  # cigar ops, indexed by op code
 
     def __repr__(self) -> str:
         return ''.join(f'{length}{self._OP_CHARS[op]}' for op, length in self.cigartuples)
 
     def __init__(self, cigartuples: List[Tuple[int, int]]):
         self.cigartuples = cigartuples
-        # mappy-equivalent alignment stats. A plain M is trusted as a match -- a hidden mismatch
-        # inside it (no --eqx, no MD tag) isn't visible from the CIGAR alone.
+        # attributes following mappy.Alignment
         self.blen = sum(op_len for op, op_len in cigartuples  # aligned block: M/I/D/=/X, clips excluded
                         if op in self.COLUMN_CONSUMING_OPS and op != self.SOFT_CLIP)
         self.NM = sum(op_len for op, op_len in cigartuples    # edit distance: mismatches + ins + del
@@ -56,7 +55,7 @@ class Cigar:
         return length if op == self.SOFT_CLIP else 0
 
     def get_error_windows(self, window_size: int, error: int) -> List[Tuple[int, int]]:
-        """return all window ofs ``window_size`` alignment columns across the CIGAR"""
+        """return all window ofs ```window_size``` alignment columns across the CIGAR"""
         windows = []
         cigar_operations = [[op, op_capacity] for op, op_capacity in self.cigartuples if op in self.COLUMN_CONSUMING_OPS]
         window: deque = deque()                 
@@ -117,8 +116,7 @@ class Cigar:
 
     @classmethod
     def from_edlib(cls, cigar_str: str) -> 'Cigar':
-        """Parses an edlib task='path' CIGAR string; HW mode is already full-query
-        and forward, so parsing is the only normalization needed.
+        """Parses an edlib CIGAR string.
 
         e.g. '50=1X149=' -> [(=, 50), (X, 1), (=, 149)]"""
         return cls([(cls._EDLIB_OP_CODES[m.group(2)], int(m.group(1)))
