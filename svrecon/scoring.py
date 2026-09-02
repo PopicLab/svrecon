@@ -261,12 +261,9 @@ class CallsetScorer(object):
 
     def _assert_sv_records_non_overlapping(self, records: List[VariantRecord]) -> None:
         """
-        Asserts the following conditions:
-        - all [start, stop) intervals are non overlapping
-        - all targets are either outside of [min(starts), max(stops)], or land on an existing endpoint
+        Asserts all [start, stop) intervals are non overlapping
         """
-        # Dedupe identical (start, stop) spans -- multiple records can share one source span
-        # for different downstream operations -- before sorting.
+        # Dedupe identical (start, stop) spans -- ensure non overlapping
         by_interval: Dict[Tuple[int, int], VariantRecord] = {}
         for rec in records:
             by_interval.setdefault(get_start_stop(rec), rec)
@@ -277,18 +274,19 @@ class CallsetScorer(object):
                                  f'the preceding record {prev_rec.id} [{prev_start},{prev_stop}) '
                                  f'by {prev_stop - start} bp')
 
-        # find min/max start, stops, check target pos
-        starts = {start for start, _, _ in intervals}
-        stops = {stop for _, stop, _ in intervals}
-        min_start = min(starts)
-        max_stop = max(stops)
+    def _assert_sv_records_no_split_segments(self, records: List[VariantRecord]) -> None:
+        """
+        Asserts no target lands in an interval's (start, stop) -- which would result in a split segment
+        """
         for rec in records:
             target = rec.info.get('TARGET')
             if target is None:
                 continue
-            if min_start <= target <= max_stop and target not in starts and target not in stops:
-                raise ValueError(f'{rec.chrom}: record {rec.id} TARGET={target} falls inside the SV\'s '
-                                 f'span [{min_start},{max_stop}) but does not land on an existing interval boundary')
+            for source_rec in records:
+                start, stop = get_start_stop(source_rec)
+                if start < target < stop:
+                    raise ValueError(f'{rec.chrom}: record {rec.id} TARGET={target} falls inside '
+                                     f'record {source_rec.id}\'s interval [{start},{stop})')
 
     def _assert_sv_records_non_interchromosomal(self, records: List[VariantRecord]) -> None:
         """
@@ -423,6 +421,7 @@ class CallsetScorer(object):
             self._assert_sv_records_non_interchromosomal(records)
             self._assert_sv_records_positive_lengths(records)
             self._assert_sv_records_non_overlapping(records)
+            self._assert_sv_records_no_split_segments(records)
 
             sv_buffer = self._resolve_buffer(records)
             query_validations: List[QueryValidationResult] = []  # one per reconstructed query of an SV
