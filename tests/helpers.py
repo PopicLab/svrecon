@@ -50,13 +50,16 @@ def get_config(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**{**DEFAULTS, **overrides})
 
 
+GRAMMAR = 'dummy'  # scorers never read it; only construct_queries derives a real one
+
+
 def get_reconstructed_query(sv, reference: str) -> Query:
     """Query from the simulated SV -- positive testing."""
     ref_start, ref_end = sv.ref_start - BUFFER, sv.ref_end + BUFFER
     sequence = (reference[ref_start:sv.ref_start] + sv.alt_sequence
                 + reference[sv.ref_end:ref_end])
     alt_end = BUFFER + len(sv.alt_sequence)
-    return Query(chrom=CHROM, svtype=sv.svtype, svid=sv.svid, sequence=sequence,
+    return Query(chrom=CHROM, svtype=sv.svtype, svid=sv.svid, grammar=GRAMMAR, sequence=sequence,
                  ref_start=ref_start, ref_end=ref_end,
                  recon_segments=[(0, BUFFER), (BUFFER, alt_end), (alt_end, len(sequence))],
                  ref_segments=[(ref_start, sv.ref_start), (sv.ref_start, sv.ref_end),
@@ -68,7 +71,7 @@ def get_reference_query(sv, reference: str) -> Query:
     """The untouched reference over the same span -- negative testing."""
     ref_start, ref_end = sv.ref_start - BUFFER, sv.ref_end + BUFFER
     sequence = reference[ref_start:ref_end]
-    return Query(chrom=CHROM, svtype=sv.svtype, svid=sv.svid, sequence=sequence,
+    return Query(chrom=CHROM, svtype=sv.svtype, svid=sv.svid, grammar=GRAMMAR, sequence=sequence,
                  ref_start=ref_start, ref_end=ref_end,
                  recon_segments=[(0, len(sequence))], ref_segments=[(ref_start, ref_end)],
                  ref_sequence=sequence, buffer=BUFFER)

@@ -1,4 +1,4 @@
-"""Reconstruction against the assembly insilicoSV built: the rebuilt allele must match it exactly."""
+"""Reconstruction tests."""
 from typing import List, NamedTuple
 
 import pytest
@@ -48,10 +48,7 @@ BUFFER_SIZE = len(BUFFER)  # every grammar case buffers by exactly the flank it 
 A, B, C = 'AAAA', 'CACACA', 'ACACACAC'                                         # A/C only
 a, b, c = reverse_complement(A), reverse_complement(B), reverse_complement(C)  # T/G only
 
-# The '_' of a dispersed grammar. SHORT_DISP is at most 2*BUFFER_SIZE, so the source and target
-# buffers touch and the SV reconstructs as one window; LONG_DISP is wider, leaving two independent
-# windows that keep only DISP_HEAD / DISP_TAIL of the dispersion -- its middle lands in neither.
-SHORT_DISP = 'CCAA'
+SHORT_DISP = 'CCAA' # exactly half of buffer size
 LONG_DISP = SHORT_DISP * 2
 DISP_HEAD, DISP_TAIL = LONG_DISP[:BUFFER_SIZE], LONG_DISP[-BUFFER_SIZE:]
 
@@ -70,10 +67,10 @@ class DummyRecord:
 
 class GrammarCase(NamedTuple):
     name: str
-    reference: str                 #  BUFFER + blocks back to back + BUFFER
+    reference: str                 #  BUFFER + contig + BUFFER
     buffer: int
     records: List[DummyRecord]
-    expected_sequences: List[str]  # one per reconstructed window, in order
+    expected_sequences: List[str]  # [buffer + contig + buffer]
 
 GRAMMAR_CASES = [
     GrammarCase('DEL', BUFFER + A + BUFFER, BUFFER_SIZE, [
@@ -93,43 +90,43 @@ GRAMMAR_CASES = [
         DummyRecord(start=len(BUFFER), stop=len(BUFFER + A), alt='COPYinv-PASTE', target=len(BUFFER + A), insord=0)], # A -> aa
         [BUFFER + a + a + BUFFER]),
     GrammarCase('delINV', BUFFER + A + B + BUFFER, BUFFER_SIZE, [
-        DummyRecord(start=len(BUFFER + A), stop=len(BUFFER + A + B), alt='INV')], # AB -> Ab
-        DummyRecord(start=len(BUFFER), stop=len(BUFFER + A), alt='CUT'), # AB -> b
+        DummyRecord(start=len(BUFFER + A), stop=len(BUFFER + A + B), alt='INV'), # AB -> Ab
+        DummyRecord(start=len(BUFFER), stop=len(BUFFER + A), alt='CUT')], # AB -> b
         [BUFFER + b + BUFFER]),
     GrammarCase('INVdel', BUFFER + A + B + BUFFER, BUFFER_SIZE, [
-        DummyRecord(start=len(BUFFER + A), stop=len(BUFFER + A + B), alt='CUT')], # AB -> A
-        DummyRecord(start=len(BUFFER), stop=len(BUFFER + A), alt='INV'), # AB -> a
+        DummyRecord(start=len(BUFFER + A), stop=len(BUFFER + A + B), alt='CUT'), # AB -> A
+        DummyRecord(start=len(BUFFER), stop=len(BUFFER + A), alt='INV')], # AB -> a
         [BUFFER + a + BUFFER]),
     GrammarCase('dupINV', BUFFER + A + B + BUFFER, BUFFER_SIZE, [
-        DummyRecord(start=len(BUFFER + A), stop=len(BUFFER + A + B), alt='INV')], # AB -> Ab
-        DummyRecord(start=len(BUFFER), stop=len(BUFFER + A), alt='COPYinv-PASTE', target=len(BUFFER + A + B), insord=0), # AB -> Aba
+        DummyRecord(start=len(BUFFER + A), stop=len(BUFFER + A + B), alt='INV'), # AB -> Ab
+        DummyRecord(start=len(BUFFER), stop=len(BUFFER + A), alt='COPYinv-PASTE', target=len(BUFFER + A + B), insord=0)], # AB -> Aba
         [BUFFER + A + b + a + BUFFER]),
     GrammarCase('INVdup', BUFFER + A + B + BUFFER, BUFFER_SIZE, [
-        DummyRecord(start=len(BUFFER + A), stop=len(BUFFER + A + B), alt='COPY-PASTE', target=len(BUFFER + A + B), insord=1)], # AB -> ABB
+        DummyRecord(start=len(BUFFER + A), stop=len(BUFFER + A + B), alt='COPY-PASTE', target=len(BUFFER + A + B), insord=1), # AB -> ABB
         DummyRecord(start=len(BUFFER), stop=len(BUFFER + A), alt='CUTinv-PASTE', target=len(BUFFER + A + B), insord=0), # invPaste AB -> ABaB, CUT AB-> AbaB, INV AB-> baB
-        DummyRecord(start=len(BUFFER + A), stop=len(BUFFER + A + B), alt='INV'), 
+        DummyRecord(start=len(BUFFER + A), stop=len(BUFFER + A + B), alt='INV')], 
         [BUFFER + b + a + B + BUFFER]),
     GrammarCase('dupINVdup', BUFFER + A + B + C + BUFFER, BUFFER_SIZE, [
         DummyRecord(start=len(BUFFER + A + B), stop=len(BUFFER + A + B + C), alt='INV'), # ABC -> ABc
-        DummyRecord(start=len(BUFFER + A + B), stop=len(BUFFER + A + B + C), alt='COPY-PASTE', target=len(BUFFER + A + B + C), insord=2)], # ABC -> ABcC
+        DummyRecord(start=len(BUFFER + A + B), stop=len(BUFFER + A + B + C), alt='COPY-PASTE', target=len(BUFFER + A + B + C), insord=2), # ABC -> ABcC
         DummyRecord(start=len(BUFFER), stop=len(BUFFER + A), alt='COPYinv-PASTE', target=len(BUFFER + A + B + C), insord=1), # ABC -> ABcaC
-        DummyRecord(start=len(BUFFER + A), stop=len(BUFFER + A + B), alt='CUTinv-PASTE', target=len(BUFFER + A + B + C), insord=0), # ABC -> AcbaC
+        DummyRecord(start=len(BUFFER + A), stop=len(BUFFER + A + B), alt='CUTinv-PASTE', target=len(BUFFER + A + B + C), insord=0)], # ABC -> AcbaC
         [BUFFER + A + c + b + a + C + BUFFER]),
     GrammarCase('delINVdel', BUFFER + A + B + C + BUFFER, BUFFER_SIZE, [
-        DummyRecord(start=len(BUFFER + A + B), stop=len(BUFFER + A + B + C), alt='CUT')], # ABC -> AB
+        DummyRecord(start=len(BUFFER + A + B), stop=len(BUFFER + A + B + C), alt='CUT'), # ABC -> AB
         DummyRecord(start=len(BUFFER + A), stop=len(BUFFER + A + B), alt='INV'), # ABC -> Ab
-        DummyRecord(start=len(BUFFER), stop=len(BUFFER + A), alt='CUT'), # ABC -> b
+        DummyRecord(start=len(BUFFER), stop=len(BUFFER + A), alt='CUT')], # ABC -> b
         [BUFFER + b + BUFFER]),
     GrammarCase('delINVdup', BUFFER + A + B + C + BUFFER, BUFFER_SIZE, [
-        DummyRecord(start=len(BUFFER + A + B), stop=len(BUFFER + A + B + C), alt='COPY-PASTE', target=len(BUFFER + A + B + C), insord=1)], # ABC -> ABCC
+        DummyRecord(start=len(BUFFER + A + B), stop=len(BUFFER + A + B + C), alt='COPY-PASTE', target=len(BUFFER + A + B + C), insord=1), # ABC -> ABCC
         DummyRecord(start=len(BUFFER + A), stop=len(BUFFER + A + B), alt='CUTinv-PASTE', target=len(BUFFER + A + B + C), insord=0), # ABC-> ABCbC ->ABcbC -> AcbC
         DummyRecord(start=len(BUFFER + A + B), stop=len(BUFFER + A + B + C), alt='INV'), 
-        DummyRecord(start=len(BUFFER), stop=len(BUFFER + A), alt='CUT'), # ABC -> cbC
+        DummyRecord(start=len(BUFFER), stop=len(BUFFER + A), alt='CUT')], # ABC -> cbC
         [BUFFER + c + b + C + BUFFER]),
     GrammarCase('dupINVdel', BUFFER + A + B + C + BUFFER, BUFFER_SIZE, [
-        DummyRecord(start=len(BUFFER + A + B), stop=len(BUFFER + A + B + C), alt='CUT')], # ABC -> AB
+        DummyRecord(start=len(BUFFER + A + B), stop=len(BUFFER + A + B + C), alt='CUT'), # ABC -> AB
         DummyRecord(start=len(BUFFER), stop=len(BUFFER + A), alt='COPYinv-PASTE', target=len(BUFFER + A + B), insord=0), # ABC -> ABa
-        DummyRecord(start=len(BUFFER + A), stop=len(BUFFER + A + B), alt='INV'), # ABC -> Aba
+        DummyRecord(start=len(BUFFER + A), stop=len(BUFFER + A + B), alt='INV')], # ABC -> Aba
         [BUFFER + A + b + a + BUFFER]),
 
     # dispersed, twice each: SHORT_DISP keeps one window, LONG_DISP splits into two
@@ -189,8 +186,8 @@ GRAMMAR_CASES = [
         [BUFFER + b + DISP_HEAD,
          DISP_TAIL + a + BUFFER]),
     GrammarCase('INS_iDEL-short', BUFFER + A + SHORT_DISP + B + BUFFER, BUFFER_SIZE, [
-        DummyRecord(start=len(BUFFER + A + SHORT_DISP), stop=len(BUFFER + A + SHORT_DISP + B), alt='CUT')],
-        DummyRecord(start=len(BUFFER), stop=len(BUFFER + A), alt='CUT-PASTE', target=len(BUFFER + A + SHORT_DISP), insord=0),
+        DummyRecord(start=len(BUFFER + A + SHORT_DISP), stop=len(BUFFER + A + SHORT_DISP + B), alt='CUT'),
+        DummyRecord(start=len(BUFFER), stop=len(BUFFER + A), alt='CUT-PASTE', target=len(BUFFER + A + SHORT_DISP), insord=0)],
         [BUFFER + SHORT_DISP + A + BUFFER]),
     GrammarCase('INS_iDEL-long', BUFFER + A + LONG_DISP + B + BUFFER, BUFFER_SIZE, [
         DummyRecord(start=len(BUFFER), stop=len(BUFFER + A), alt='CUT-PASTE', target=len(BUFFER + A + LONG_DISP), insord=0),
@@ -202,8 +199,8 @@ GRAMMAR_CASES = [
         DummyRecord(start=len(BUFFER + A + SHORT_DISP), stop=len(BUFFER + A + SHORT_DISP + B), alt='CUT')],
         [BUFFER + A + SHORT_DISP + A + BUFFER]),
     GrammarCase('dDUP_iDEL-long', BUFFER + A + LONG_DISP + B + BUFFER, BUFFER_SIZE, [
-        DummyRecord(start=len(BUFFER + A + LONG_DISP), stop=len(BUFFER + A + LONG_DISP + B), alt='CUT')],
-        DummyRecord(start=len(BUFFER), stop=len(BUFFER + A), alt='COPY-PASTE', target=len(BUFFER + A + LONG_DISP), insord=0),
+        DummyRecord(start=len(BUFFER + A + LONG_DISP), stop=len(BUFFER + A + LONG_DISP + B), alt='CUT'),
+        DummyRecord(start=len(BUFFER), stop=len(BUFFER + A), alt='COPY-PASTE', target=len(BUFFER + A + LONG_DISP), insord=0)],
         [BUFFER + A + DISP_HEAD,
          DISP_TAIL + A + BUFFER]),
 ]
