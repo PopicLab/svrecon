@@ -1,6 +1,6 @@
 reference: ../../../data/chr21.fa
-calls: ../../../insilicoSV/release/sim.vcf
-sample: ../../../insilicoSV/release/sim.hapA.fa
+calls: ../../../insilicoSV/medium-1/sim.vcf
+sample: ../../../insilicoSV/medium-0/sim.hapA.fa
 
 buffer: 500
 match_error_threshold: 0.1
