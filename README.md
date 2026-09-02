@@ -116,6 +116,7 @@ Config-file only (no CLI flag):
 | `max_indel_size` | unset | If set, fail any alignment carrying an indel or a soft-clipped flank at least this long. |
 | `max_window_size`, `max_window_error` | `100`, `25` | If both are set, fail any alignment where some window of `max_window_size` alignment columns holds at least `max_window_error` error columns (mismatches, insertions, deletions, clips). Must be set together; set both to `null` to disable. |
 | `min_mappable_fraction` | `0.95` | A query with less than this fraction of mappable (ACGT) bases is inconclusive rather than pass/fail. Set to `null` to disable. Only bites above `1 - error threshold` — see below. |
+| `max_unmappable_size` | `50` | A query with a contiguous non-ACGT run at least this long is inconclusive rather than pass/fail. Set to `null` to disable. |
 | `auto_buffer_min`, `auto_buffer_fraction` | `50`, `0.1` | Floor and fraction used by `buffer: auto`. |
 | `min_edlib_query` | `5000` | Queries at least this long skip the edlib fallback (cost bound). |
 | `edlib_fallback_max_tolerance` | `10000000` | Search-window radius cap for the edlib fallback. A cost bound on an otherwise unbounded O(n·m) search, kept separate from `location_tolerance`. |
@@ -128,7 +129,8 @@ exists in the sample.
 **1. Reconstruct.** A complex SV may carry several operations, so each SV yields one or more
 **queries**: the reference spanning the operations' positions and targets, transformed as the call
 describes, plus `--buffer` bp of reference context on each side. If the call is correct, that
-query should appear in the sample. Dispersions produce a query at both the source and the target.
+query should appear in the sample. A dispersion can produce one or two queries: one if the source
+and target buffers overlap and merge into a single window, two independent ones if they don't.
 Each SV is reconstructed in isolation, so nearby SVs — called or not — are ignored.
 
 The reconstruction process parses a VCF in insilicoSV format to produce an initial set of disjoint
@@ -163,7 +165,7 @@ that are wrong precisely where the SV rearranges the sequence.
 - *maximum error window* (on by default, `max_window_size: 100` / `max_window_error: 25`) — no
   window of `max_window_size` alignment columns holds `max_window_error` or more error columns
   (mismatches, insertions, deletions, clips)
-- *mappable* (on by default, `min_mappable_fraction: 0.95`) — proportion of query sequence that must be mappable bases (ACGT) for the query to not be marked inconclusive.
+- *mappable* (on by default, `min_mappable_fraction: 0.95`, `max_unmappable_size: 50`) — inconclusive if less than `min_mappable_fraction` of the query is ACGT, or if it contains a contiguous non-ACGT run of at least `max_unmappable_size`.
 
 A check returns `pass`, `fail`, or `inconclusive`, and the alignment's verdict is the roll-up:
 `inconclusive` if any check could not judge the query, else `fail` if any failed, else `pass`.
@@ -222,32 +224,64 @@ Each record holds only what the *evaluation* concluded; join back to the call VC
 coordinates, types, and operations.
 
 ```jsonc
-{"svid": "sv95",
- "svtype": "DUP_INV",            // redundant with the VCF; included for quick scanning
- "outcome": "hit",                // hit | miss | inconclusive
- "tier": "assembly",               // read | assembly | miss
- "query_validations": [          // one entry per reconstructed query
-  {"chrom": "chr21",             // chromosome the query maps to (pairs with ref_start)
-   "ref_start": 15791280,        // reference coord of the query window's left anchor
-   "status": "pass",             // decisive verdict: pass | fail | inconclusive
-   "reason": "pass",             // pass | cigar_failed | other
-   "aligned": true,              // whether an alignment to a source was found at all
-   "reference_ambiguous": false, // true if the allele also validated against the reference
-   "source": "assembly",         // reads | assembly | edlib | null (which scorer decided)
-   "strand": 1,                  // 1 | -1
-   "validations": [              // every scorer that ran, in order
-    {"source": "assembly", "passed": true, "status": "pass", "reason": "pass", "aligned": true,
-     "cigar": "22216=",            // the decisive alignment's CIGAR, for debugging
-     "lowest_pass_error": 0.0,     // error of the adopted alignment (1.0 if none passed)
-     "lowest_error": 0.0,          // best error seen, pass or fail
-     "strand": 1,
-     "checks": [                   // one per configured CIGAR check, in configured order
-      {"status": "pass", "detail": "alignment error 0 <= 0.1"},
-      {"status": "pass", "detail": "no error run >= 50"},
-      {"status": "pass", "detail": "no window >= 25 errors per 100 (worst 0:0)"},
-      {"status": "pass", "detail": "mappable 1 >= 0.95"}]}],
-   "ambiguity_validations": []}]}  // same shape, against the reference (--check-reference only)
+	{
+  "svid": "sv208",
+  "svtype": "delINVdup",
+  "outcome": "hit",
+  "tier": "assembly",
+  "query_validations": [
+    {
+      "chrom": "chr21",
+      "grammar": "~ABC~->~cbC~",
+      "ref_start": 6479314,
+      "status": "pass",
+      "reason": "pass",
+      "aligned": true,
+      "reference_ambiguous": false,
+      "source": "assembly",
+      "strand": 1,
+      "validations": [
+        {
+          "source": "assembly",
+          "passed": true,
+          "status": "pass",
+          "reason": "pass",
+          "aligned": true,
+          "cigar": "13813=",
+          "lowest_pass_error": 0.0,
+          "lowest_error": 0.0,
+          "strand": 1,
+          "checks": [
+            {
+              "status": "pass",
+              "detail": "alignment error 0 <= 0.1"
+            },
+            {
+              "status": "pass",
+              "detail": "no error run >= 50"
+            },
+            {
+              "status": "pass",
+              "detail": "no window >= 25 errors per 100 (worst 0:0)"
+            },
+            {
+              "status": "pass",
+              "detail": "mappable 1 >= 0.95, longest nonmappable run 0 < 50"
+            }
+          ]
+        }
+      ],
+      "ambiguity_validations": []
+    }
+  ]
+}
 ```
+
+`grammar` is `<reference>-><reconstructed>`: A/B/C... label the SV's distinct intervals in
+reference order, `~` is untouched buffer, lowercase means inverted. `~ABC~->~cbC~` (`delINVdup`):
+A deleted, C inverted and moved before B, B inverted in place, C also kept in place. One full
+grammar string is produced per query -- the `<reference>` half is the same for every query of an
+SV, only `<reconstructed>` varies per query.
 
 A multi-operation complex SV produces one `SVValidationResult` with multiple query entries — one
 per reconstructed query, not per VCF record. The nesting of the output json mirrors the pipeline: **SV → queries** (one or more reconstructed queries per call, per step 1 above) **→ validations** (one per scorer that ran on that query -- reads, assembly, edlib -- per step 2) **→ checks** (one per configured CIGAR check within that scorer's alignment, per step 3).
@@ -255,28 +289,28 @@ per reconstructed query, not per VCF record. The nesting of the output json mirr
 ## Benchmark
 
 [`workflows/svrecon_benchmark.ipynb`](workflows/svrecon_benchmark.ipynb) measures what the CIGAR
-checks buy you. It simulates 120 SVs (8 in-place types x 3 size classes x 5) on hg38 chr21 with
-insilicoSV, then scores two callsets against one assembly:
+checks buy you. It simulates 1320 SVs per arm (22 types x 20 each x 3 size classes) on hg38 chr21
+with insilicoSV, then scores two callsets against one assembly, per size class:
 
 | arm | callset | assembly | ideal |
 | --- | --- | --- | --- |
-| positive | seed 0 | seed 0 | 120/120 hits |
-| negative | seed 1 | seed 0 | 0/120 hits |
+| positive | seed 0 | seed 0 | 440/440 hits per size class |
+| negative | seed 1 | seed 0 | 0/440 hits per size class |
 
-Each arm is scored under three check configurations, each adding one more check — `similarity-only`
-(bulk alignment error alone; every opt-in check disabled), `similarity-no-large-errors` (adds
-`max_indel_size: 50`), and `similarity-max-error-window` (adds the error-window check at
+Each arm is scored under three check configurations, each adding one more check — `similarity`
+(bulk alignment error alone; every opt-in check disabled), `similarity--no-large-errors` (adds
+`max_indel_size: 50`), and `similarity--windowered-errors` (adds the error-window check at
 `max_window_size: 100` / `max_window_error: 25`) — so a hit in the negative arm is a false positive
 attributable to that configuration:
 
-| arm | mode | small | medium | large | total | precision |
-| --- | --- | --- | --- | --- | --- | --- |
-| positive | similarity-only | 40/40 | 40/40 | 40/40 | 120/120 | 1.00 |
-| positive | similarity-no-large-errors | 40/40 | 40/40 | 40/40 | 120/120 | 1.00 |
-| positive | similarity-max-error-window | 40/40 | 40/40 | 40/40 | 120/120 | 1.00 |
-| negative | similarity-only | 33/40 | 37/40 | 39/40 | 109/120 | 0.91 |
-| negative | similarity-no-large-errors | 6/40 | 0/40 | 0/40 | 6/120 | 0.05 |
-| negative | similarity-max-error-window | 0/40 | 0/40 | 0/40 | 0/120 | 0.00 |
+| arm | mode | small | medium | large | total hits | total inconclusive | precision |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| positive | similarity | 440/440 | 440/440 | 439/440 | 1319/1320 | 1/1320 | 1.00 |
+| positive | similarity--no-large-errors | 440/440 | 440/440 | 439/440 | 1319/1320 | 1/1320 | 1.00 |
+| positive | similarity--windowered-errors | 440/440 | 440/440 | 439/440 | 1319/1320 | 1/1320 | 1.00 |
+| negative | similarity | 285/440 | 428/440 | 436/440 | 1149/1320 | 0/1320 | 0.87 |
+| negative | similarity--no-large-errors | 43/440 | 0/440 | 0/440 | 43/1320 | 0/1320 | 0.03 |
+| negative | similarity--windowered-errors | 0/440 | 0/440 | 0/440 | 0/1320 | 0/1320 | 0.00 |
 
 ## Notes
 
@@ -285,6 +319,3 @@ attributable to that configuration:
   rebuilt automatically when the source FASTA changes.
 - Dot plots use wotplot, which accepts only `A`/`C`/`G`/`T`; a query containing `N` is skipped
   unless `--plot-substitute-bases` is given.
-- Dispersed events (dDUP, nrTRA, rTRA, and their inverted variants) are not currently supported --
-  specifically, a call's records' [start, stop) intervals must be contiguous and non-overlapping,
-  and every TARGET must land on one of those intervals' boundaries; otherwise svrecon raises.
