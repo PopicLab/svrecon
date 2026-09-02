@@ -1,0 +1,99 @@
+reference: ../../data/chr21.fa
+random_seed: 0
+homozygous_only: true
+min_intersv_dist: 2000
+max_tries: 1000
+th_proportion_N: 0.001
+
+blacklist_regions:
+  - ../../data/chr21.rmsk.bed
+
+variant_sets:
+  - type: "DEL"
+    number: 20
+    length_ranges: [[500, 4999]]
+    blacklist_region_type: "all"
+  - type: "INV"
+    number: 20
+    length_ranges: [[500, 4999]]
+    blacklist_region_type: "all"
+  - type: "DUP"
+    number: 20
+    length_ranges: [[500, 4999]]
+    blacklist_region_type: "all"
+  - type: "INV_DUP"
+    number: 20
+    length_ranges: [[500, 4999]]
+    blacklist_region_type: "all"
+  - type: "DUP_INV"
+    number: 20
+    length_ranges: [[500, 4999]]
+    blacklist_region_type: "all"
+  - type: "delINV"
+    number: 20
+    length_ranges: [[500, 4999], [500, 4999]]
+    blacklist_region_type: "all"
+  - type: "INVdel"
+    number: 20
+    length_ranges: [[500, 4999], [500, 4999]]
+    blacklist_region_type: "all"
+  - type: "dupINV"
+    number: 20
+    length_ranges: [[500, 4999], [500, 4999]]
+    blacklist_region_type: "all"
+  - type: "INVdup"
+    number: 20
+    length_ranges: [[500, 4999], [500, 4999]]
+    blacklist_region_type: "all"
+  - type: "delINVdel"
+    number: 20
+    length_ranges: [[500, 4999], [500, 4999], [500, 4999]]
+    blacklist_region_type: "all"
+  - type: "delINVdup"
+    number: 20
+    length_ranges: [[500, 4999], [500, 4999], [500, 4999]]
+    blacklist_region_type: "all"
+  - type: "dupINVdel"
+    number: 20
+    length_ranges: [[500, 4999], [500, 4999], [500, 4999]]
+    blacklist_region_type: "all"
+  - type: "dupINVdup"
+    number: 20
+    length_ranges: [[500, 4999], [500, 4999], [500, 4999]]
+    blacklist_region_type: "all"
+  - type: "dDUP"
+    number: 20
+    length_ranges: [[500, 4999], [500, 4999]]
+    blacklist_region_type: "all"
+  - type: "INV_dDUP"
+    number: 20
+    length_ranges: [[500, 4999], [500, 4999]]
+    blacklist_region_type: "all"
+  - type: "dDUP_INV"
+    number: 20
+    length_ranges: [[500, 4999], [500, 4999]]
+    blacklist_region_type: "all"
+  - type: "nrTRA"
+    number: 20
+    length_ranges: [[500, 4999], [500, 4999]]
+    blacklist_region_type: "all"
+  - type: "INV_nrTRA"
+    number: 20
+    length_ranges: [[500, 4999], [500, 4999]]
+    blacklist_region_type: "all"
+  - type: "rTRA"
+    number: 20
+    length_ranges: [[500, 4999], [500, 4999], [500, 4999]]
+    blacklist_region_type: "all"
+  - type: "INV_rTRA"
+    number: 20
+    length_ranges: [[500, 4999], [500, 4999], [500, 4999]]
+    blacklist_region_type: "all"
+  - type: "dDUP_iDEL"
+    number: 20
+    length_ranges: [[500, 4999], [500, 4999], [500, 4999]]
+    blacklist_region_type: "all"
+  - type: "INS_iDEL"
+    number: 20
+    length_ranges: [[500, 4999], [500, 4999], [500, 4999]]
+    blacklist_region_type: "all"
