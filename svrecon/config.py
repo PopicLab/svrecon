@@ -37,7 +37,7 @@ DEFAULTS = {
     'auto_buffer_min': 50,        # floor for buffer='auto', also its no-segments fallback
     'auto_buffer_fraction': 0.1,  # buffer='auto' sizes to this fraction of the SV's longest segment
     'match_error_threshold': 0.1,
-    'max_indel_size': None,   # if set, fail an alignment carrying an indel at least this long
+    'max_contiguous_error': None,   # if set, minimum contiguous length of a failing insertion, deletion, or soft clip
     'junction_radius': None,  # if set, check the error rate within this radius of every breakpoint
     'min_mappable_fraction': 0.95,  # a query below this fraction of ACGT is inconclusive; null disables
     'max_unmappable_size': 50,  # a contiguous non-ACGT run this long or longer is inconclusive
@@ -96,7 +96,7 @@ VALID_PARAM_FNS = {
     'auto_buffer_min': lambda arg: isinstance(arg, int),
     'auto_buffer_fraction': lambda arg: isinstance(arg, (int, float)),
     'match_error_threshold': lambda arg: isinstance(arg, (int, float)),
-    'max_indel_size': lambda arg: arg is None or isinstance(arg, int),
+    'max_contiguous_error': lambda arg: arg is None or isinstance(arg, int),
     'junction_radius': lambda arg: arg is None or isinstance(arg, int),
     'max_window_size': lambda arg: arg is None or isinstance(arg, int),
     'max_window_error': lambda arg: arg is None or isinstance(arg, int),
@@ -161,7 +161,10 @@ class Config:
             self.cache_dir = Path(tempfile.gettempdir()) / 'mappy_chrom_cache'
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # Parameter Validation
+        # Parameter Validation -- required after merging, since either may come from the config
+        for key in ('reference', 'calls'):
+            if not getattr(self, key):
+                raise ValueError(f'{key} is required; give --{key} or set it in --config')
         for key, value in self.__dict__.items():
             if key not in VALID_PARAM_FNS:
                 raise ValueError(f"{key!r} is not a recognized param")

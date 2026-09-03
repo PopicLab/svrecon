@@ -18,7 +18,7 @@ CLIP = 50
 ERROR_THRESHOLD = DEFAULTS['match_error_threshold']
 WINDOW, WINDOW_ERROR = DEFAULTS['max_window_size'], DEFAULTS['max_window_error']
 MIN_MAPPABLE, MAX_UNMAPPABLE = DEFAULTS['min_mappable_fraction'], DEFAULTS['max_unmappable_size']
-MAX_INDEL_CLIP_SIZE = 50  
+MAX_CONTIGUOUS_ERROR = 50  
 NM_OPS = 'XID'              # all Cigar.NM counts
 COLUMN_ERROR_OPS = 'XIDN'  # error columns to the window check, which counts target gaps too
 
@@ -55,14 +55,14 @@ def spread_unmappable(mappable_fraction: float, seed: int = 0) -> str:
 
 
 SIMILARITY_CHECK = CigarQueryAlignmentSimilarityCheck(match_error_threshold=ERROR_THRESHOLD)
-NO_LARGE_ERRORS_CHECK = CigarQueryNoLargeErrorsCheck(max_size=MAX_INDEL_CLIP_SIZE)
+NO_LARGE_ERRORS_CHECK = CigarQueryNoLargeErrorsCheck(max_size=MAX_CONTIGUOUS_ERROR)
 ERROR_WINDOW_CHECK = CigarQueryMaximumErrorWindowCheck(max_window_size=WINDOW,
                                                        max_window_error=WINDOW_ERROR)
 MAPPABLE_CHECK = CigarQueryMappableCheck(min_mappable_fraction=MIN_MAPPABLE,
                                          max_unmappable_size=MAX_UNMAPPABLE)
 
 AT_THRESHOLD = int(NUM_COLUMNS * ERROR_THRESHOLD)  # error columns the check still passes on (it is <=)
-UNDER = MAX_INDEL_CLIP_SIZE - 1
+UNDER = MAX_CONTIGUOUS_ERROR - 1
 
 
 @pytest.mark.parametrize('errors,expected', [(AT_THRESHOLD, QueryValidationStatus.PASS),
@@ -77,12 +77,12 @@ def test_alignment_similarity(seed, errors, expected):
 
 
 @pytest.mark.parametrize('columns,expected', [
-    (pad_matches('I' * MAX_INDEL_CLIP_SIZE), QueryValidationStatus.FAIL),
-    (pad_matches('D' * MAX_INDEL_CLIP_SIZE), QueryValidationStatus.FAIL),
-    (pad_matches('N' * MAX_INDEL_CLIP_SIZE), QueryValidationStatus.FAIL),
-    ('S' * MAX_INDEL_CLIP_SIZE + pad_matches(), QueryValidationStatus.FAIL),
-    (pad_matches() + 'S' * MAX_INDEL_CLIP_SIZE, QueryValidationStatus.FAIL),
-    (pad_matches('X' * MAX_INDEL_CLIP_SIZE), QueryValidationStatus.PASS),
+    (pad_matches('I' * MAX_CONTIGUOUS_ERROR), QueryValidationStatus.FAIL),
+    (pad_matches('D' * MAX_CONTIGUOUS_ERROR), QueryValidationStatus.FAIL),
+    (pad_matches('N' * MAX_CONTIGUOUS_ERROR), QueryValidationStatus.FAIL),
+    ('S' * MAX_CONTIGUOUS_ERROR + pad_matches(), QueryValidationStatus.FAIL),
+    (pad_matches() + 'S' * MAX_CONTIGUOUS_ERROR, QueryValidationStatus.FAIL),
+    (pad_matches('X' * MAX_CONTIGUOUS_ERROR), QueryValidationStatus.PASS),
     ('S' * UNDER + pad_matches('I' * UNDER + 'M' * UNDER + 'D' * UNDER + 'M' * UNDER + 'N' * UNDER)
      + 'S' * UNDER, QueryValidationStatus.PASS),
 ], ids=['insertion', 'deletion', 'ref-skip', 'left-clip', 'right-clip', 'mismatches-not-a-run',

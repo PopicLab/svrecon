@@ -172,9 +172,9 @@ class Scorer:
         self.cigar_query_checks: List[CigarQueryCheck] = [
             CigarQueryAlignmentSimilarityCheck(match_error_threshold=self.error_threshold),
         ]
-        if config.max_indel_size is not None:
+        if config.max_contiguous_error is not None:
             self.cigar_query_checks.append(
-                CigarQueryNoLargeErrorsCheck(max_size=config.max_indel_size))
+                CigarQueryNoLargeErrorsCheck(max_size=config.max_contiguous_error))
         if (config.max_window_size is None) != (config.max_window_error is None):
             raise ValueError('max_window_size and max_window_error must be set together '
                              f'(got {config.max_window_size!r} and {config.max_window_error!r})')
