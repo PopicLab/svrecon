@@ -4,17 +4,10 @@ from typing import List
 
 import pysam
 
-from generate_small_genome import CHROM, CHROM_LEN, DATA_DIR, REFERENCE_FASTA
+from constants import (ASSEMBLY_CHROM, ASSEMBLY_FASTA, ASSEMBLY_VCF, CHROM, CHROM_LEN,
+                       MAPPING_QUALITY, READ_BUFFER_SIZE, READS_BAM, REFERENCE_FASTA)
 from svrecon.utils import get_start_stop, load_grouped_variants_from_vcf
 
-ASSEMBLY_VCF = DATA_DIR / 'assembly.vcf'
-ASSEMBLY_FASTA = DATA_DIR / 'assembly.fa'
-ASSEMBLY_CHROM = f'{CHROM}_hapA'
-READS_BAM = DATA_DIR / 'reads.bam'
-
-# Read info
-READ_BUFFER = 1_000
-MAPPING_QUALITY = 60
 HEADER = pysam.AlignmentHeader.from_dict({'HD': {'VN': '1.6', 'SO': 'coordinate'},
                                           'SQ': [{'SN': CHROM, 'LN': CHROM_LEN}]})
 
@@ -23,9 +16,6 @@ def load_sequence(fasta_path, chrom: str) -> str:
     with pysam.FastaFile(str(fasta_path)) as fasta:
         return fasta.fetch(chrom).upper()
 
-
-# --- read the simulated SVs off the VCF ---
-
 @dataclass
 class SimulatedSV:
     """One SV from assembly.vcf, and the assembly sequence replacing its reference span."""
@@ -33,7 +23,9 @@ class SimulatedSV:
     svtype: str
     ref_start: int
     ref_end: int
-    alt_sequence: str
+    asm_start: int  # where the rearranged seq begins in the assembly
+    asm_end: int    # and where it ends: assembly[asm_start:asm_end] is the rearranged seq alone
+    read_sequence: str  # the same span cut from the assembly, plus READ_BUFFER_SIZE bp each side
 
 
 def locate_in_assembly(sequence: str, assembly: str, search_from: int = 0) -> int:
@@ -52,12 +44,14 @@ def load_simulated_svs(vcf_path, reference: str, assembly: str) -> List[Simulate
         ref_start = min(start for start, _ in spans)
         ref_end = max(stop for _, stop in spans)
 
-        left_flank_at = locate_in_assembly(reference[ref_start - READ_BUFFER:ref_start], assembly)
-        right_flank_at = locate_in_assembly(reference[ref_end:ref_end + READ_BUFFER], assembly,
-                                            left_flank_at)
+        left_flank_bp = locate_in_assembly(reference[ref_start - READ_BUFFER_SIZE:ref_start], assembly)
+        right_flank_fp = locate_in_assembly(reference[ref_end:ref_end + READ_BUFFER_SIZE], assembly,
+                                            left_flank_bp)
+        asm_start, asm_end = left_flank_bp + READ_BUFFER_SIZE, right_flank_fp
         simulated_svs.append(SimulatedSV(
             svid=svid, svtype=records[0].info['SVTYPE'], ref_start=ref_start, ref_end=ref_end,
-            alt_sequence=assembly[left_flank_at + READ_BUFFER:right_flank_at]))
+            asm_start=asm_start, asm_end=asm_end,
+            read_sequence=assembly[asm_start - READ_BUFFER_SIZE:asm_end + READ_BUFFER_SIZE]))
     return sorted(simulated_svs, key=lambda sv: sv.ref_start)
 
 
@@ -76,14 +70,9 @@ def make_read(name: str, ref_start: int, sequence: str) -> pysam.AlignedSegment:
     return read
 
 
-def make_sv_read(sv: SimulatedSV, reference: str) -> pysam.AlignedSegment:
-    """The read supporting ``sv``: its assembly sequence, READ_BUFFER bp of reference each side."""
-    name = f'{sv.svtype}_read'
-    read_start = sv.ref_start - READ_BUFFER
-    left_flank = reference[read_start:sv.ref_start]
-    right_flank = reference[sv.ref_end:sv.ref_end + READ_BUFFER]
-    sequence = left_flank + sv.alt_sequence + right_flank
-    return make_read(name, read_start, sequence)
+def make_sv_read(sv: SimulatedSV) -> pysam.AlignedSegment:
+    """The read supporting ``sv``: one cut from the assembly, spanning the SV and both flanks."""
+    return make_read(f'{sv.svtype}_read', sv.ref_start - READ_BUFFER_SIZE, sv.read_sequence)
 
 
 # --- write the bam ---
@@ -98,13 +87,16 @@ def write_bam(path, reads: List[pysam.AlignedSegment]) -> str:
 
 
 if __name__ == '__main__':
+    # load ref and assembly fastas
     reference = load_sequence(REFERENCE_FASTA, CHROM)
     assembly = load_sequence(ASSEMBLY_FASTA, ASSEMBLY_CHROM)
+
+    # produce SVs (alt/read sequences), then produce reads for each
     simulated_svs = load_simulated_svs(ASSEMBLY_VCF, reference, assembly)
-    reads = [make_sv_read(sv, reference) for sv in simulated_svs]
+    reads = [make_sv_read(sv) for sv in simulated_svs]
 
     for sv, read in zip(simulated_svs, reads):
         print(f'  {sv.svtype:10} {sv.svid:5} source [{sv.ref_start},{sv.ref_end}) '
-              f'alt {len(sv.alt_sequence):5} bp  read {read.query_length} bp '
+              f'alt {sv.asm_end - sv.asm_start:5} bp  read {read.query_length} bp '
               f'@ {read.reference_start}')
     print(f'wrote {write_bam(READS_BAM, reads)} ({len(reads)} reads on {CHROM})')

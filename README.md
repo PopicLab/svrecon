@@ -17,17 +17,21 @@ This puts an `svrecon` command on your `PATH` (equivalently `python -m svrecon`)
 
 ## Tests
 
-A small suite [insilicoSV](https://github.com/PopicLab/insilicoSV) simulates in a 200 kb synthetic genome — two instances of 10 classes each (20 total), each checked in both directions: the rebuilt allele must validate, the
-unrearranged reference must not.
-
 ```bash
-pytest
+pytest                    # everything
+pytest tests/unit         # needs no fixture data
+pytest tests/integration  # runs against the committed fixture
 ```
 
-The fixture in `tests/data/` is committed. To regenerate it (needs [`insilicosv`](https://github.com/PopicLab/insilicoSV) on `PATH`):
+- **`tests/unit/`** — reconstruction verified against each SV type's grammar, and the CIGAR checks
+  over synthetic alignments.
+- **`tests/integration/`** — scoring 20 SVs [insilicoSV](https://github.com/PopicLab/insilicoSV)
+  simulated, against reads and an assembly.
+
+The fixture in `tests/integration/data/` is committed. To regenerate it (needs [`insilicosv`](https://github.com/PopicLab/insilicoSV) on `PATH`):
 
 ```bash
-tests/generators/generate_data.sh
+tests/integration/generators/generate_data.sh
 ```
 
 ## Running
@@ -124,7 +128,7 @@ Config-file only (no CLI flag):
 ## Input callset (VCF)
 
 Records are grouped into SVs by their `SVID`; a record without one is a single-record SV of its
-own, keyed `simple_{n}` in the order encountered.
+own, keyed `simple_{n}` by its position in the callset.
 
 | field | required on | meaning |
 | --- | --- | --- |
@@ -133,12 +137,12 @@ own, keyed `simple_{n}` in the order encountered.
 | `OP_TYPE` | every record of a multi-record SV | Named operation from [insilicoSV](https://github.com/PopicLab/insilicoSV). A single-record SV may omit it, or carry the `NA` insilicoSV writes there; either way it goes unused. |
 | `SVLEN` | — | When present, the span is `stop = start + SVLEN`, preferred over `END` because pysam shifts the end it reports; otherwise `END`. |
 | `TARGET` | dispersed operations | Where the segment is inserted. Absent, an insert lands at its own `stop` — i.e. in tandem. |
-| `INSORD` | inserts sharing a `TARGET` | Orders them by insertion order that position (see below) |
+| `INSORD` | inserts sharing a `TARGET` | Orders them by insertion order at that position (see below). |
 | `TARGET_CHROM` | — | Must equal the record's own chromosome; interchromosomal calls are unsupported. |
 
 Each SV's records are checked before reconstruction:
 
-- every record carries the fields required above;
+- every record carries an `SVTYPE`, and every record of a multi-record SV an `OP_TYPE`;
 - all records are on one chromosome;
 - every `[start, stop)` is non-empty — so the negative-`SVLEN` convention for `DEL` is rejected;
 - no two intervals overlap (identical spans are fine);

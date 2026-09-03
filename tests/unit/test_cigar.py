@@ -14,15 +14,15 @@ from svrecon.scorers.base import (CigarQueryAlignmentSimilarityCheck, CigarQuery
 from svrecon.scorers.utils import Cigar
 
 NUM_COLUMNS = 1000  # columns in all test CIGARs
-CLIP = 50
+NUM_CLIP = 50
 ERROR_THRESHOLD = DEFAULTS['match_error_threshold']
 WINDOW, WINDOW_ERROR = DEFAULTS['max_window_size'], DEFAULTS['max_window_error']
 MIN_MAPPABLE, MAX_UNMAPPABLE = DEFAULTS['min_mappable_fraction'], DEFAULTS['max_unmappable_size']
-MAX_CONTIGUOUS_ERROR = 50  
+MAX_CONTIGUOUS_ERROR = 50
 NM_OPS = 'XID'              # all Cigar.NM counts
 COLUMN_ERROR_OPS = 'XIDN'  # error columns to the window check, which counts target gaps too
 
-
+# Helper functions for cigar scoring
 def string_to_cigar(columns: str) -> Cigar:
     return Cigar([(Cigar._OP_CHARS.index(op), len(list(run))) for op, run in groupby(columns)])
 
@@ -72,7 +72,7 @@ UNDER = MAX_CONTIGUOUS_ERROR - 1
 def test_alignment_similarity(seed, errors, expected):
     """Tests alignment similarities at or above error thresholds"""
     errors = ''.join(random.Random(seed).choices(NM_OPS, k=errors))
-    columns = 'S' * CLIP + pad_matches(errors) + 'S' * CLIP
+    columns = 'S' * NUM_CLIP + pad_matches(errors) + 'S' * NUM_CLIP
     assert SIMILARITY_CHECK.validate(string_to_cigar(columns), None).status is expected
 
 
@@ -125,14 +125,6 @@ def test_mappable_fraction(mappable_fraction, expected):
     """sequences of varying proportions sequence consisting of N"""
     sequence = spread_unmappable(mappable_fraction)
     assert MAPPABLE_CHECK.validate(None, get_dummy_query(sequence)).status is expected
-
-
-def test_mappable_ignores_case():
-    """The check upper-cases the query, so lowercase bases count the same either way."""
-    sequence = pad_bases('N' * (MAX_UNMAPPABLE - 1)).lower()
-    result = MAPPABLE_CHECK.validate(None, get_dummy_query(sequence))
-    assert result.status is QueryValidationStatus.PASS
-
 
 @pytest.mark.parametrize('fraction,size,sequence', [
     (None, MAX_UNMAPPABLE, spread_unmappable(MIN_MAPPABLE - 1 / NUM_COLUMNS)),

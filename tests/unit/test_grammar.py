@@ -1,49 +1,17 @@
-"""Reconstruction tests."""
+"""Reconstruction against each SV type's known grammar -- hand-derived, not insilicoSV output.
+
+Needs no fixture data: every case declares its own tiny reference, its VCF records, and the
+sequences reconstruction must produce from them.
+"""
 from typing import List, NamedTuple
 
 import pytest
 
-from generate_small_bam import ASSEMBLY_VCF
-from generate_small_genome import CHROM, REFERENCE_FASTA
-from helpers import BUFFER as ASSEMBLY_BUFFER  # bp count, not the flank sequence BUFFER below
-from helpers import EXPECTED, SVID_IDS, SVIDS
 from svrecon.reconstruct import construct_queries
-from svrecon.utils import (group_records_by_id, load_grouped_variants_from_vcf, load_fasta_to_bytes,
-                           reverse_complement)
+from svrecon.utils import group_records_by_id, reverse_complement
 
 
-@pytest.fixture(scope='module')
-def records_by_svid() -> dict:
-    return load_grouped_variants_from_vcf(str(ASSEMBLY_VCF))
-
-
-@pytest.fixture(scope='module')
-def reference_bytes() -> dict:
-    return load_fasta_to_bytes(str(REFERENCE_FASTA), {CHROM})
-
-
-def get_expected_sequence(sv, reference: str, buffer: int) -> str:
-    """The allele insilicoSV built, with ``buffer`` bp of reference each side."""
-    return (reference[sv.ref_start - buffer:sv.ref_start] + sv.alt_sequence
-            + reference[sv.ref_end:sv.ref_end + buffer])
-
-
-@pytest.mark.parametrize('svid', SVIDS, ids=SVID_IDS)
-def test_reconstruction_matches_assembly(records_by_svid, reference_bytes, reference,
-                                         svs_by_svid, svid):
-    """In: the SV's VCF records. Out: one window, matching the assembly."""
-    sv = svs_by_svid[svid]
-    assert sv.svtype == EXPECTED[svid].svtype
-
-    queries = construct_queries(svid, records_by_svid[svid], ASSEMBLY_BUFFER, reference_bytes)
-
-    assert len(queries) == 1
-    assert queries[0].sequence == get_expected_sequence(sv, reference, ASSEMBLY_BUFFER)
-
-
-# --- hand-derived from grammar, not insilicoSV output -------------------------------------------
-
-SYN_CHROM = 'chrT'
+SYNTHETIC_CHROM = 'chrT'
 BUFFER = 'GT'
 BUFFER_SIZE = len(BUFFER)  # every grammar case buffers by exactly the flank it carries each side
 A, B, C = 'AAAA', 'CACACA', 'ACACACAC'                                         # A/C only
@@ -57,7 +25,7 @@ DISP_HEAD, DISP_TAIL = LONG_DISP[:BUFFER_SIZE], LONG_DISP[-BUFFER_SIZE:]
 class DummyRecord:
     """realistic input of a stripped down variant record."""
     def __init__(self, start, stop, sv_type=None, op_type=None, svid=None, target=None, insord=-1):
-        self.chrom = SYN_CHROM
+        self.chrom = SYNTHETIC_CHROM
         self.start = start
         self.stop = stop
         self.info = {'SVTYPE': sv_type}
@@ -72,7 +40,7 @@ class DummyRecord:
 class GrammarCase(NamedTuple):
     name: str
     reference: str                 #  BUFFER + contig + BUFFER
-    buffer: int
+    buffer_size: int
     records: List[DummyRecord]
     expected_sequences: List[str]  # [[buffer + contig + buffer],...]
 GRAMMAR_CASES = [
@@ -209,17 +177,19 @@ GRAMMAR_CASES = [
 ]
 
 
-@pytest.mark.parametrize('reference,buffer,records,expected_sequences',
+@pytest.mark.parametrize('reference,buffer_size,records,expected_sequences',
                          [case[1:] for case in GRAMMAR_CASES],
                          ids=[case.name for case in GRAMMAR_CASES])
-def test_reconstruction_matches_grammar(reference, buffer, records, expected_sequences):
+def test_reconstruction_matches_grammar(reference, buffer_size, records,
+                                        expected_sequences):
     """Records built directly from each type's known grammar, grouped as the callset loader does."""
-    ref = {SYN_CHROM: reference.encode()}
+    reference_bytes = {SYNTHETIC_CHROM: reference.encode()}
 
-    grouped = group_records_by_id(records)
-    assert len(grouped) == 1  # every case is one SV, whether by shared SVID or as a simple variant
-    (svid, sv_records), = grouped.items()
+    grouped_records = group_records_by_id(records)
+    # every case is one SV, whether by shared SVID or as a simple variant
+    assert len(grouped_records) == 1
+    (svid, sv_records), = grouped_records.items()
 
-    queries = construct_queries(svid, sv_records, buffer, ref)
+    queries = construct_queries(svid, sv_records, buffer_size, reference_bytes)
 
     assert [query.sequence for query in queries] == expected_sequences
