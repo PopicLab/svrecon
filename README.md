@@ -17,14 +17,14 @@ This puts an `svrecon` command on your `PATH` (equivalently `python -m svrecon`)
 
 ## Tests
 
-A small suite over 20 SVs that insilicoSV simulates in a 200 kb synthetic genome — two instances of 10 classes each (20 total), each checked in both directions: the rebuilt allele must validate, the
+A small suite [insilicoSV](https://github.com/PopicLab/insilicoSV) simulates in a 200 kb synthetic genome — two instances of 10 classes each (20 total), each checked in both directions: the rebuilt allele must validate, the
 unrearranged reference must not.
 
 ```bash
 pytest
 ```
 
-The fixture in `tests/data/` is committed. To regenerate it (needs `insilicosv` on `PATH`):
+The fixture in `tests/data/` is committed. To regenerate it (needs [`insilicosv`](https://github.com/PopicLab/insilicoSV) on `PATH`):
 
 ```bash
 tests/generators/generate_data.sh
@@ -113,13 +113,37 @@ Config-file only (no CLI flag):
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `max_indel_size` | unset | If set, fail any alignment carrying an indel or a soft-clipped flank at least this long. |
+| `max_contiguous_error` | unset | Minimum contiguous length of a failing insertion, deletion, or soft clip. |
 | `max_window_size`, `max_window_error` | `100`, `25` | If both are set, fail any alignment where some window of `max_window_size` alignment columns holds at least `max_window_error` error columns (mismatches, insertions, deletions, clips). Must be set together; set both to `null` to disable. |
 | `min_mappable_fraction` | `0.95` | A query with less than this fraction of mappable (ACGT) bases is inconclusive rather than pass/fail. Set to `null` to disable. Only bites above `1 - error threshold` — see below. |
 | `max_unmappable_size` | `50` | A query with a contiguous non-ACGT run at least this long is inconclusive rather than pass/fail. Set to `null` to disable. |
 | `auto_buffer_min`, `auto_buffer_fraction` | `50`, `0.1` | Floor and fraction used by `buffer: auto`. |
 | `min_edlib_query` | `5000` | Queries at least this long skip the edlib fallback (cost bound). |
 | `edlib_fallback_max_tolerance` | `10000000` | Search-window radius cap for the edlib fallback. A cost bound on an otherwise unbounded O(n·m) search, kept separate from `location_tolerance`. |
+
+## Input callset (VCF)
+
+Records are grouped into SVs by their `SVID`; a record without one is a single-record SV of its
+own, keyed `simple_{n}` in the order encountered.
+
+| field | required on | meaning |
+| --- | --- | --- |
+| `SVID` | every record of a multi-record SV | The key its records group under, shared by all of them. |
+| `SVTYPE` | every record | The type the SV is scored and reported under, read from its first record. On a single-record SV it also names the operation. |
+| `OP_TYPE` | every record of a multi-record SV | Named operation from [insilicoSV](https://github.com/PopicLab/insilicoSV). A single-record SV may omit it, or carry the `NA` insilicoSV writes there; either way it goes unused. |
+| `SVLEN` | — | When present, the span is `stop = start + SVLEN`, preferred over `END` because pysam shifts the end it reports; otherwise `END`. |
+| `TARGET` | dispersed operations | Where the segment is inserted. Absent, an insert lands at its own `stop` — i.e. in tandem. |
+| `INSORD` | inserts sharing a `TARGET` | Orders them by insertion order that position (see below) |
+| `TARGET_CHROM` | — | Must equal the record's own chromosome; interchromosomal calls are unsupported. |
+
+Each SV's records are checked before reconstruction:
+
+- every record carries the fields required above;
+- all records are on one chromosome;
+- every `[start, stop)` is non-empty — so the negative-`SVLEN` convention for `DEL` is rejected;
+- no two intervals overlap (identical spans are fine);
+- no `TARGET` lands strictly inside another interval, which would split a segment that interval's
+  own operations need; a target exactly on a boundary is fine.
 
 ## Procedure
 
@@ -133,14 +157,14 @@ query should appear in the sample. A dispersion can produce one or two queries: 
 and target buffers overlap and merge into a single window, two independent ones if they don't.
 Each SV is reconstructed in isolation, so nearby SVs — called or not — are ignored.
 
-The reconstruction process parses a VCF in insilicoSV format to produce an initial set of disjoint
+The reconstruction process parses a VCF in [insilicoSV](https://github.com/PopicLab/insilicoSV) format to produce an initial set of disjoint
 reference segments, as well as a sequence of deletion, insertion, and inversion operations, where a
-complex record can produce more than one. To apply them unambiguously, these operations operations are ordered:
+complex record can produce more than one. To apply them unambiguously, these operations are ordered:
 
 1. Rightmost-first, so an applied edit never shifts a still-pending operation's coordinates.
 2. At a tied position, invert/delete before insert -- they need an untouched segment boundary,
    which a same-position insert would shift.
-3. Among tied inserts, by descending INSORD (insilicoSV's insertion-order field) -- each insert at a
+3. Among tied inserts, by descending INSORD ([insilicoSV](https://github.com/PopicLab/insilicoSV)'s insertion-order field) -- each insert at a
    shared position lands to the left of ones already placed there, thus processing operations in reverse results in placements of increasing INSORD order, left to right.
 
 **2. Align.** Each query is aligned against the configured sources in tier order, stopping at the
@@ -161,7 +185,8 @@ that are wrong precisely where the SV rearranges the sequence.
 
 - *alignment error* (always) — divergence within the aligned block (mismatches + indels /
   aligned length) ≤ `match_error_threshold`; clips don't count.
-- *no large errors* (if `max_indel_size` is set) — max allowable size for single indel or soft-clipped.
+- *no large errors* (if `max_contiguous_error` is set) — minimum contiguous length of a failing
+  insertion, deletion, or soft clip.
 - *maximum error window* (on by default, `max_window_size: 100` / `max_window_error: 25`) — no
   window of `max_window_size` alignment columns holds `max_window_error` or more error columns
   (mismatches, insertions, deletions, clips)
@@ -290,7 +315,7 @@ per reconstructed query, not per VCF record. The nesting of the output json mirr
 
 [`workflows/svrecon_benchmark.ipynb`](workflows/svrecon_benchmark.ipynb) measures what the CIGAR
 checks buy you. It simulates 1320 SVs per arm (22 types x 20 each x 3 size classes) on hg38 chr21
-with insilicoSV, then scores two callsets against one assembly, per size class:
+with [insilicoSV](https://github.com/PopicLab/insilicoSV), then scores two callsets against one assembly, per size class:
 
 | arm | callset | assembly | ideal |
 | --- | --- | --- | --- |
@@ -299,7 +324,7 @@ with insilicoSV, then scores two callsets against one assembly, per size class:
 
 Each arm is scored under three check configurations, each adding one more check — `similarity`
 (bulk alignment error alone; every opt-in check disabled), `similarity--no-large-errors` (adds
-`max_indel_size: 50`), and `similarity--windowered-errors` (adds the error-window check at
+`max_contiguous_error: 50`), and `similarity--windowered-errors` (adds the error-window check at
 `max_window_size: 100` / `max_window_error: 25`) — so a hit in the negative arm is a false positive
 attributable to that configuration:
 
