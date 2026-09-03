@@ -55,10 +55,11 @@ def group_variants_by_id(vcf_path: str, gap_file: Optional[str] = None) -> Dict[
     """Group a callset VCF's records by SVID, optionally dropping any SV with a record
     (its own span, or its TARGET) overlapping an excluded region (e.g. centromere/telomere)."""
     grouped_variants: Dict[str, List[VariantRecord]] = defaultdict(list)
+    counter = 0
     for rec in pysam.VariantFile(vcf_path).fetch():
-        svid = rec.info.get('SVID')
-        if svid:
-            grouped_variants[svid].append(rec)
+        svid = rec.info.get('SVID', f'simple_{counter}')
+        grouped_variants[svid].append(rec)
+        counter += 1
 
     if not gap_file:
         return grouped_variants
