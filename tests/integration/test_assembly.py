@@ -1,7 +1,7 @@
 """AssemblyScorer against the assembly insilicoSV built: mappy alignment of each allele."""
 import pytest
 
-from constants import ASSEMBLY_FASTA, CHROM, QUERY_BUFFER_SIZE
+from constants import ASSEMBLY_FASTA, CHROM
 from helpers import (EXPECTED_SVTYPES, SIMULATED_SVIDS, SVID_TEST_IDS, get_true_reconstructed_query,
                      get_reference_query, get_scorer_config)
 from svrecon.constants import QueryValidationReason, QueryValidationStatus, ValidationSource

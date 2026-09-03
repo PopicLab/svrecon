@@ -1,6 +1,4 @@
-"""One test per CigarQueryCheck, over CIGARs of COLUMNS aligned columns built from a column
-string. Every check reads only one of its two arguments -- the CIGAR or the query -- so the
-unused one is passed as None."""
+"""Tests per CigarQueryCheck, over CIGARs of NUM_COLUMNS aligned columns built from a column string."""
 import random
 from itertools import groupby
 
@@ -28,7 +26,7 @@ def string_to_cigar(columns: str) -> Cigar:
 
 
 def pad_matches(run: str = '') -> str:
-    """``run`` centred in COLUMNS aligned columns, padded out with matches."""
+    """``run`` centred in NUM_COLUMNS aligned columns, padded out with matches."""
     pad = NUM_COLUMNS - len(run)
     return 'M' * (pad // 2) + run + 'M' * (pad - pad // 2)
 
@@ -46,11 +44,11 @@ def pad_bases(seq: str = '') -> str:
     return 'A' * (pad // 2) + seq + 'A' * (pad - pad // 2)
 
 
-def spread_unmappable(mappable_fraction: float, seed: int = 0) -> str:
+def spread_unmappable(mappable_fraction: float) -> str:
     """NUM_COLUMNS bases with ``mappable_fraction`` of them A, the N's scattered at random. Too
     few to bunch into a run anywhere near MAX_UNMAPPABLE, so only the proportion trips a check."""
     num_unmappable = NUM_COLUMNS - int(NUM_COLUMNS * mappable_fraction)
-    positions = set(random.Random(seed).sample(range(NUM_COLUMNS), num_unmappable))
+    positions = set(random.Random(0).sample(range(NUM_COLUMNS), num_unmappable))
     return ''.join('N' if column in positions else 'A' for column in range(NUM_COLUMNS))
 
 
@@ -62,17 +60,17 @@ MAPPABLE_CHECK = CigarQueryMappableCheck(min_mappable_fraction=MIN_MAPPABLE,
                                          max_unmappable_size=MAX_UNMAPPABLE)
 
 AT_THRESHOLD = int(NUM_COLUMNS * ERROR_THRESHOLD)  # error columns the check still passes on (it is <=)
-UNDER = MAX_CONTIGUOUS_ERROR - 1
+UNDER_MAX_ERROR = MAX_CONTIGUOUS_ERROR - 1
 
 
-@pytest.mark.parametrize('errors,expected', [(AT_THRESHOLD, QueryValidationStatus.PASS),
-                                             (AT_THRESHOLD + 1, QueryValidationStatus.FAIL)],
+@pytest.mark.parametrize('num_errors,expected', [(AT_THRESHOLD, QueryValidationStatus.PASS),
+                                                 (AT_THRESHOLD + 1, QueryValidationStatus.FAIL)],
                          ids=['at-threshold', 'over-threshold'])
 @pytest.mark.parametrize('seed', range(10))
-def test_alignment_similarity(seed, errors, expected):
+def test_alignment_similarity(seed, num_errors, expected):
     """Tests alignment similarities at or above error thresholds"""
-    errors = ''.join(random.Random(seed).choices(NM_OPS, k=errors))
-    columns = 'S' * NUM_CLIP + pad_matches(errors) + 'S' * NUM_CLIP
+    error_ops = ''.join(random.Random(seed).choices(NM_OPS, k=num_errors))
+    columns = 'S' * NUM_CLIP + pad_matches(error_ops) + 'S' * NUM_CLIP
     assert SIMILARITY_CHECK.validate(string_to_cigar(columns), None).status is expected
 
 
@@ -83,8 +81,10 @@ def test_alignment_similarity(seed, errors, expected):
     ('S' * MAX_CONTIGUOUS_ERROR + pad_matches(), QueryValidationStatus.FAIL),
     (pad_matches() + 'S' * MAX_CONTIGUOUS_ERROR, QueryValidationStatus.FAIL),
     (pad_matches('X' * MAX_CONTIGUOUS_ERROR), QueryValidationStatus.PASS),
-    ('S' * UNDER + pad_matches('I' * UNDER + 'M' * UNDER + 'D' * UNDER + 'M' * UNDER + 'N' * UNDER)
-     + 'S' * UNDER, QueryValidationStatus.PASS),
+    ('S' * UNDER_MAX_ERROR
+     + pad_matches('I' * UNDER_MAX_ERROR + 'M' * UNDER_MAX_ERROR + 'D' * UNDER_MAX_ERROR
+                   + 'M' * UNDER_MAX_ERROR + 'N' * UNDER_MAX_ERROR)
+     + 'S' * UNDER_MAX_ERROR, QueryValidationStatus.PASS),
 ], ids=['insertion', 'deletion', 'ref-skip', 'left-clip', 'right-clip', 'mismatches-not-a-run',
         'all-under'])
 def test_no_large_errors(columns, expected):

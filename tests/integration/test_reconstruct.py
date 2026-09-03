@@ -1,7 +1,6 @@
 """Reconstruction against the assembly insilicoSV built: each SV's records in, its allele out.
 
-The records and the reference bytes arrive as conftest fixtures, so the only expected values
-here are the ones helpers declares.
+The records and the reference bytes are loaded here, since no other module needs them.
 """
 from typing import Dict, List
 

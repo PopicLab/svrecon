@@ -22,4 +22,4 @@ MAPPING_QUALITY = 60
 
 # reconstruction queries
 QUERY_BUFFER_SIZE = 500
-PLACEHOLDER_GRAMMAR = 'dummy'  
+PLACEHOLDER_GRAMMAR = 'dummy'

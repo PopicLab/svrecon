@@ -1,7 +1,7 @@
 """ReadScorer against the simulated BAM: one supporting read per SV."""
 import pytest
 
-from constants import CHROM, QUERY_BUFFER_SIZE, READS_BAM
+from constants import CHROM, READS_BAM
 from helpers import (EXPECTED_SVTYPES, SIMULATED_SVIDS, SVID_TEST_IDS, get_true_reconstructed_query,
                      get_reference_query, get_scorer_config)
 from svrecon.constants import QueryValidationReason, QueryValidationStatus, ValidationSource
