@@ -473,5 +473,4 @@ class CallsetScorer(object):
 
             return SVValidationResult(svid, sv_type, query_validations)
         except Exception as e:
-            e.add_note(f'while scoring SV {svid} ({sv_type})')
-            raise
+            raise RuntimeError(f'while scoring SV {svid} ({sv_type})') from e
