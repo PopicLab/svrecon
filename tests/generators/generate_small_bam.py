@@ -5,7 +5,7 @@ from typing import List
 import pysam
 
 from generate_small_genome import CHROM, CHROM_LEN, DATA_DIR, REFERENCE_FASTA
-from svrecon.utils import get_start_stop, group_variants_by_id
+from svrecon.utils import get_start_stop, load_grouped_variants_from_vcf
 
 ASSEMBLY_VCF = DATA_DIR / 'assembly.vcf'
 ASSEMBLY_FASTA = DATA_DIR / 'assembly.fa'
@@ -47,7 +47,7 @@ def locate_in_assembly(sequence: str, assembly: str, search_from: int = 0) -> in
 def load_simulated_svs(vcf_path, reference: str, assembly: str) -> List[SimulatedSV]:
     """Locate reconstructed SVs by their surrounding (flanking) regions"""
     simulated_svs = []
-    for svid, records in group_variants_by_id(str(vcf_path)).items():
+    for svid, records in load_grouped_variants_from_vcf(str(vcf_path)).items():
         spans = [get_start_stop(rec) for rec in records]
         ref_start = min(start for start, _ in spans)
         ref_end = max(stop for _, stop in spans)

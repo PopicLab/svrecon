@@ -108,27 +108,28 @@ def get_operations_from_records(records: list[VariantRecord]) -> list[_Operation
         start, stop = interval = get_start_stop(record)
         target = record.info.get('TARGET', stop) # already 0-based: TARGET == start + SVLEN for tandem pastes
         insord = record.info.get('INSORD', -1)
-        op_type = record.alts[0].strip('<>')  # insilicoSV's symbolic ALT is the per-record operation
+        # if single record SV, read off SVTYPE. otherwise, read OP_TYPE
+        op = record.info['SVTYPE'] if len(records) == 1 else record.info['OP_TYPE']
         symbol = start_stops_to_sym[interval]
 
-        if op_type in ('CUT', 'DEL'):
+        if op in ('CUT', 'DEL'):
             operations.append(_Delete(start, start, stop))
-        elif op_type == 'INV':
+        elif op == 'INV':
             operations.append(_Invert(start, start, stop))
-        elif op_type == 'DUP':
+        elif op == 'DUP':
             operations.append(_Insert(stop, start, stop, symbol))
-        elif op_type in ('COPY-PASTE', 'dDUP'):
+        elif op in ('COPY-PASTE', 'dDUP'):
             operations.append(_Insert(target, start, stop, symbol=symbol, insord=insord))
-        elif op_type in ('CUT-PASTE', 'nrTRA'):
+        elif op in ('CUT-PASTE', 'nrTRA'):
             operations.append(_Delete(start, start, stop))
             operations.append(_Insert(target, start, stop, insord=insord, symbol=symbol))
-        elif op_type in ('COPYinv-PASTE', 'INV_DUP', 'INV_dDUP'):
+        elif op in ('COPYinv-PASTE', 'INV_dDUP', 'INV_DUP'):
             operations.append(_Insert(target, start, stop, invert=True, insord=insord, symbol=symbol))
-        elif op_type in ('CUTinv-PASTE', 'INV_nrTRA'):
+        elif op in ('CUTinv-PASTE', 'INV_nrTRA'):
             operations.append(_Delete(start, start, stop))
             operations.append(_Insert(target, start, stop, invert=True, insord=insord, symbol=symbol))
         else:
-            raise ValueError(f'Unknown ALT operation type: {op_type}')
+            raise ValueError(f'Unknown operation type: {op}')
 
     return operations
 
@@ -172,7 +173,8 @@ def create_starting_segments(records: list[VariantRecord], buffer: int, ref: Dic
 
     return segments
 
-def construct_queries(records: List[VariantRecord], buffer: int, ref: Dict[str, bytearray]) -> List[Query]:
+def construct_queries(svid: str, records: List[VariantRecord], buffer: int,
+                      ref: Dict[str, bytearray]) -> List[Query]:
     """
     Given records of operations, recreate the resulting subsequences and metadata 
     """
@@ -190,7 +192,6 @@ def construct_queries(records: List[VariantRecord], buffer: int, ref: Dict[str, 
         operation.modify_segments(segments)
 
     sv_type = records[0].info['SVTYPE']
-    svid = records[0].info['SVID']
     chrom = records[0].chrom
 
     # Split into maximal contiguous runs -- a gap marks a separate, independent window

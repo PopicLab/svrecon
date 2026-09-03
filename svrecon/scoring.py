@@ -17,7 +17,7 @@ from svrecon.scorers.assembly import AssemblyScorer
 from svrecon.scorers.base import Scorer, QueryValidation
 from svrecon.scorers.edlib import EdlibScorer
 from svrecon.scorers.reads import ReadScorer
-from svrecon.utils import get_start_stop, group_variants_by_id, load_fasta_to_bytes
+from svrecon.utils import get_start_stop, load_grouped_variants_from_vcf, load_fasta_to_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +196,7 @@ class CallsetScorer(object):
         self.plot_axis_length = config.plot_axis_length
 
         # Parse and group records by svid
-        self.variants = group_variants_by_id(config.calls, config.gap_file)
+        self.variants = load_grouped_variants_from_vcf(config.calls, config.gap_file)
         logger.info(f'Found {len(self.variants)} calls from callset {config.calls}')
 
         # Identify chromsomes of interest in callset
@@ -316,7 +316,8 @@ class CallsetScorer(object):
         report_fh = open(self.report_path, 'w') if self.report_path else None
 
         with ThreadPoolExecutor(max_workers=self.n_threads) as executor:
-            futures = {executor.submit(self.score_sv, self.variants[svid]) for svid in self.variants.keys()}
+            futures = {executor.submit(self.score_sv, svid, records)
+                       for svid, records in self.variants.items()}
 
             pbar = tqdm(as_completed(futures), total=len(self.variants), desc=f'Scoring SVs', smoothing=0)
 
@@ -411,10 +412,9 @@ class CallsetScorer(object):
 
         return precision, correct_calls, total_calls, inconclusive_calls, assembly_hits, read_hits
 
-    def score_sv(self, records: List[VariantRecord]) -> SVValidationResult:
+    def score_sv(self, svid: str, records: List[VariantRecord]) -> SVValidationResult:
         """Score one SV: reconstruct its alt allele(s), validate each query with the
-        configured scorers, and return the SVValidation."""
-        svid = records[0].info['SVID']
+        configured scorers, and return the SVValidation. ``svid`` is the grouping key"""
         sv_type = records[0].info['SVTYPE']
 
         try:
@@ -426,7 +426,7 @@ class CallsetScorer(object):
             sv_buffer = self._resolve_buffer(records)
             query_validations: List[QueryValidationResult] = []  # one per reconstructed query of an SV
 
-            for query in construct_queries(records, sv_buffer, self.chrom_to_ref):
+            for query in construct_queries(svid, records, sv_buffer, self.chrom_to_ref):
                 query_validation = QueryValidationResult(query=query)
 
                 for scorer in self.validation_scorer:
