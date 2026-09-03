@@ -288,6 +288,17 @@ class CallsetScorer(object):
                     raise ValueError(f'{rec.chrom}: record {rec.id} TARGET={target} falls inside '
                                      f'record {source_rec.id}\'s interval [{start},{stop})')
 
+    def _assert_sv_records_required_fields(self, records: List[VariantRecord]) -> None:
+        """
+        Asserts every record has an SVTYPE, and every record of a multi-record SV an OP_TYPE
+        """
+        required = ('SVTYPE',) if len(records) == 1 else ('SVTYPE', 'OP_TYPE')
+        for rec in records:
+            for key in required:
+                if key not in rec.info:
+                    raise ValueError(f'{rec.chrom}: record {rec.id} is missing INFO/{key}')
+        
+
     def _assert_sv_records_non_interchromosomal(self, records: List[VariantRecord]) -> None:
         """
         Raises ValueError if records contains more than one unique chromosome
@@ -415,9 +426,10 @@ class CallsetScorer(object):
     def score_sv(self, svid: str, records: List[VariantRecord]) -> SVValidationResult:
         """Score one SV: reconstruct its alt allele(s), validate each query with the
         configured scorers, and return the SVValidation. ``svid`` is the grouping key"""
-        sv_type = records[0].info['SVTYPE']
+        sv_type = records[0].info.get('SVTYPE')  # asserted present below, before any use
 
         try:
+            self._assert_sv_records_required_fields(records)
             self._assert_sv_records_non_interchromosomal(records)
             self._assert_sv_records_positive_lengths(records)
             self._assert_sv_records_non_overlapping(records)
@@ -442,5 +454,7 @@ class CallsetScorer(object):
 
             return SVValidationResult(svid, sv_type, query_validations)
         except Exception as e:
-            e.add_note(f'while scoring SV {svid} ({sv_type})')
+            e.add_note(f'while scoring SV {svid} ({sv_type}): '
+                       + '; '.join(f'{rec.chrom}:{rec.start}-{rec.stop} {dict(rec.info)}'
+                                   for rec in records))
             raise

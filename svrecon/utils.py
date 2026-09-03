@@ -64,7 +64,7 @@ def group_records_by_id(records) -> Dict[str, List[VariantRecord]]:
 
 def load_grouped_variants_from_vcf(vcf_path: str, gap_file: Optional[str] = None) -> Dict[str, List[VariantRecord]]:
     """Group a callset VCF's records by SVID, optionally dropping any SV with a record
-    (its own span, or its TARGET) overlapping an excluded region (e.g. centromere/telomere)."""
+    (its own span, or its TARGET) overlapping an excluded region"""
     grouped_variants = group_records_by_id(pysam.VariantFile(vcf_path).fetch())
 
     if not gap_file:
