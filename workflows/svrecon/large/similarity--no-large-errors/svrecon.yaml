@@ -4,7 +4,7 @@ sample: ../../../insilicoSV/large-0/sim.hapA.fa
 
 buffer: 500
 match_error_threshold: 0.1
-max_indel_size: 50
+max_contiguous_error: 50
 max_window_size: null
 max_window_error: null
 verbose: true
