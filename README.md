@@ -18,21 +18,11 @@ This puts an `svrecon` command on your `PATH` (equivalently `python -m svrecon`)
 ## Tests
 
 ```bash
-pytest                    # everything
-pytest tests/unit         # needs no fixture data
-pytest tests/integration  # runs against the committed fixture
+pytest
 ```
 
-- **`tests/unit/`** — reconstruction verified against each SV type's grammar, and the CIGAR checks
-  over synthetic alignments.
-- **`tests/integration/`** — scoring 20 SVs [insilicoSV](https://github.com/PopicLab/insilicoSV)
-  simulated, against reads and an assembly.
-
-The fixture in `tests/integration/data/` is committed. To regenerate it (needs [`insilicosv`](https://github.com/PopicLab/insilicoSV) on `PATH`):
-
-```bash
-tests/integration/generators/generate_data.sh
-```
+Reconstruction verified against each SV type's grammar, and the CIGAR checks over synthetic
+alignments.
 
 ## Running
 
