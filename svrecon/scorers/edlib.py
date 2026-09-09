@@ -77,7 +77,7 @@ class EdlibScorer(Scorer):
         if edlib_result is None:  # nothing aligned at all
             return QueryValidation(source=ValidationSource.EDLIB)
 
-        cigar = Cigar.from_edlib(edlib_result.cigar)
+        cigar: Cigar = edlib_result.cigar
         cigar_status, cigar_results = self.score_cigar(cigar, query)
         passed = cigar_status is QueryValidationStatus.PASS
 

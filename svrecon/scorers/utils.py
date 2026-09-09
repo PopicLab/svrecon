@@ -122,24 +122,13 @@ class Cigar:
         return cls([(cls._EDLIB_OP_CODES[m.group(2)], int(m.group(1)))
                     for m in re.finditer(r'(\d+)([MIDX=])', cigar_str)])
 
-    @classmethod
-    def from_pysam(cls, read: pysam.AlignedSegment) -> 'Cigar':
-        """Normalizes a pysam record: hard clips become soft clips (both mean unaligned
-        original-read bases here); reverse-strand records flip to forward-read order.
-
-        e.g. cigartuples=[(H, 100), (M, 50)], is_reverse=True -> [(M, 50), (S, 100)]"""
-        tuples = [(cls.SOFT_CLIP if op == cls.HARD_CLIP else op, length) for op, length in read.cigartuples]
-        if read.is_reverse:
-            tuples.reverse()
-        return cls(tuples)
-
 
 @dataclass
 class EdlibScoreResult:
     """One HW alignment of a query into a target (genomic window or read): normalized
-    error rate, edlib CIGAR string, and the matched target substring."""
+    error rate, the parsed CIGAR, and the matched target substring."""
     error: float
-    cigar: str  # edlib task='path' CIGAR string; parse with Cigar.from_edlib
+    cigar: Cigar  # parsed from edlib's task='path' CIGAR; error is its NM/blen
     matched_target_sequence: str
 
 
@@ -162,7 +151,6 @@ def edlib_score(query_seq: str, target_seq: str, k: int = -1) -> Union[EdlibScor
         return None
 
     matched_target_sequence = target_seq[match_start:match_end + 1]
-    # TODO: revisit scoring. currently, normalize by the longer of query and matched span, so deletions widen thedenominator instead of inflating the rate.
-    denominator = len(query_seq)
-    error_rate = result['editDistance'] / denominator
-    return EdlibScoreResult(error=error_rate, cigar=result['cigar'], matched_target_sequence=matched_target_sequence)
+    cigar = Cigar.from_edlib(result['cigar'])
+    return EdlibScoreResult(error=cigar.error_rate, cigar=cigar,
+                            matched_target_sequence=matched_target_sequence)
