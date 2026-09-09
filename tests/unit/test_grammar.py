@@ -188,8 +188,8 @@ def test_reconstruction_matches_grammar(reference, buffer_size, records,
     grouped_records = group_records_by_id(records)
     # every case is one SV, whether by shared SVID or as a simple variant
     assert len(grouped_records) == 1
-    (svid, sv_records), = grouped_records.items()
+    (_, sv_records), = grouped_records.items()
 
-    queries = construct_queries(svid, sv_records, buffer_size, reference_bytes)
+    queries = construct_queries(sv_records, buffer_size, reference_bytes)
 
     assert [query.sequence for query in queries] == expected_sequences

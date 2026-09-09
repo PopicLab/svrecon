@@ -33,9 +33,9 @@ def pad_matches(run: str = '') -> str:
 
 def get_dummy_query(sequence: str) -> Query:
     """Only ``sequence`` is ever read off it."""
-    return Query(chrom='chrT', svtype='sv', svid='sv', grammar='dummy', sequence=sequence,
-                 ref_start=0, ref_end=0, recon_segments=[], ref_segments=[], ref_sequence='',
-                 buffer=0)
+    return Query(chrom='chrT', svtype='sv', grammar='dummy', sequence=sequence,
+                 ref_start=0, ref_end=0, initial_segments=[], recon_segments=[], ref_segments=[],
+                 ref_sequence='', buffer=0)
 
 
 def pad_bases(seq: str = '') -> str:

@@ -61,7 +61,7 @@ def plot_sv_validation(sv_validation: 'SVValidationResult', output_dir: str, asp
         alt_boundaries = sorted({pos for start, end in query.recon_segments for pos in (start, end)})
         title = query.svtype
         if title_svid:
-            title += f' {query.svid}_{part}'
+            title += f' {sv_validation.svid}_{part}'
         if title_location:
             title += f' ({query.chrom}:{query.ref_start:,}-{query.ref_end:,})'
 
@@ -79,10 +79,10 @@ def plot_sv_validation(sv_validation: 'SVValidationResult', output_dir: str, asp
             ref_seq, num_ref_subs = UNPLOTTABLE_BASE.subn(random_base, ref_seq)
             matched_seq, num_matched_subs = UNPLOTTABLE_BASE.subn(random_base, matched_seq)
             logger.info(f'Substituting {num_recon_subs + num_ref_subs + num_matched_subs} '
-                        f'bases for {query.svid}')
+                        f'bases for {sv_validation.svid}')
             plottable = True
         if not plottable:
-            logger.info(f'Skipping {query.svid}_{part} plots, sequence contains unknown basepair')
+            logger.info(f'Skipping {sv_validation.svid}_{part} plots, sequence contains unknown basepair')
             continue
 
         # reconstructed vs the unmodified reference

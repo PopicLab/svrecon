@@ -24,13 +24,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class QueryValidationResult:
-    """Every scorer's result for one reconstructed query, in the order they ran.
-    Scoring stops at the first pass; on a failure every scorer runs, so the decisive
-    result is the highest-ranked one, not the last."""
+    """Validation results per reconstructed query summarized over cigar checks"""
     query: Query
     validations: List[QueryValidation] = field(default_factory=list)
-    # Reference-ambiguity results, kept apart: a pass there means the allele also matches
-    # the unmodified reference, making the query inconclusive rather than validated.
     ambiguity_validations: List[QueryValidation] = field(default_factory=list)
 
     def update_validation(self, result: QueryValidation) -> None:
@@ -41,9 +37,7 @@ class QueryValidationResult:
 
     def jsonify(self) -> Dict:
         return {
-            'chrom': self.query.chrom,
-            'grammar': self.query.grammar,
-            'ref_start': self.query.ref_start,
+            'query': self.query.jsonify(),
             'status': self.status,
             'reason': self.reason,
             'aligned': self.aligned,
@@ -438,7 +432,7 @@ class CallsetScorer(object):
             sv_buffer = self._resolve_buffer(records)
             query_validations: List[QueryValidationResult] = []  # one per reconstructed query of an SV
 
-            for query in construct_queries(svid, records, sv_buffer, self.chrom_to_ref):
+            for query in construct_queries(records, sv_buffer, self.chrom_to_ref):
                 query_validation = QueryValidationResult(query=query)
 
                 for scorer in self.validation_scorer:

@@ -13,11 +13,11 @@ from svrecon.utils import get_start_stop, reverse_complement
 class Query:
     chrom: str
     svtype: str
-    svid: str
     grammar: str
     sequence: str
     ref_start: int
     ref_end: int
+    initial_segments: List[Tuple[int,int]] # starting segments from initial reference, before reconstruction
     recon_segments: List[Tuple[int, int]] # indicator of segments of interest, 0 indexed to the start of the subsequence,
     ref_segments: List[Tuple[int, int]] # same pieces, in absolute reference coordinates (parallel to segments)
     ref_sequence: str # unmodified reference over [ref_start, ref_end), for plotting and diagnostics
@@ -25,6 +25,20 @@ class Query:
 
     def __len__(self):
         return len(self.sequence)
+
+    def jsonify(self) -> Dict:
+        return {
+            'chrom': self.chrom,
+            'svtype': self.svtype,
+            'grammar': self.grammar,
+            'ref_start': self.ref_start,
+            'ref_end': self.ref_end,
+            'initial_segments': self.initial_segments,
+            'ref_segments': self.ref_segments,
+            'recon_segments': self.recon_segments,
+            'buffer': self.buffer,
+            'length': len(self)
+        }
 
 @dataclass
 class _Segment:
@@ -173,7 +187,7 @@ def create_starting_segments(records: list[VariantRecord], buffer: int, ref: Dic
 
     return segments
 
-def construct_queries(svid: str, records: List[VariantRecord], buffer: int,
+def construct_queries(records: List[VariantRecord], buffer: int,
                       ref: Dict[str, bytearray]) -> List[Query]:
     """
     Given records of operations, recreate the resulting subsequences and metadata 
@@ -186,6 +200,7 @@ def construct_queries(svid: str, records: List[VariantRecord], buffer: int,
         key=lambda op: (-op.op_start, _OP_TYPE_ORDER[type(op)],
                          -op.insord if isinstance(op, _Insert) else 0))
     segments: list[_Segment] = create_starting_segments(records, buffer, ref)
+    initial_intervals = [(seg.ref_start, seg.ref_end) for seg in segments] # before operations mutate segments; same for every query of this SV
     initial_grammar = ''.join(seg.symbol for seg in segments) # before operations mutate segments; same for every query of this SV
 
     for operation in operations:
@@ -221,9 +236,9 @@ def construct_queries(svid: str, records: List[VariantRecord], buffer: int,
         grammar = f'{initial_grammar}->{resultant_grammar}'
         query_ref_start, query_ref_end = run[0].ref_start, run[-1].ref_end
         queries.append(Query(
-            chrom=chrom, svtype=sv_type, svid=svid, grammar=grammar, sequence=sequence,
-            ref_start=query_ref_start, ref_end=query_ref_end, recon_segments=covering_segments,
-            ref_segments=covering_ref_segments,
+            chrom=chrom, svtype=sv_type, grammar=grammar, sequence=sequence,
+            ref_start=query_ref_start, ref_end=query_ref_end, initial_segments=initial_intervals,
+            recon_segments=covering_segments, ref_segments=covering_ref_segments,
             ref_sequence=ref[chrom][query_ref_start:query_ref_end].decode('ascii'),
             buffer=buffer))
 
