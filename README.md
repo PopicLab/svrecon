@@ -91,7 +91,7 @@ Validation thresholds:
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--buffer` | `500` | Reference context, in bp, kept on each side of the rebuilt allele. `auto` sizes it per SV to `max(50, 10% of that SV's longest segment)`. |
+| `--buffer` | `100` | Reference context, in bp, kept on each side of the rebuilt allele. `auto` sizes it per SV to `max(50, 10% of that SV's longest segment)`. |
 | `--match-error-threshold` | `0.1` | Max error rate for an assembly / edlib / reference alignment to validate a query. |
 | `--read-error-threshold` | `0.1` | Max error rate for a read to validate a query. Keep ≤ `--match-error-threshold` for consistent hit/miss calls. |
 | `--location-tolerance` | unbounded | Max bp between a mappy hit's reference start and the expected locus. Bounding it is only safe for well-scaffolded assemblies — per-contig assemblies report contig-local coordinates, so a bound rejects valid alignments. In YAML write infinity as `.inf` (bare `inf` parses as a string). |
@@ -104,7 +104,7 @@ Output:
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--report` | `none` | `json` writes `svrecon.report.jsonl` beside the log. See below. |
-| `--verbose` | off | Append the full JSON summary to each per-SV log line. |
+| `--verbose` | on | Append the full JSON summary to each per-SV log line. |
 | `--n-threads` | half the CPUs | Worker threads for scoring SVs. |
 | `--chrom-cache` | temp dir | Where to keep per-chromosome `.mmi` indices between runs. |
 | `--plot-first-n` | `0` | Write k-mer dot plots for the first N calls of each SV type, into `<output_dir>/sv_recon_img/`. |
@@ -117,7 +117,7 @@ Config-file only (no CLI flag):
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `max_contiguous_error` | unset | Minimum contiguous length of a failing insertion, deletion, or soft clip. |
+| `max_contiguous_error` | `50` | Minimum contiguous length of a failing insertion, deletion, or soft clip. Set to `null` to disable. |
 | `max_window_size`, `max_window_error` | `100`, `25` | If both are set, fail any alignment where some window of `max_window_size` alignment columns holds at least `max_window_error` error columns (mismatches, insertions, deletions, clips). Must be set together; set both to `null` to disable. |
 | `min_mappable_fraction` | `0.95` | A query with less than this fraction of mappable (ACGT) bases is inconclusive rather than pass/fail. Set to `null` to disable. Only bites above `1 - error threshold` — see below. |
 | `max_unmappable_size` | `50` | A query with a contiguous non-ACGT run at least this long is inconclusive rather than pass/fail. Set to `null` to disable. |
@@ -189,8 +189,8 @@ that are wrong precisely where the SV rearranges the sequence.
 
 - *alignment error* (always) — divergence within the aligned block (mismatches + indels /
   aligned length) ≤ `match_error_threshold`; clips don't count.
-- *no large errors* (if `max_contiguous_error` is set) — minimum contiguous length of a failing
-  insertion, deletion, or soft clip.
+- *no large errors* (on by default, `max_contiguous_error: 50`) — minimum contiguous length of a
+  failing insertion, deletion, or soft clip.
 - *maximum error window* (on by default, `max_window_size: 100` / `max_window_error: 25`) — no
   window of `max_window_size` alignment columns holds `max_window_error` or more error columns
   (mismatches, insertions, deletions, clips)

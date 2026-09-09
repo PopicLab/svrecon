@@ -19,7 +19,7 @@ DEFAULTS = {
     'classified': None,
     'gap_file': None,
     'n_threads': max(1, os.cpu_count() // 2),
-    'verbose': False,
+    'verbose': True,
 
     # Path setting / plotting
     'chrom_cache': None,
@@ -33,12 +33,11 @@ DEFAULTS = {
     'plot_axis_length': False,
 
     # Shared parameters for validation
-    'buffer': 500,
+    'buffer': 100,
     'auto_buffer_min': 50,        # floor for buffer='auto', also its no-segments fallback
     'auto_buffer_fraction': 0.1,  # buffer='auto' sizes to this fraction of the SV's longest segment
     'match_error_threshold': 0.1,
-    'max_contiguous_error': None,   # if set, minimum contiguous length of a failing insertion, deletion, or soft clip
-    'junction_radius': None,  # if set, check the error rate within this radius of every breakpoint
+    'max_contiguous_error': 50,   # if set, minimum contiguous length of a failing insertion, deletion, or soft clip
     'min_mappable_fraction': 0.95,  # a query below this fraction of ACGT is inconclusive; null disables
     'max_unmappable_size': 50,  # a contiguous non-ACGT run this long or longer is inconclusive
     'max_window_size': 100,   # error-window check: window size in alignment columns; null disables
@@ -97,7 +96,6 @@ VALID_PARAM_FNS = {
     'auto_buffer_fraction': lambda arg: isinstance(arg, (int, float)),
     'match_error_threshold': lambda arg: isinstance(arg, (int, float)),
     'max_contiguous_error': lambda arg: arg is None or isinstance(arg, int),
-    'junction_radius': lambda arg: arg is None or isinstance(arg, int),
     'max_window_size': lambda arg: arg is None or isinstance(arg, int),
     'max_window_error': lambda arg: arg is None or isinstance(arg, int),
     'min_mappable_fraction': lambda arg: arg is None or (isinstance(arg, (int, float))
