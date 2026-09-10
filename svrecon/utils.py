@@ -35,7 +35,7 @@ def load_fasta_to_bytes(filename: str, chroms) -> Dict[str, bytearray]:
 def get_start_stop(rec: VariantRecord) -> Tuple[int, int]:
     """Obtains VCF start/stop coordinates. If SVLEN is available, calculate stop (due to pysam bug in shifting stop)"""
     start = rec.start
-    stop = start + rec.info['SVLEN'] if rec.info.get('SVLEN') else rec.stop
+    stop = start + abs(rec.info['SVLEN']) if 'SVLEN' in rec.info else rec.stop # SVLEN is sometimes negative for deleted segments in VCFs
     return start, stop
 
 
@@ -56,7 +56,7 @@ def group_records_by_id(records) -> Dict[str, List[VariantRecord]]:
     grouped_variants: Dict[str, List[VariantRecord]] = defaultdict(list)
     counter = 0
     for rec in records:
-        svid = rec.info.get('SVID', f'simple_{counter}')
+        svid = rec.info['SVID'] if 'SVID' in rec.info else f'simple_{counter}'
         grouped_variants[svid].append(rec)
         counter += 1
     return grouped_variants
