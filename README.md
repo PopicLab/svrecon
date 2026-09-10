@@ -243,16 +243,68 @@ Each record holds only what the *evaluation* concluded; join back to the call VC
 coordinates, types, and operations.
 
 ```jsonc
-	{
-  "svid": "sv208",
-  "svtype": "delINVdup",
+{
+  "svid": "sv16",
+  "svtype": "delINV",
   "outcome": "hit",
   "tier": "assembly",
   "query_validations": [
     {
-      "chrom": "chr21",
-      "grammar": "~ABC~->~cbC~",
-      "ref_start": 6479314,
+      "query": {
+        "chrom": "chr21",
+        "svtype": "delINV",
+        "grammar": "~AB~->~b~",
+        "ref_start": 14952924,
+        "ref_end": 14960270,
+        "initial_segments": [
+          [
+            14952924,
+            14953024
+          ],
+          [
+            14953024,
+            14957080
+          ],
+          [
+            14957080,
+            14960170
+          ],
+          [
+            14960170,
+            14960270
+          ]
+        ],
+        "ref_segments": [
+          [
+            14952924,
+            14953024
+          ],
+          [
+            14957080,
+            14960170
+          ],
+          [
+            14960170,
+            14960270
+          ]
+        ],
+        "recon_segments": [
+          [
+            0,
+            100
+          ],
+          [
+            100,
+            3190
+          ],
+          [
+            3190,
+            3290
+          ]
+        ],
+        "buffer": 100,
+        "length": 3290
+      },
       "status": "pass",
       "reason": "pass",
       "aligned": true,
@@ -266,7 +318,7 @@ coordinates, types, and operations.
           "status": "pass",
           "reason": "pass",
           "aligned": true,
-          "cigar": "13813=",
+          "cigar": "3290=",
           "lowest_pass_error": 0.0,
           "lowest_error": 0.0,
           "strand": 1,
