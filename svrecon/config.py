@@ -121,6 +121,7 @@ VALID_PARAM_FNS = {
     'experiment_dir': lambda arg: isinstance(arg, Path),
     'log_path': lambda arg: isinstance(arg, Path),
     'report_path': lambda arg: arg is None or isinstance(arg, Path),
+    'summary_json_path': lambda arg: isinstance(arg, Path),
     'cache_dir': lambda arg: isinstance(arg, Path),
     'img_dir': lambda arg: isinstance(arg, Path),
 }
@@ -148,6 +149,7 @@ class Config:
         self.experiment_dir = Path(args.config).parent.resolve() if args.config else Path.cwd()  # overridden to parent folder of config file if it exists
         self.log_path = self.experiment_dir / f'svrecon.log'
         self.report_path = self.experiment_dir / f'svrecon.report.jsonl' if self.report == 'json' else None
+        self.summary_json_path = self.experiment_dir / 'svrecon.summary.json'
         self.img_dir = self.experiment_dir / 'sv_recon_img'
         if self.plot_first_n:
             self.img_dir.mkdir(parents=True, exist_ok=True)
