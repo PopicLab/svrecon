@@ -120,8 +120,8 @@ def get_operations_from_records(records: list[VariantRecord]) -> list[_Operation
 
     for record in records:
         start, stop = interval = get_start_stop(record)
-        target = record.info.get('TARGET', stop) # already 0-based: TARGET == start + SVLEN for tandem pastes
-        insord = record.info.get('INSORD', -1)
+        target = record.info['TARGET'] if 'TARGET' in record.info else stop  # already 0-based: TARGET == start + SVLEN for tandem pastes
+        insord = record.info['INSORD'] if 'INSORD' in record.info else -1
         # if single record SV, read off SVTYPE. otherwise, read OP_TYPE
         op = record.info['SVTYPE'] if len(records) == 1 else record.info['OP_TYPE']
         symbol = start_stops_to_sym[interval]

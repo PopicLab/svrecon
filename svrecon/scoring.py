@@ -243,9 +243,7 @@ class CallsetScorer(object):
 
     def _assert_sv_records_positive_lengths(self, records: List[VariantRecord]) -> None:
         """
-        Asserts every [start, stop) interval is non empty. A negative SVLEN -- the VCF convention
-        many callers use for DEL -- otherwise yields an inverted span that slips past the
-        pairwise overlap check.
+        Asserts every [start, stop) interval is non empty
         """
         for rec in records:
             start, stop = get_start_stop(rec)
@@ -273,9 +271,9 @@ class CallsetScorer(object):
         Asserts no target lands in an interval's (start, stop) -- which would result in a split segment
         """
         for rec in records:
-            target = rec.info.get('TARGET')
-            if target is None:
+            if 'TARGET' not in rec.info:
                 continue
+            target = rec.info['TARGET']
             for source_rec in records:
                 start, stop = get_start_stop(source_rec)
                 if start < target < stop:
@@ -299,7 +297,7 @@ class CallsetScorer(object):
         """
         chrom = records[0].chrom
         for rec in records:
-            target_chrom = rec.info.get('TARGET_CHROM', chrom)
+            target_chrom = rec.info['TARGET_CHROM'] if 'TARGET_CHROM' in rec.info else chrom
             if target_chrom != chrom:
                 raise ValueError(f'record {rec.id} on {chrom} has an interchromosomal TARGET_CHROM={target_chrom}')
 
