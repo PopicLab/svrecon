@@ -1,0 +1,11 @@
+reference: ../../../data/chr21.fa
+calls: ../../../insilicoSV/small-1/sim.vcf
+sample: ../../../insilicoSV/small-0/sim.hapA.fa
+
+buffer: 500
+match_error_threshold: 0.1
+max_contiguous_error: 50
+max_window_size: 100
+max_window_error: 25
+verbose: true
+plot_first_n: 0

@@ -51,14 +51,21 @@ def load_exclude_list(gap_file: str) -> Dict[str, IntervalTree]:
     return exclude_list
 
 
-def group_variants_by_id(vcf_path: str, gap_file: Optional[str] = None) -> Dict[str, List[VariantRecord]]:
-    """Group a callset VCF's records by SVID, optionally dropping any SV with a record
-    (its own span, or its TARGET) overlapping an excluded region (e.g. centromere/telomere)."""
+def group_records_by_id(records) -> Dict[str, List[VariantRecord]]:
+    """Group records by SVID; a record without one is a simple SV, keyed simple_{counter}."""
     grouped_variants: Dict[str, List[VariantRecord]] = defaultdict(list)
-    for rec in pysam.VariantFile(vcf_path).fetch():
-        svid = rec.info.get('SVID')
-        if svid:
-            grouped_variants[svid].append(rec)
+    counter = 0
+    for rec in records:
+        svid = rec.info.get('SVID', f'simple_{counter}')
+        grouped_variants[svid].append(rec)
+        counter += 1
+    return grouped_variants
+
+
+def load_grouped_variants_from_vcf(vcf_path: str, gap_file: Optional[str] = None) -> Dict[str, List[VariantRecord]]:
+    """Group a callset VCF's records by SVID, optionally dropping any SV with a record
+    (its own span, or its TARGET) overlapping an excluded region"""
+    grouped_variants = group_records_by_id(pysam.VariantFile(vcf_path).fetch())
 
     if not gap_file:
         return grouped_variants
