@@ -7,3 +7,11 @@ __pycache__/
 build/
 dist/
 .pytest_cache
+
+# data outputs from sample notebook
+workflows/**/*.fa
+workflows/**/*.fai
+workflows/**/*.txt
+workflows/**/*.vcf
+workflows/**/*.log
+workflows/**/*.bed

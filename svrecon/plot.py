@@ -16,18 +16,18 @@ logger = logging.getLogger(__name__)
 K = 15  # wotplot k-mer size
 TICK_COUNT = 8  # target ticks per axis, regardless of sequence length
 AXIS_FONTSIZE = 18 
-PLOTTABLE_BASES = 'ACGT'  # wotplot rejects N and every other IUPAC code
+PLOTTABLE_BASES = 'ACGT'  
 UNPLOTTABLE_BASE = re.compile(f'[^{PLOTTABLE_BASES}]')
 
 
 def plot_dot_plot(s1: str, s2: str, title: str, output_path: str,
                   s1_name: str = 'reconstructed', s2_name: str = 'validating',
-                  segment_boundaries: Optional[Sequence[int]] = None,
-                  ref_segment_boundaries: Optional[Sequence[int]] = None,
-                  x_offset: int = 0, y_offset: int = 0, aspect: str = 'auto',
+                  s1_boundaries: Optional[Sequence[int]] = None,
+                  s2_boundaries: Optional[Sequence[int]] = None,
+                  s1_offset: int = 0, s2_offset: int = 0, aspect: str = 'auto',
                   axis_length: bool = False) -> None:
-    """Renders a k-mer dot plot of s1 (x) vs s2 (y) to output_path, with optional dashed
-    boundary lines per axis and x/y tick offsets for genomic coordinates."""
+    """Renders a k-mer dot plot of s1 (x) vs s2 (y), with optional 0 indexed
+    boundary lines per axis and tick offsets"""
     matrix = wp.DotPlotMatrix(s1.upper(), s2.upper(), K)
 
     num_rows = matrix.mat.shape[0]
@@ -37,13 +37,13 @@ def plot_dot_plot(s1: str, s2: str, title: str, output_path: str,
     ax.xaxis.tick_bottom()  # spy() defaults to top-side ticks; move them to match the x-label below
     ax.xaxis.set_major_locator(MaxNLocator(nbins=TICK_COUNT, integer=True))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=TICK_COUNT, integer=True))
-    ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _pos: f'{int(x) + x_offset:,}'))
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _pos: f'{num_rows - 1 - int(y) + y_offset:,}'))
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _pos: f'{int(x) + s1_offset:,}'))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _pos: f'{num_rows - 1 - int(y) + s2_offset:,}'))
 
-    # segment_boundaries: s1/x-axis coords. ref_segment_boundaries: s2/y-axis, row-indexed like the ticks.
-    for pos in segment_boundaries or ():
+    # s1_boundaries: s1/x-axis coords. s2_boundaries: s2/y-axis, row-indexed like the ticks.
+    for pos in s1_boundaries or ():
         ax.axvline(x=pos, color='gray', linestyle='--', linewidth=0.6, alpha=0.6)
-    for pos in ref_segment_boundaries or ():
+    for pos in s2_boundaries or ():
         ax.axhline(y=num_rows - 1 - pos, color='blue', linestyle='--', linewidth=0.6, alpha=0.6)
 
     fig.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -53,15 +53,15 @@ def plot_dot_plot(s1: str, s2: str, title: str, output_path: str,
 def plot_sv_validation(sv_validation: 'SVValidationResult', output_dir: str, aspect: str = 'auto',
                        substitute_bases: bool = False, title_svid: bool = False,
                        title_location: bool = False, axis_length: bool = False) -> None:
-    """Plots each subsequence of one SV vs the reference and (when found) its matched
-    sequence, into an existing output_dir -- the caller owns directory layout and gating."""
+    """For each query of SVValidationResult, plot reconstructed vs reference. If a supplementary matched sequence is provided, 
+    also plot reconstructed vs matched and matched vs reconstructed"""
     out_dir = Path(output_dir)
     for part, query_validation in enumerate(sv_validation.query_validation_results):
         query = query_validation.query
         alt_boundaries = sorted({pos for start, end in query.recon_segments for pos in (start, end)})
         title = query.svtype
         if title_svid:
-            title += f' {query.svid}_{part}'
+            title += f' {sv_validation.svid}_{part}'
         if title_location:
             title += f' ({query.chrom}:{query.ref_start:,}-{query.ref_end:,})'
 
@@ -79,31 +79,31 @@ def plot_sv_validation(sv_validation: 'SVValidationResult', output_dir: str, asp
             ref_seq, num_ref_subs = UNPLOTTABLE_BASE.subn(random_base, ref_seq)
             matched_seq, num_matched_subs = UNPLOTTABLE_BASE.subn(random_base, matched_seq)
             logger.info(f'Substituting {num_recon_subs + num_ref_subs + num_matched_subs} '
-                        f'bases for {query.svid}')
+                        f'bases for {sv_validation.svid}')
             plottable = True
         if not plottable:
-            logger.info(f'Skipping {query.svid}_{part} plots, sequence contains unknown basepair')
+            logger.info(f'Skipping {sv_validation.svid}_{part} plots, sequence contains unknown basepair')
             continue
 
         # reconstructed vs the unmodified reference
         ref_boundaries = sorted({pos - query.ref_start
                                  for start, end in query.ref_segments for pos in (start, end)})
-        plot_dot_plot(recon_seq, ref_seq, title, str(out_dir / f'{part}_reference.png'),
-                      s2_name='reference', segment_boundaries=alt_boundaries,
-                      ref_segment_boundaries=ref_boundaries, y_offset=query.ref_start, aspect=aspect,
+        plot_dot_plot(recon_seq, ref_seq, title, str(out_dir / f'{part}_recon_vs_reference.png'),
+                      s2_name='reference', s1_boundaries=alt_boundaries,
+                      s2_boundaries=ref_boundaries, s2_offset=query.ref_start, aspect=aspect,
                       axis_length=axis_length)
 
         if matched_seq:
             source = query_validation.source.value
             # reconstructed vs the matched sequence, when a scorer found one (a pass or a match)
             plot_dot_plot(recon_seq, matched_seq, title,
-                        str(out_dir / f'{part}_matched_{source}.png'),
-                        s2_name=source, segment_boundaries=alt_boundaries, aspect=aspect,
+                        str(out_dir / f'{part}_recon_vs_aligned_{source}.png'),
+                        s2_name=source, s1_boundaries=alt_boundaries, aspect=aspect,
                         axis_length=axis_length)
 
             # matched vs the reference:
             plot_dot_plot(matched_seq, ref_seq, title,
-                        str(out_dir / f'{part}_matched_{source}_reference.png'),
+                        str(out_dir / f'{part}_aligned_{source}_vs_reference.png'),
                         s1_name=source, s2_name='reference',
-                        ref_segment_boundaries=ref_boundaries, y_offset=query.ref_start, aspect=aspect,
+                        s2_boundaries=ref_boundaries, s2_offset=query.ref_start, aspect=aspect,
                         axis_length=axis_length)

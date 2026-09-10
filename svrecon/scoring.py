@@ -17,20 +17,16 @@ from svrecon.scorers.assembly import AssemblyScorer
 from svrecon.scorers.base import Scorer, QueryValidation
 from svrecon.scorers.edlib import EdlibScorer
 from svrecon.scorers.reads import ReadScorer
-from svrecon.utils import get_start_stop, group_variants_by_id, load_fasta_to_bytes
+from svrecon.utils import get_start_stop, load_grouped_variants_from_vcf, load_fasta_to_bytes
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class QueryValidationResult:
-    """Every scorer's result for one reconstructed query, in the order they ran.
-    Scoring stops at the first pass; on a failure every scorer runs, so the decisive
-    result is the highest-ranked one, not the last."""
+    """Validation results per reconstructed query summarized over cigar checks"""
     query: Query
     validations: List[QueryValidation] = field(default_factory=list)
-    # Reference-ambiguity results, kept apart: a pass there means the allele also matches
-    # the unmodified reference, making the query inconclusive rather than validated.
     ambiguity_validations: List[QueryValidation] = field(default_factory=list)
 
     def update_validation(self, result: QueryValidation) -> None:
@@ -41,8 +37,7 @@ class QueryValidationResult:
 
     def jsonify(self) -> Dict:
         return {
-            'chrom': self.query.chrom,
-            'ref_start': self.query.ref_start,
+            'query': self.query.jsonify(),
             'status': self.status,
             'reason': self.reason,
             'aligned': self.aligned,
@@ -195,7 +190,7 @@ class CallsetScorer(object):
         self.plot_axis_length = config.plot_axis_length
 
         # Parse and group records by svid
-        self.variants = group_variants_by_id(config.calls, config.gap_file)
+        self.variants = load_grouped_variants_from_vcf(config.calls, config.gap_file)
         logger.info(f'Found {len(self.variants)} calls from callset {config.calls}')
 
         # Identify chromsomes of interest in callset
@@ -260,12 +255,9 @@ class CallsetScorer(object):
 
     def _assert_sv_records_non_overlapping(self, records: List[VariantRecord]) -> None:
         """
-        Asserts the following conditions:
-        - all [start, stop) intervals are non overlapping
-        - all targets are either outside of [min(starts), max(stops)], or land on an existing endpoint
+        Asserts all [start, stop) intervals are non overlapping
         """
-        # Dedupe identical (start, stop) spans -- multiple records can share one source span
-        # for different downstream operations -- before sorting.
+        # Dedupe identical (start, stop) spans -- ensure non overlapping
         by_interval: Dict[Tuple[int, int], VariantRecord] = {}
         for rec in records:
             by_interval.setdefault(get_start_stop(rec), rec)
@@ -276,48 +268,30 @@ class CallsetScorer(object):
                                  f'the preceding record {prev_rec.id} [{prev_start},{prev_stop}) '
                                  f'by {prev_stop - start} bp')
 
-        # find min/max start, stops, check target pos
-        starts = {start for start, _, _ in intervals}
-        stops = {stop for _, stop, _ in intervals}
-        min_start = min(starts)
-        max_stop = max(stops)
+    def _assert_sv_records_no_split_segments(self, records: List[VariantRecord]) -> None:
+        """
+        Asserts no target lands in an interval's (start, stop) -- which would result in a split segment
+        """
         for rec in records:
             target = rec.info.get('TARGET')
             if target is None:
                 continue
-            if min_start <= target <= max_stop and target not in starts and target not in stops:
-                raise ValueError(f'{rec.chrom}: record {rec.id} TARGET={target} falls inside the SV\'s '
-                                 f'span [{min_start},{max_stop}) but does not land on an existing interval boundary')
+            for source_rec in records:
+                start, stop = get_start_stop(source_rec)
+                if start < target < stop:
+                    raise ValueError(f'{rec.chrom}: record {rec.id} TARGET={target} falls inside '
+                                     f'record {source_rec.id}\'s interval [{start},{stop})')
 
-    def _assert_sv_records_contiguous(self, records: List[VariantRecord]) -> None:
+    def _assert_sv_records_required_fields(self, records: List[VariantRecord]) -> None:
         """
-        Asserts the following conditions:
-        - the [start, stop) intervals tile one span, leaving no gap between consecutive records
-        - every target lands on one of those intervals' endpoints
-
-        Together these reject dispersed events, unsupported for now: their target sits away from
-        the source span, so the allele lands in a window of its own rather than in this one.
+        Asserts every record has an SVTYPE, and every record of a multi-record SV an OP_TYPE
         """
-        # Dedupe identical (start, stop) spans -- multiple records can share one source span
-        # for different downstream operations -- before sorting.
-        by_interval: Dict[Tuple[int, int], VariantRecord] = {}
+        required = ('SVTYPE',) if len(records) == 1 else ('SVTYPE', 'OP_TYPE')
         for rec in records:
-            by_interval.setdefault(get_start_stop(rec), rec)
-        intervals = sorted((start, stop, rec) for (start, stop), rec in by_interval.items())
-        for (prev_start, prev_stop, prev_rec), (start, stop, rec) in zip(intervals, intervals[1:]):
-            if start != prev_stop:
-                raise ValueError(f'{rec.chrom}: record {rec.id} [{start},{stop}) is not contiguous '
-                                 f'with the preceding record {prev_rec.id} [{prev_start},{prev_stop}); '
-                                 f'gap of {start - prev_stop} bp; dispered events are currently not fully supported')
-
-        endpoints = {pos for start, stop, _ in intervals for pos in (start, stop)}
-        for rec in records:
-            target = rec.info.get('TARGET')
-            if target is None:
-                continue
-            if target not in endpoints:
-                raise ValueError(f'{rec.chrom}: record {rec.id} TARGET={target} does not land on an '
-                                 f'interval boundary {sorted(endpoints)}; dispersed events are currently not fully supported')
+            for key in required:
+                if key not in rec.info:
+                    raise ValueError(f'{rec.chrom}: record {rec.id} is missing INFO/{key}')
+        
 
     def _assert_sv_records_non_interchromosomal(self, records: List[VariantRecord]) -> None:
         """
@@ -347,7 +321,8 @@ class CallsetScorer(object):
         report_fh = open(self.report_path, 'w') if self.report_path else None
 
         with ThreadPoolExecutor(max_workers=self.n_threads) as executor:
-            futures = {executor.submit(self.score_sv, self.variants[svid]) for svid in self.variants.keys()}
+            futures = {executor.submit(self.score_sv, svid, records)
+                       for svid, records in self.variants.items()}
 
             pbar = tqdm(as_completed(futures), total=len(self.variants), desc=f'Scoring SVs', smoothing=0)
 
@@ -442,17 +417,17 @@ class CallsetScorer(object):
 
         return precision, correct_calls, total_calls, inconclusive_calls, assembly_hits, read_hits
 
-    def score_sv(self, records: List[VariantRecord]) -> SVValidationResult:
+    def score_sv(self, svid: str, records: List[VariantRecord]) -> SVValidationResult:
         """Score one SV: reconstruct its alt allele(s), validate each query with the
-        configured scorers, and return the SVValidation."""
-        svid = records[0].info['SVID']
-        sv_type = records[0].info['SVTYPE']
+        configured scorers, and return the SVValidation. ``svid`` is the grouping key"""
+        sv_type = records[0].info.get('SVTYPE')  # asserted present below, before any use
 
         try:
+            self._assert_sv_records_required_fields(records)
             self._assert_sv_records_non_interchromosomal(records)
             self._assert_sv_records_positive_lengths(records)
             self._assert_sv_records_non_overlapping(records)
-            self._assert_sv_records_contiguous(records) # NOTE: temporary assertion while dispersed events are not fully supported
+            self._assert_sv_records_no_split_segments(records)
 
             sv_buffer = self._resolve_buffer(records)
             query_validations: List[QueryValidationResult] = []  # one per reconstructed query of an SV
@@ -473,5 +448,7 @@ class CallsetScorer(object):
 
             return SVValidationResult(svid, sv_type, query_validations)
         except Exception as e:
-            e.add_note(f'while scoring SV {svid} ({sv_type})')
+            e.add_note(f'while scoring SV {svid} ({sv_type}): '
+                       + '; '.join(f'{rec.chrom}:{rec.start}-{rec.stop} {dict(rec.info)}'
+                                   for rec in records))
             raise

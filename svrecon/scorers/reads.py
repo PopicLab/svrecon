@@ -2,7 +2,7 @@
 import logging
 import os
 import threading
-from typing import List
+from typing import List, Optional
 import pysam
 
 from svrecon.constants import QueryValidationReason, QueryValidationStatus, ValidationSource
@@ -111,13 +111,13 @@ class ReadScorer(Scorer):
         lowest_pass_error = 1.0
         lowest_error = 1.0
         best_cigar_results = []  # the adopted read's checks on a pass, else the best-scoring read's
-        best_cigar = None
-        best_matched_seq = None
+        best_cigar: Optional[Cigar] = None
+        best_matched_seq: Optional[str] = None
 
         read_results = run_read_edlib(query.sequence, reads, self.read_error_threshold)
         for read_res in read_results:
             lowest_error = min(lowest_error, read_res.error)
-            cigar = Cigar.from_edlib(read_res.cigar)
+            cigar: Cigar = read_res.cigar
             cigar_status, cigar_results = self.score_cigar(cigar, query)
             if cigar_status is QueryValidationStatus.INCONCLUSIVE:
                 inconclusive = True

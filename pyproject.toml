@@ -15,7 +15,7 @@ svrecon = "svrecon.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["tests", "tests/generators"]
+pythonpath = ["tests/integration", "tests/integration/generators"]
 
 [tool.setuptools]
 packages = ["svrecon", "svrecon.scorers"]

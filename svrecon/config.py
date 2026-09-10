@@ -19,7 +19,7 @@ DEFAULTS = {
     'classified': None,
     'gap_file': None,
     'n_threads': max(1, os.cpu_count() // 2),
-    'verbose': False,
+    'verbose': True,
 
     # Path setting / plotting
     'chrom_cache': None,
@@ -33,13 +33,15 @@ DEFAULTS = {
     'plot_axis_length': False,
 
     # Shared parameters for validation
-    'buffer': 500,
+    'buffer': 100,
     'auto_buffer_min': 50,        # floor for buffer='auto', also its no-segments fallback
     'auto_buffer_fraction': 0.1,  # buffer='auto' sizes to this fraction of the SV's longest segment
     'match_error_threshold': 0.1,
-    'max_indel_size': None,   # if set, fail an alignment carrying an indel at least this long
-    'junction_radius': None,  # if set, check the error rate within this radius of every breakpoint
+    'max_contiguous_error': 50,   # if set, minimum contiguous length of a failing insertion, deletion, or soft clip
     'min_mappable_fraction': 0.95,  # a query below this fraction of ACGT is inconclusive; null disables
+    'max_unmappable_size': 50,  # a contiguous non-ACGT run this long or longer is inconclusive
+    'max_window_size': 100,   # error-window check: window size in alignment columns; null disables
+    'max_window_error': 25,   # error-window check: fail when a window holds at least this many error columns
 
     # Scoring parameters: read-based validation
     'read_error_threshold': 0.1,
@@ -93,10 +95,12 @@ VALID_PARAM_FNS = {
     'auto_buffer_min': lambda arg: isinstance(arg, int),
     'auto_buffer_fraction': lambda arg: isinstance(arg, (int, float)),
     'match_error_threshold': lambda arg: isinstance(arg, (int, float)),
-    'max_indel_size': lambda arg: arg is None or isinstance(arg, int),
-    'junction_radius': lambda arg: arg is None or isinstance(arg, int),
+    'max_contiguous_error': lambda arg: arg is None or isinstance(arg, int),
+    'max_window_size': lambda arg: arg is None or isinstance(arg, int),
+    'max_window_error': lambda arg: arg is None or isinstance(arg, int),
     'min_mappable_fraction': lambda arg: arg is None or (isinstance(arg, (int, float))
                                                          and 0 <= arg <= 1),
+    'max_unmappable_size': lambda arg: arg is None or isinstance(arg, int),
 
     # Scoring parameters: read-based validation
     'read_error_threshold': lambda arg: isinstance(arg, (int, float)),
@@ -155,7 +159,10 @@ class Config:
             self.cache_dir = Path(tempfile.gettempdir()) / 'mappy_chrom_cache'
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # Parameter Validation
+        # Parameter Validation -- required after merging, since either may come from the config
+        for key in ('reference', 'calls'):
+            if not getattr(self, key):
+                raise ValueError(f'{key} is required; give --{key} or set it in --config')
         for key, value in self.__dict__.items():
             if key not in VALID_PARAM_FNS:
                 raise ValueError(f"{key!r} is not a recognized param")

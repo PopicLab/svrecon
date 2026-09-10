@@ -1,4 +1,5 @@
 """Scorer contract: the Scorer base class and the QueryValidation result it returns."""
+import re
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -32,71 +33,81 @@ class CigarQueryCheck:
         raise NotImplementedError("Implement in Subclass")
 
 @dataclass
-class CigarQuerySequenceSimilarityCheck(CigarQueryCheck):
+class CigarQueryAlignmentSimilarityCheck(CigarQueryCheck):
     """Bulk divergence over the whole query."""
     match_error_threshold: float
 
     def validate(self, cigar: Cigar, query: Query) -> CigarQueryCheckResult:
-        error = (cigar.total_error_bases + cigar.total_deleted_bases) / len(query)
+        error = cigar.NM / cigar.blen
         passed = error <= self.match_error_threshold
         return CigarQueryCheckResult(
             PASS if passed else FAIL,
-            f'overall error {error:.4g} {"<=" if passed else ">"} {self.match_error_threshold}')
+            f'alignment error {error:.4g} {"<=" if passed else ">"} {self.match_error_threshold}')
 
 @dataclass
-class CigarQueryNoLargeIndelsCheck(CigarQueryCheck):
-    """Checks that no indel is size greater than ```max_size```"""
+class CigarQueryNoLargeErrorsCheck(CigarQueryCheck):
+    """Checks that no error run -- indel or soft-clipped flank -- is ``max_size`` or longer."""
     max_size: int
 
     def validate(self, cigar: Cigar, query: Query) -> CigarQueryCheckResult:
         indel_ops = {Cigar.INS} | Cigar.TARGET_ONLY_OPS
-        # max over (length, op) selects longest indel
-        length, op = max(((length, op) for op, length in cigar.cigartuples if op in indel_ops), default=(0, None))
-        passed = length < self.max_size
-        kind = '' if op is None else (' insertion' if op == Cigar.INS else ' deletion')
-        return CigarQueryCheckResult(
-            PASS if passed else FAIL,
-            f'largest indel {length} bp{kind} {"<" if passed else ">="} {self.max_size}')
+        large_errors = [(length, op) for op, length in cigar.cigartuples
+                        if op in indel_ops and length >= self.max_size]
+        large_errors += [(clip, Cigar.SOFT_CLIP) for clip in (cigar.get_left_clip(), cigar.get_right_clip())
+                         if clip >= self.max_size]
+        if large_errors:
+            large_error_details = ', '.join(f'{length}{Cigar._OP_CHARS[op]}' for length, op in large_errors)
+            return CigarQueryCheckResult(FAIL, f'error runs {{{large_error_details}}} >= {self.max_size}')
+        return CigarQueryCheckResult(PASS, f'no error run >= {self.max_size}')
 
 @dataclass
-class CigarQueryJunctionCheck(CigarQueryCheck):
-    """Local error around each breakpoint, where a wrong reconstruction shows up even when the
-    allele as a whole aligns well."""
-    radius: int
-    match_error_threshold: float
+class CigarQueryMaximumErrorWindowCheck(CigarQueryCheck):
+    """Checks that no window of ``window_size`` alignment columns holds ``error`` or more."""
+    max_window_size: int
+    max_window_error: int
 
     def validate(self, cigar: Cigar, query: Query) -> CigarQueryCheckResult:
-        breakpoints = {pos for start, end in query.recon_segments for pos in (start, end)}
-        assert all(0 <= pos <= cigar.query_length for pos in breakpoints), \
-            f'breakpoints {sorted(breakpoints)} outside the query [0,{cigar.query_length}]'
-        breakpoints -= {0, cigar.query_length} # exclude start and end of query in the check
-        if not breakpoints:
-            return CigarQueryCheckResult(PASS, 'no breakpoints')
-
-        errors = [(pos, cigar.get_junction_error_rate(pos, self.radius)) for pos in sorted(breakpoints)]
-        worst_pos, worst = max(errors, key=lambda pos_error: pos_error[-1])
-        passed = worst <= self.match_error_threshold
-        listing = ', '.join(f'{pos}:{error:.4g}' for pos, error in errors)
-
+        windows = cigar.get_error_windows(self.max_window_size, self.max_window_error)
+        offending = [(pos, errors) for pos, errors in windows if errors >= self.max_window_error]
+        if offending:
+            listing = ', '.join(f'{pos}:{errors}' for pos, errors in offending)
+            return CigarQueryCheckResult(
+                FAIL, f'error windows {{{listing}}} >= {self.max_window_error} per {self.max_window_size}')
+        worst_pos, worst_errors = max(windows, key=lambda window: window[1], default=(0, 0))
         return CigarQueryCheckResult(
-            PASS if passed else FAIL,
-            f'junction errors {{{listing}}}, worst {worst_pos}:{worst:.4g} '
-            f'{"<=" if passed else ">"} {self.match_error_threshold}')
+            PASS, f'no window >= {self.max_window_error} errors per {self.max_window_size} '
+                  f'(worst {worst_pos}:{worst_errors})')
 
 @dataclass
 class CigarQueryMappableCheck(CigarQueryCheck):
-    """Inconclusive if fraction of mappable bases of the query (A/C/G/T) is not above ```min_mappable_fraction```"""
-    min_mappable_fraction: float
+    """
+    pass if every configured condition is met 
+    - fraction of mappable bases of the query (A/C/G/T) is above ```min_mappable_fraction```
+    - no large contiguous nonmappable region of at least length ```max_unmappable_size```
+    otherwise inconclusive
+    """
+    min_mappable_fraction: Optional[float]
+    max_unmappable_size: Optional[int]
 
     def validate(self, cigar: Cigar, query: Query) -> CigarQueryCheckResult:
         sequence = query.sequence.upper()
-        # str.count runs in C; a per-base Python loop would rerun for every candidate alignment
-        mappable = sum(sequence.count(base) for base in MAPPABLE_BASES)
-        fraction = mappable / len(sequence) if sequence else 0.0
-        passed = fraction >= self.min_mappable_fraction
-        return CigarQueryCheckResult(
-            PASS if passed else INCONCLUSIVE,
-            f'mappable {fraction:.4g} {">=" if passed else "<"} {self.min_mappable_fraction}')
+        checks = []  # (passed, detail) pairs, one per condition that's actually configured
+
+        if self.min_mappable_fraction is not None:
+            mappable = sum(sequence.count(base) for base in MAPPABLE_BASES)
+            mappable_fraction = mappable / len(sequence) if sequence else 0.0
+            mapple_fraction_pass = mappable_fraction >= self.min_mappable_fraction
+            checks.append((mapple_fraction_pass, f'mappable {mappable_fraction:.4g} '
+                          f'{">=" if mapple_fraction_pass else "<"} {self.min_mappable_fraction}'))
+
+        if self.max_unmappable_size is not None:
+            longest_gap = max((len(m.group()) for m in re.finditer(f'[^{MAPPABLE_BASES}]+', sequence)), default=0)
+            gap_pass = longest_gap < self.max_unmappable_size
+            checks.append((gap_pass, f'longest nonmappable run {longest_gap} '
+                          f'{"<" if gap_pass else ">="} {self.max_unmappable_size}'))
+
+        passed = all(check_pass for check_pass, _ in checks)
+        return CigarQueryCheckResult(PASS if passed else INCONCLUSIVE, ', '.join(d for _, d in checks))
 
 @dataclass
 class QueryValidation:
@@ -159,18 +170,22 @@ class Scorer:
         self.error_threshold = config.match_error_threshold if error_threshold is None else error_threshold
         # Sequence similarity always runs; the rest are opt-in via config.
         self.cigar_query_checks: List[CigarQueryCheck] = [
-            CigarQuerySequenceSimilarityCheck(match_error_threshold=self.error_threshold),
+            CigarQueryAlignmentSimilarityCheck(match_error_threshold=self.error_threshold),
         ]
-        if config.max_indel_size is not None:
+        if config.max_contiguous_error is not None:
             self.cigar_query_checks.append(
-                CigarQueryNoLargeIndelsCheck(max_size=config.max_indel_size))
-        if config.junction_radius is not None:
+                CigarQueryNoLargeErrorsCheck(max_size=config.max_contiguous_error))
+        if (config.max_window_size is None) != (config.max_window_error is None):
+            raise ValueError('max_window_size and max_window_error must be set together '
+                             f'(got {config.max_window_size!r} and {config.max_window_error!r})')
+        if config.max_window_size is not None:
             self.cigar_query_checks.append(
-                CigarQueryJunctionCheck(radius=config.junction_radius,
-                                   match_error_threshold=self.error_threshold))
-        if config.min_mappable_fraction is not None:
+                CigarQueryMaximumErrorWindowCheck(max_window_size=config.max_window_size,
+                                                  max_window_error=config.max_window_error))
+        if config.min_mappable_fraction is not None or config.max_unmappable_size is not None:
             self.cigar_query_checks.append(
-                CigarQueryMappableCheck(min_mappable_fraction=config.min_mappable_fraction))
+                CigarQueryMappableCheck(min_mappable_fraction=config.min_mappable_fraction,
+                                        max_unmappable_size=config.max_unmappable_size))
 
     def score_cigar(self, cigar: Cigar,
                     query: Query) -> Tuple[QueryValidationStatus, List[CigarQueryCheckResult]]:
