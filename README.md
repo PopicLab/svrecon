@@ -125,7 +125,7 @@ own, keyed `simple_{n}` by its position in the callset.
 | `SVID` | every record of a multi-record SV | The key its records group under, shared by all of them. |
 | `SVTYPE` | every record | The type the SV is scored and reported under, read from its first record. On a single-record SV it also names the operation. |
 | `OP_TYPE` | every record of a multi-record SV | Named operation from [insilicoSV](https://github.com/PopicLab/insilicoSV). A single-record SV may omit it, or carry the `NA` insilicoSV writes there; either way it goes unused. |
-| `SVLEN` | — | When present, the span is `stop = start + SVLEN`, preferred over `END` because pysam shifts the end it reports; otherwise `END`. |
+| `SVLEN` | — | When present, the span is `stop = start + abs(SVLEN)`. The absolute value is taken for VCF formats which report negative lengths for deleted segments. Using `SVLEN`, when provided, takes priority over `END` due to pysam autoshifting behavior|
 | `TARGET` | dispersed operations | Where the segment is inserted. Absent, an insert lands at its own `stop` — i.e. in tandem. |
 | `INSORD` | inserts sharing a `TARGET` | Orders them by insertion order at that position (see below). |
 | `TARGET_CHROM` | — | Must equal the record's own chromosome; interchromosomal calls are unsupported. |
@@ -134,7 +134,7 @@ Each SV's records are checked before reconstruction:
 
 - every record carries an `SVTYPE`, and every record of a multi-record SV an `OP_TYPE`;
 - all records are on one chromosome;
-- every `[start, stop)` is non-empty — so the negative-`SVLEN` convention for `DEL` is rejected;
+- every `[start, stop)` is non-empty;
 - no two intervals overlap (identical spans are fine);
 - no `TARGET` lands strictly inside another interval, which would split a segment that interval's
   own operations need; a target exactly on a boundary is fine.

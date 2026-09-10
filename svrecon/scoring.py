@@ -243,9 +243,7 @@ class CallsetScorer(object):
 
     def _assert_sv_records_positive_lengths(self, records: List[VariantRecord]) -> None:
         """
-        Asserts every [start, stop) interval is non empty. A negative SVLEN -- the VCF convention
-        many callers use for DEL -- otherwise yields an inverted span that slips past the
-        pairwise overlap check.
+        Asserts every [start, stop) interval is non empty
         """
         for rec in records:
             start, stop = get_start_stop(rec)
