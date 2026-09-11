@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from svrecon.config import Config
-from svrecon.constants import QueryValidationReason, QueryValidationStatus, ValidationSource
+from svrecon.constants import QueryValidationReason, QueryValidationStatus, SOURCE_RANK, ValidationSource
 from svrecon.reconstruct import Query
 from svrecon.scorers.utils import Cigar
 
@@ -115,7 +115,7 @@ class QueryValidation:
     source: ValidationSource
     passed: bool = False
     status: QueryValidationStatus = QueryValidationStatus.FAIL
-    reason: QueryValidationReason = QueryValidationReason.OTHER
+    reason: QueryValidationReason = QueryValidationReason.NOT_ATTEMPTED
     lowest_pass_error: float = 1.0
     lowest_error: float = 1.0
     best_matched_seq: Optional[str] = None  # target sequence of the adopted alignment, kept on an aligned fail too
@@ -126,23 +126,30 @@ class QueryValidation:
     @property
     def aligned(self) -> bool:
         """Whether an alignment was found -- a CIGAR failure is one a check then rejected."""
-        return self.passed or self.reason is QueryValidationReason.CIGAR_FAILED
+        return self.best_matched_seq is not None
 
     @property
-    def rank(self) -> int:
-        """How much this result settles the query, least to most. The FAIL/OTHER default a scorer
-        that never ran reports is lowest; an aligned fail contradicts, so it beats inconclusive."""
+    def status_rank(self) -> int:
         if self.status is QueryValidationStatus.PASS:
             return 3
-        if self.status is QueryValidationStatus.FAIL and self.aligned:
+        elif self.status is QueryValidationStatus.FAIL and self.aligned:
             return 2
-        if self.status is QueryValidationStatus.INCONCLUSIVE:
+        elif self.status is QueryValidationStatus.INCONCLUSIVE:
             return 1
-        return 0
+        elif self.status is QueryValidationStatus.FAIL and not self.aligned:
+            return 0
+        else:
+            raise RuntimeError(f"Unexpected branch, {self.status=} is not set")
+
+    @property
+    def source_rank(self) -> int:
+        return SOURCE_RANK[self.source]
 
     def __gt__(self, other: 'QueryValidation') -> bool:
-        """Ranks by how much the result settles the query, then by lower error"""
-        return (self.rank, -self.lowest_error) > (other.rank, -other.lowest_error)
+        """Ranks by how much the result settles the query, then by validation source tier,
+        then by lower error"""
+        return ((self.status_rank, self.source_rank, -self.lowest_error) >
+               (other.status_rank, other.source_rank, -other.lowest_error))
 
     def jsonify(self) -> dict:
         return {

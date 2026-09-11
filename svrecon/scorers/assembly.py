@@ -119,7 +119,7 @@ class AssemblyScorer(Scorer):
         for alignment in alignments:
             cigar = Cigar.from_mappy(alignment, len(query))
             cigar_status, cigar_results = self.score_cigar(cigar, query)
-            match_err = cigar.error_rate
+            match_err = cigar.whole_query_error_rate
             lowest_error = min(lowest_error, match_err)
 
             matched_seq = chrom_aligner.seq(alignment.ctg, alignment.r_st, alignment.r_en)
@@ -135,6 +135,7 @@ class AssemblyScorer(Scorer):
                     best_cigar_results = cigar_results
                     best_cigar = cigar
                     best_matched_seq = matched_seq
+                    lowest_error = min(lowest_error, lowest_pass_error)
             if not passed and match_err <= lowest_error:
                 best_cigar_results = cigar_results
                 best_cigar = cigar
@@ -143,11 +144,11 @@ class AssemblyScorer(Scorer):
         if passed:
             status, reason = QueryValidationStatus.PASS, QueryValidationReason.PASS
         elif inconclusive:  # aligned, but a check could not judge the query
-            status, reason = QueryValidationStatus.INCONCLUSIVE, QueryValidationReason.OTHER
+            status, reason = QueryValidationStatus.INCONCLUSIVE, QueryValidationReason.CIGAR_INCONCLUSIVE
         elif best_cigar_results:  # aligned to the sample, but a check failed
             status, reason = QueryValidationStatus.FAIL, QueryValidationReason.CIGAR_FAILED
         else:  # nothing aligned at all
-            status, reason = QueryValidationStatus.FAIL, QueryValidationReason.OTHER
+            status, reason = QueryValidationStatus.FAIL, QueryValidationReason.NO_MATCHING_CONTIG
 
         return QueryValidation(
             source=ValidationSource.ASSEMBLY,
