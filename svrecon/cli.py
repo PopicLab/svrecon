@@ -1,5 +1,6 @@
 import argparse
 import datetime
+import json
 import logging
 
 import pandas as pd
@@ -108,6 +109,11 @@ def main():
 
     # to_string() prints all columns (default repr truncates the middle ones)
     logger.info('Score table:\n' + df.to_string())
+
+    summary = {'by_stat': df.to_dict(), 'by_type': df.to_dict(orient='index')}
+    with open(config.summary_json_path, 'w') as f:
+        json.dump(summary, f, indent=2)
+    logger.info(f'Wrote per-type score summary: {config.summary_json_path}')
 
     export_igv_session(config.calls, config.bam, config.classified, timestamp, config.igv_prefix)
 

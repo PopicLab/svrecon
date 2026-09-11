@@ -57,7 +57,7 @@ report:    json
 ```
 
 ```bash
-svrecon --config experiments/hg002/config.yaml   # -> experiments/hg002/svrecon.log, svrecon.report.jsonl
+svrecon --config experiments/hg002/config.yaml   # -> experiments/hg002/{svrecon.log,svrecon.summary.json,svrecon.report.jsonl}
 ```
 
 Config keys mirror the flag names with underscores (`read_error_threshold`, not
@@ -357,6 +357,12 @@ SV, only `<reconstructed>` varies per query.
 
 A multi-operation complex SV produces one `SVValidationResult` with multiple query entries — one
 per reconstructed query, not per VCF record. The nesting of the output json mirrors the pipeline: **SV → queries** (one or more reconstructed queries per call, per step 1 above) **→ validations** (one per scorer that ran on that query -- reads, assembly, edlib -- per step 2) **→ checks** (one per configured CIGAR check within that scorer's alignment, per step 3).
+
+## Score summary (`svrecon.summary.json`)
+
+The logged score table also written as
+`svrecon.summary.json`, holding the information in two perspectives:
+`by_type` is `{svtype: {stat: value}}`, `by_stat` is `{stat: {svtype: value}}`.
 
 ## Benchmark
 
