@@ -45,7 +45,7 @@ validated. `--calls` must be a VCF in [insilicoSV](https://github.com/PopicLab/i
 
 For a repeatable run, put the same keys in a YAML config and pass `--config`. **Logs and reports
 are written to the config file's directory**, so each experiment is self-contained; without
-`--config` they go to the working directory.
+`--config`, they either go to the working directory or the output directory specified using `--output-dir`.
 
 ```yaml
 # experiments/hg002/config.yaml
@@ -93,6 +93,7 @@ Output:
 
 | Flag | Default | Description |
 | --- | --- | --- |
+| `--output-dir` | — | Output directory, created if missing. Overrides the `--config` file's directory. |
 | `--report` | `none` | `json` writes `svrecon.report.jsonl` beside the log. See below. |
 | `--verbose` | on | Append the full JSON summary to each per-SV log line. |
 | `--n-threads` | half the CPUs | Worker threads for scoring SVs. |

@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 DEFAULTS = {
     # Main command line defaults
     'config': None,
+    'output_dir': None,
     'reference': None,
     'sample': None,
     'calls': None,
@@ -70,6 +71,7 @@ VALID_PARAM_FNS = {
 
     # Main command line defaults
     'config': lambda arg: arg is None or isinstance(arg, str),
+    'output_dir': lambda arg: arg is None or isinstance(arg, str),
     'reference': lambda arg: arg is None or isinstance(arg, str),
     'sample': lambda arg: arg is None or isinstance(arg, str),
     'calls': lambda arg: arg is None or isinstance(arg, str),
@@ -122,6 +124,7 @@ VALID_PARAM_FNS = {
     'log_path': lambda arg: isinstance(arg, Path),
     'report_path': lambda arg: arg is None or isinstance(arg, Path),
     'summary_json_path': lambda arg: isinstance(arg, Path),
+    'annotated_vcf_path': lambda arg: isinstance(arg, Path),
     'cache_dir': lambda arg: isinstance(arg, Path),
     'img_dir': lambda arg: isinstance(arg, Path),
 }
@@ -146,10 +149,17 @@ class Config:
             self.buffer = int(self.buffer)
 
         # Path setup
-        self.experiment_dir = Path(args.config).parent.resolve() if args.config else Path.cwd()  # overridden to parent folder of config file if it exists
+        if self.output_dir:
+            self.experiment_dir = Path(self.output_dir).resolve()
+            self.experiment_dir.mkdir(parents=True, exist_ok=True)
+        elif args.config:
+            self.experiment_dir = Path(args.config).parent.resolve()
+        else:
+            self.experiment_dir = Path.cwd()
         self.log_path = self.experiment_dir / f'svrecon.log'
         self.report_path = self.experiment_dir / f'svrecon.report.jsonl' if self.report == 'json' else None
         self.summary_json_path = self.experiment_dir / 'svrecon.summary.json'
+        self.annotated_vcf_path = self.experiment_dir / 'annotated.vcf'
         self.img_dir = self.experiment_dir / 'sv_recon_img'
         if self.plot_first_n:
             self.img_dir.mkdir(parents=True, exist_ok=True)
