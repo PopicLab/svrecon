@@ -45,7 +45,7 @@ validated. `--calls` must be a VCF in [insilicoSV](https://github.com/PopicLab/i
 
 For a repeatable run, put the same keys in a YAML config and pass `--config`. **Logs and reports
 are written to the config file's directory**, so each experiment is self-contained; without
-`--config` they go to the working directory. Alternatively, the output directory can be overwritten with `--output-dir`.
+`--config`, they either go to the working directory or the output directory specified using `--output-dir`.
 
 ```yaml
 # experiments/hg002/config.yaml
