@@ -17,9 +17,6 @@ def main():
 
     parser = argparse.ArgumentParser(prog='svrecon',
                                      description='Score VCF SV calls against a reference and sample genome')
-    # An svrecon config (YAML whose keys mirror these flags) supplies any of the params below;
-    # logs and reports are written to that config's directory. Explicit CLI flags override the
-    # config. Mergeable params default to None so we can tell "unset" from an explicit value.
     parser.add_argument('--config', help='svrecon YAML config; keys mirror these flags. Logs and '
                         'reports are written to this file\'s directory.', dest='config')
     parser.add_argument('--output-dir', help='Output directory, created if missing. Overrides the '
@@ -87,6 +84,9 @@ def main():
                              "(reverse-strand hits are filtered out before the error/segment checks). "
                              "Off by default (maps to both strands).")
     args = parser.parse_args()
+
+    if all(v is None for v in vars(args).values()):
+        parser.error('either --config or --reference/--calls (plus a validation source to score calls) is required')
 
     logger.info('Initializing scorer and loading callset')
     config = Config(args)
