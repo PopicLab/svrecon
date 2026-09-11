@@ -195,11 +195,11 @@ A check returns `pass`, `fail`, or `inconclusive`, and the alignment's verdict i
 | status | reason | meaning |
 | --- | --- | --- |
 | `pass` | `pass` | Aligned, and every check passed. |
-| `fail` | `cigar_failed` | **Aligned**, then a check rejected it — the sample contradicts the call. |
-| `fail` | `other` | Nothing aligned within the error budget. |
-| `inconclusive` | `other` | Untestable: no read long enough to span the allele, a check could not judge the query (too little of it mappable), the allele also matches the reference, or no validation source was configured. |
+| `fail` | `cigar failed` | **Aligned**, then a check rejected it — the sample contradicts the call. |
+| `fail` | `no matching contig` / `no alignment found` / `not attempted` | Nothing aligned within the error budget, or this scorer never ran. |
+| `inconclusive` | `cigar inconclusive` / `no spanning reads` / `reference ambiguous` / `not attempted` | Untestable: no read long enough to span the allele, a check could not judge the query (too little of it mappable), the allele also matches the reference, or no validation source was configured. |
 
-`cigar_failed` is exactly the marker that the query **aligned**; the report exposes it directly as
+`cigar failed` is exactly the marker that the query **aligned**; the report exposes it directly as
 `"aligned": true`. When several scorers run, the decisive result is the most settling one:
 `pass` > aligned `fail` > `inconclusive` > unaligned `fail`, ties broken by lower error.
 
