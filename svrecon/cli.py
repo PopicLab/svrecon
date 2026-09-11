@@ -21,6 +21,8 @@ def main():
     # config. Mergeable params default to None so we can tell "unset" from an explicit value.
     parser.add_argument('--config', help='svrecon YAML config; keys mirror these flags. Logs and '
                         'reports are written to this file\'s directory.', dest='config')
+    parser.add_argument('--output-dir', help='Output directory, created if missing. Overrides the '
+                        "--config file's directory.", dest='output_dir', default=None)
     parser.add_argument('--reference', help='Reference genome .fa file', dest='reference', default=None)
     parser.add_argument('--sample', help='Sample genome .fa file(s). Presence enables assembly-based '
                         'validation.', dest='sample', default=None)
