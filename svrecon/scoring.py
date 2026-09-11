@@ -11,6 +11,7 @@ from pysam import VariantRecord
 from tqdm import tqdm
 
 from svrecon.constants import *
+from svrecon.io import write_annotated_vcf
 from svrecon.plot import plot_sv_validation
 from svrecon.reconstruct import Query, construct_queries
 from svrecon.scorers.assembly import AssemblyScorer
@@ -104,10 +105,11 @@ class QueryValidationResult:
 class SVValidationResult:
     """SV-level roll-up of one call's per-query validations."""
 
-    def __init__(self, svid: str, svtype: str, query_validations_results: List[QueryValidationResult]):
+    def __init__(self, svid: str, svtype: str, query_validations_results: List[QueryValidationResult], records: list[VariantRecord]):
         self.svid = svid
         self.svtype = svtype
         self.query_validation_results = query_validations_results
+        self.records = records
 
         # SV-level roll-up:
         #   hit          -> every query passed
@@ -181,6 +183,7 @@ class CallsetScorer(object):
     def __init__(self, config):
         # Paths & plotting
         self.report_path = config.report_path
+        self.annotated_vcf_path = config.annotated_vcf_path
         self.plot_first_n = config.plot_first_n
         self.plot_out_dir = config.img_dir
         self.plot_aspect = config.plot_aspect
@@ -317,6 +320,7 @@ class CallsetScorer(object):
         # Optional per-SV JSON sidecar (one record per line). Additive: it does not affect the
         # log output or the score table. Written from this single consumer thread, so no lock.
         report_fh = open(self.report_path, 'w') if self.report_path else None
+        svid_to_result: Dict[str, SVValidationResult] = {}
 
         with ThreadPoolExecutor(max_workers=self.n_threads) as executor:
             futures = {executor.submit(self.score_sv, svid, records)
@@ -327,6 +331,7 @@ class CallsetScorer(object):
             for future in pbar:
                 sv_validation: SVValidationResult = future.result()
                 svid, sv_type, outcome = sv_validation.svid, sv_validation.svtype, sv_validation.outcome
+                svid_to_result[svid] = sv_validation
                 line = f'{svid}\t{sv_type}\t{sv_validation.chroms}\t{outcome.value}\t{sv_validation.match_scores}'
                 if outcome == Outcome.HIT:
                     # Tier 1 (read) vs Tier 2 (assembly), plus the detailed source.
@@ -383,6 +388,10 @@ class CallsetScorer(object):
                 pbar.set_description(desc)
                 denom = total_calls[sv_type] - inconclusive_calls[sv_type]
                 precision[sv_type] = correct_calls[sv_type] / denom if denom else 0
+
+        sv_validations = [svid_to_result[svid] for svid in self.variants] # reload in original order by processed svid
+        write_annotated_vcf(sv_validations, str(self.annotated_vcf_path))
+        logger.info(f'Wrote annotated VCF: {self.annotated_vcf_path}')
 
         if report_fh is not None:
             report_fh.close()
@@ -444,6 +453,6 @@ class CallsetScorer(object):
 
                 query_validations.append(query_validation)
 
-            return SVValidationResult(svid, sv_type, query_validations)
+            return SVValidationResult(svid, sv_type, query_validations, records) 
         except Exception as e:
             raise RuntimeError(f'while scoring SV {svid} ({sv_type})') from e
