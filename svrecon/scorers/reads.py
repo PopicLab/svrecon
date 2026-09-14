@@ -125,7 +125,7 @@ class ReadScorer(Scorer):
                 cigar_status, cigar_results = self.score_cigar(edlib_results.cigar, query)
 
                 return QueryValidation(source=ValidationSource.READS, passed=False,
-                                    status=cigar_status, reason=QueryValidationReason.CIGAR_FAILED if cigar_status == QueryValidationStatus.FAIL else QueryValidationReason.CIGAR_INCONCLUSIVE,
+                                    status=cigar_status, reason=QueryValidationReason.NO_PASSING_READ,
                                     lowest_pass_error=1, lowest_error=edlib_results.cigar.whole_query_error_rate,
                                     best_matched_seq=block_sequence, cigar_results=cigar_results,
                                     cigar=edlib_results.cigar)
@@ -133,7 +133,7 @@ class ReadScorer(Scorer):
                 # no matched base in [bp_start, bp_stop) 
                 return QueryValidation(source=ValidationSource.READS,
                                        status=QueryValidationStatus.FAIL,
-                                       reason=QueryValidationReason.CIGAR_FAILED)
+                                       reason=QueryValidationReason.NO_MATCHED_BASE_PAIRS_IN_FAILING_READS)
 
         # score candidate read cigars
         cigar_scoring_results = [self.score_cigar(read_result.cigar, query) for read_result in filtered_read_results]
