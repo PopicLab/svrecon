@@ -19,6 +19,7 @@ class QueryValidationReason(str, Enum):
 
     # Read specific
     NO_SPANNING_READS = 'no spanning reads'
+    NO_PASSING_READ = 'all reads are bellow error threshold, so we score against the first read found'
     NO_MATCHED_BASE_PAIRS_IN_FAILING_READS = 'all reads are below the error threshold, so we score against the first read found. However, the first read has no matching bases within the reference span'
 
     # Assembly Specific
