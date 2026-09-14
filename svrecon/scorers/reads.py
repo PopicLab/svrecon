@@ -32,7 +32,7 @@ class BamReader:
         self._bam = pysam.AlignmentFile(bam_path, 'rb')
         self._lock = threading.Lock()
 
-    def candidate_read_seqs(self, chrom: str, start: int, end: int, max_reads: int) -> List[str]:
+    def candidate_read_seqs(self, chrom: str, start: int, end: int, max_reads: int) -> List[pysam.AlignedSegment]:
         """Fetch full-molecule sequences of reads with ANY alignment overlapping
         ``[start, end]`` on ``chrom``."""
         lo = max(0, start)
@@ -40,24 +40,24 @@ class BamReader:
         by_name = {}
         with self._lock:
             fetched = self._bam.fetch(chrom, lo, hi)
-            for r in fetched:
-                if r.is_unmapped or r.is_secondary:
+            for read in fetched:
+                if read.is_unmapped or read.is_secondary:
                     continue
-                seq = r.query_sequence
+                seq = read.query_sequence
                 if not seq:
                     continue
-                name = r.query_name
+                name = read.query_name
                 if name in by_name:
-                    if len(seq) > len(by_name[name]):
-                        by_name[name] = seq
+                    if len(seq) > len(by_name[name].query_sequence):
+                        by_name[name] = read
                 else:
-                    by_name[name] = seq
+                    by_name[name] = read
                     if len(by_name) >= max_reads:
                         break
         return list(by_name.values())
 
 
-def run_read_edlib(query_seq: str, read_seqs: List[str], error_threshold: float) -> List[EdlibScoreResult]:
+def run_read_edlib(query_seq: str, reads: List[pysam.AlignedSegment], error_threshold: float) -> List[EdlibScoreResult]:
     """Return the EdlibScoreResult for each read (forward and RC tried) that contains
     ``query_seq`` with at most ``error_threshold`` error."""
     passing: List[EdlibScoreResult] = []
@@ -69,16 +69,18 @@ def run_read_edlib(query_seq: str, read_seqs: List[str], error_threshold: float)
     # computing a full O(len*len) matrix -- without this, a multi-kb alt that no
     # read supports grinds through every read at full cost.
     k = max(1, int(2 * error_threshold * len(query_seq)))
+    read_seqs = [read.query_sequence for read in reads]
     for target_seq in read_seqs:
         if len(target_seq) < min_target_len:
             continue
         # A read molecule can be sequenced from either strand relative to the
         # reference-oriented alt, so try BOTH orientations and keep the better.
-        candidates = [r for r in (edlib_score(query_seq, target_seq, k=k),
+        candidates = [edlib_result for edlib_result in (edlib_score(query_seq, target_seq, k=k),
                                   edlib_score(query_seq, reverse_complement(target_seq), k=k))
-                      if r is not None]
+                      if edlib_result is not None]
         if not candidates:
             continue
+
         res = min(candidates, key=lambda r: r.error)
         if res.error <= error_threshold:
             passing.append(res)
@@ -100,46 +102,76 @@ class ReadScorer(Scorer):
         bp_start, bp_stop = min(breakpoints), max(breakpoints)
         reads = self.bam_reader.candidate_read_seqs(
             query.chrom, bp_start, bp_stop, max_reads=self.max_reads_per_site)
-        reads = [r for r in reads if len(r) >= len(query)]
-        if not reads:  # no read long enough to span the allele -> untestable, not contradicted
+        reads = [r for r in reads if r.query_length >= len(query)]
+
+        # no read long enough to span the allele -> inconclusive
+        if not reads:  
             return QueryValidation(source=ValidationSource.READS,
                                         status=QueryValidationStatus.INCONCLUSIVE,
-                                        reason=QueryValidationReason.OTHER)
+                                        reason=QueryValidationReason.NO_SPANNING_READS)
+        # filter by read error threshold
+        filtered_read_results = run_read_edlib(query.sequence, reads, self.read_error_threshold)
 
+        # if no reads passes the error threshold, score and fail against first read
+        if not filtered_read_results:
+            read = reads[0]
+            query_positions = [
+                q_pos for q_pos, ref_pos in read.get_aligned_pairs(matches_only=True)
+                if bp_start <= ref_pos < bp_stop
+            ]
+            if query_positions:
+                block_sequence = read.query_sequence[query_positions[0]:query_positions[-1] + 1]
+                edlib_results = edlib_score(query.sequence, block_sequence, mode='NW')
+                cigar_status, cigar_results = self.score_cigar(edlib_results.cigar, query)
+
+                return QueryValidation(source=ValidationSource.READS, passed=False,
+                                    status=cigar_status, reason=QueryValidationReason.NO_PASSING_READ,
+                                    lowest_pass_error=1, lowest_error=edlib_results.cigar.whole_query_error_rate,
+                                    best_matched_seq=block_sequence, cigar_results=cigar_results,
+                                    cigar=edlib_results.cigar)
+            else:
+                # no matched base in [bp_start, bp_stop) 
+                return QueryValidation(source=ValidationSource.READS,
+                                       status=QueryValidationStatus.FAIL,
+                                       reason=QueryValidationReason.NO_MATCHED_BASE_PAIRS_IN_FAILING_READS)
+
+        # score candidate read cigars
+        cigar_scoring_results = [self.score_cigar(read_result.cigar, query) for read_result in filtered_read_results]
+
+        # if all cigars are inconclusive, return inconclusive
+        if all(cigar_status is QueryValidationStatus.INCONCLUSIVE for cigar_status, _ in cigar_scoring_results):
+            return QueryValidation(source=ValidationSource.READS,
+                                   status=QueryValidationStatus.INCONCLUSIVE,
+                                   reason=QueryValidationReason.CIGAR_INCONCLUSIVE)
+        
+        # score remaining candidate reads
         passed = False
-        inconclusive = False
         lowest_pass_error = 1.0
         lowest_error = 1.0
-        best_cigar_results = []  # the adopted read's checks on a pass, else the best-scoring read's
+        best_cigar_results = []
         best_cigar: Optional[Cigar] = None
         best_matched_seq: Optional[str] = None
 
-        read_results = run_read_edlib(query.sequence, reads, self.read_error_threshold)
-        for read_res in read_results:
-            lowest_error = min(lowest_error, read_res.error)
-            cigar: Cigar = read_res.cigar
-            cigar_status, cigar_results = self.score_cigar(cigar, query)
-            if cigar_status is QueryValidationStatus.INCONCLUSIVE:
-                inconclusive = True
-            if cigar_status is QueryValidationStatus.PASS and read_res.error < lowest_pass_error:
+        for i, read_res in enumerate(filtered_read_results):  
+            cigar_status, cigar_results = cigar_scoring_results[i]
+            if cigar_status == QueryValidationStatus.PASS:
                 passed = True
-                lowest_pass_error = read_res.error
-                best_cigar_results = cigar_results
-                best_cigar = cigar
-                best_matched_seq = read_res.matched_target_sequence
+                if read_res.error <= lowest_pass_error:
+                    lowest_pass_error = read_res.error
+                    best_cigar = read_res.cigar
+                    best_cigar_results = cigar_results
+                    best_matched_seq = read_res.matched_target_sequence
+                    lowest_error = min(lowest_error, lowest_pass_error)
             elif not passed and read_res.error <= lowest_error:
+                lowest_error = read_res.error
+                best_cigar = read_res.cigar
                 best_cigar_results = cigar_results
-                best_cigar = cigar
-                best_matched_seq = read_res.matched_target_sequence  # kept so an aligned fail can still be inspected
+                best_matched_seq = read_res.matched_target_sequence
 
         if passed:
             status, reason = QueryValidationStatus.PASS, QueryValidationReason.PASS
-        elif inconclusive:  # a read aligned, but a check could not judge the query
-            status, reason = QueryValidationStatus.INCONCLUSIVE, QueryValidationReason.OTHER
-        elif read_results:  # a read aligned, but none passed every check
+        else: 
             status, reason = QueryValidationStatus.FAIL, QueryValidationReason.CIGAR_FAILED
-        else:  # no read within the error budget
-            status, reason = QueryValidationStatus.FAIL, QueryValidationReason.OTHER
 
         return QueryValidation(source=ValidationSource.READS, passed=passed,
                                     status=status, reason=reason,
