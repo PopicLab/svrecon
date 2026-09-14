@@ -48,7 +48,7 @@ class BamReader:
                     continue
                 name = read.query_name
                 if name in by_name:
-                    if len(seq) > len(by_name[name]):
+                    if len(seq) > len(by_name[name].query_sequence):
                         by_name[name] = read
                 else:
                     by_name[name] = read
