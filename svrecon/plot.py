@@ -86,6 +86,14 @@ def plot_sv_validation(sv_validation: 'SVValidationResult', output_dir: str, asp
             continue
 
         # reconstructed vs the unmodified reference
+        if len(ref_seq) < K:
+            logging.info(f"ref_seq length {len(ref_seq)} < K, skip plotting for sv {sv_validation.svid}")
+            return
+        
+        if len(recon_seq) < K:
+            logging.info(f"recon_seq length {len(recon_seq)} < K, skip plotting for sv {sv_validation.svid}")
+            return
+        
         ref_boundaries = sorted({pos - query.ref_start
                                  for start, end in query.ref_segments for pos in (start, end)})
         plot_dot_plot(recon_seq, ref_seq, title, str(out_dir / f'{part}_recon_vs_reference.png'),
@@ -94,6 +102,10 @@ def plot_sv_validation(sv_validation: 'SVValidationResult', output_dir: str, asp
                       axis_length=axis_length)
 
         if matched_seq:
+            if len(matched_seq) < K:
+                logging.info(f"matched_seq length {len(matched_seq)} < K, skip plotting for sv {sv_validation.svid}")
+                return
+            
             source = query_validation.source.value
             # reconstructed vs the matched sequence, when a scorer found one (a pass or a match)
             plot_dot_plot(recon_seq, matched_seq, title,
