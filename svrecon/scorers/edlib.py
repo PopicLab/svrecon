@@ -75,7 +75,8 @@ class EdlibScorer(Scorer):
                                           self.edlib_fallback_max_tolerance, self.match_error_threshold,
                                           self.sample_bytes)
         if edlib_result is None:  # nothing aligned at all
-            return QueryValidation(source=ValidationSource.EDLIB)
+            return QueryValidation(source=ValidationSource.EDLIB,
+                                   reason=QueryValidationReason.NO_ALIGNMENT_FOUND)
 
         cigar: Cigar = edlib_result.cigar
         cigar_status, cigar_results = self.score_cigar(cigar, query)
@@ -84,7 +85,7 @@ class EdlibScorer(Scorer):
         if passed:  # a window aligned and every check passed
             status, reason = QueryValidationStatus.PASS, QueryValidationReason.PASS
         elif cigar_status is QueryValidationStatus.INCONCLUSIVE:  # a check could not judge the query
-            status, reason = QueryValidationStatus.INCONCLUSIVE, QueryValidationReason.OTHER
+            status, reason = QueryValidationStatus.INCONCLUSIVE, QueryValidationReason.CIGAR_INCONCLUSIVE
         else:  # the best window aligned, but a check failed
             status, reason = QueryValidationStatus.FAIL, QueryValidationReason.CIGAR_FAILED
 
