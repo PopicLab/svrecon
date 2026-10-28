@@ -104,7 +104,7 @@ class ReadScorer(Scorer):
         if not reads:  # no read long enough to span the allele -> untestable, not contradicted
             return QueryValidation(source=ValidationSource.READS,
                                         status=QueryValidationStatus.INCONCLUSIVE,
-                                        reason=QueryValidationReason.OTHER)
+                                        reason=QueryValidationReason.NO_SPANNING_READS)
 
         passed = False
         inconclusive = False
@@ -135,11 +135,11 @@ class ReadScorer(Scorer):
         if passed:
             status, reason = QueryValidationStatus.PASS, QueryValidationReason.PASS
         elif inconclusive:  # a read aligned, but a check could not judge the query
-            status, reason = QueryValidationStatus.INCONCLUSIVE, QueryValidationReason.OTHER
+            status, reason = QueryValidationStatus.INCONCLUSIVE, QueryValidationReason.CIGAR_INCONCLUSIVE
         elif read_results:  # a read aligned, but none passed every check
             status, reason = QueryValidationStatus.FAIL, QueryValidationReason.CIGAR_FAILED
         else:  # no read within the error budget
-            status, reason = QueryValidationStatus.FAIL, QueryValidationReason.OTHER
+            status, reason = QueryValidationStatus.FAIL, QueryValidationReason.NO_READ_WITHIN_THRESHOLD
 
         return QueryValidation(source=ValidationSource.READS, passed=passed,
                                     status=status, reason=reason,
