@@ -132,17 +132,18 @@ class EdlibScoreResult:
     matched_target_sequence: str
 
 
-def edlib_score(query_seq: str, target_seq: str, k: int = -1) -> Union[EdlibScoreResult, None]:
-    """HW-align ``query_seq`` against a single ``target_seq`` and normalize to an
-    error rate. Shared primitive for both assembly-window and read-based scoring;
-    returns an ``EdlibScoreResult`` or ``None`` if no alignment was produced.
+def edlib_score(query_seq: str, target_seq: str, k: int = -1, mode: str = 'HW') -> Union[EdlibScoreResult, None]:
+    """Align ``query_seq`` against a single ``target_seq`` -- HW (anywhere in the target) by
+    default, or NW (end to end) -- and normalize to an error rate. Shared primitive for both
+    assembly-window and read-based scoring; returns an ``EdlibScoreResult`` or ``None`` if no
+    alignment was produced.
 
     ``k`` is edlib's max edit distance: alignments worse than ``k`` abort early
     and return ``None`` (edlib editDistance = -1). ``k=-1`` (default) is
     unbounded, preserving the assembly path's behavior; the read path passes a
     threshold-derived ``k`` so non-matching reads don't cost a full O(len*len)
     alignment -- the dominant cost when an SV is a read-mode miss."""
-    result = edlib.align(query_seq.upper(), target_seq.upper(), mode="HW", task="path", k=k)
+    result = edlib.align(query_seq.upper(), target_seq.upper(), mode=mode, task="path", k=k)
     if not result or result['editDistance'] < 0:
         return None
 

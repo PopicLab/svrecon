@@ -68,6 +68,8 @@ def plot_sv_validation(sv_validation: 'SVValidationResult', output_dir: str, asp
         recon_seq = query.sequence.upper()
         ref_seq = query.ref_sequence.upper()
         matched_seq = (query_validation.best_matched_seq or '').upper()
+        if not matched_seq:
+            logger.info(f'No matched sequence for {sv_validation.svid}_{part}, plotting reference only')
 
         # skip plotting if non plottable base pair exists in sequence, unless substituted
         plottable = not UNPLOTTABLE_BASE.search(recon_seq + ref_seq + matched_seq)

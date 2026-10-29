@@ -397,3 +397,8 @@ attributable to that configuration:
   rebuilt automatically when the source FASTA changes.
 - Dot plots use wotplot, which accepts only `A`/`C`/`G`/`T`; a query containing `N` is skipped
   unless `--plot-substitute-bases` is given.
+- When no read matches an allele within `read_error_threshold`, svrecon anchors on the outer half
+  of the allele's two reference flanks in each read, aligns the allele end to end against the read
+  sequence between them, and reports the best such read: its real error, drawn in the read dot plots.
+  If no read contains both anchors in order, the query is inconclusive: the flanks are context, not
+  part of the SV.

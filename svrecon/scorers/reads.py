@@ -3,6 +3,7 @@ import logging
 import os
 import threading
 from typing import List, Optional
+import edlib
 import pysam
 
 from svrecon.constants import QueryValidationReason, QueryValidationStatus, ValidationSource
@@ -85,6 +86,22 @@ def run_read_edlib(query_seq: str, read_seqs: List[str], error_threshold: float)
     return passing
 
 
+def read_between_flanks(left_flank: str, right_flank: str, read_seq: str,
+                        error_threshold: float) -> Optional[str]:
+    """The read's sequence from ``left_flank`` through ``right_flank``, in the flanks' orientation,
+    if the read (in either orientation) contains both in order within the error budget; else None."""
+    for oriented in (read_seq.upper(), reverse_complement(read_seq).upper()):
+        left, right = (edlib.align(flank.upper(), oriented, mode='HW', task='locations',
+                                   k=max(1, int(error_threshold * len(flank))))
+                       for flank in (left_flank, right_flank))
+        if left['editDistance'] < 0 or right['editDistance'] < 0:
+            continue
+        (left_start, left_end), (right_start, right_end) = left['locations'][0], right['locations'][0]
+        if left_end < right_start:  # edlib intervals are inclusive
+            return oriented[left_start:right_end + 1]
+    return None
+
+
 class ReadScorer(Scorer):
     """Validates a query against real reads: does any single read contain the allele?"""
 
@@ -139,7 +156,23 @@ class ReadScorer(Scorer):
         elif read_results:  # a read aligned, but none passed every check
             status, reason = QueryValidationStatus.FAIL, QueryValidationReason.CIGAR_FAILED
         else:  # no read within the error budget
-            status, reason = QueryValidationStatus.FAIL, QueryValidationReason.OTHER
+            # The capped search above gave up on every read. Find each read's sequence between the
+            # allele's reference flanks and align the allele to it end to end, so the miss reports
+            # its real error and the read sequence that shows it. This never passes: the search
+            # above already tried every placement. Anchors are the outer half of each flank, away
+            # from the SV, where an imprecise breakpoint or a neighboring event is less likely.
+            (left_start, left_end), (right_start, right_end) = query.recon_segments[0], query.recon_segments[-1]
+            left_anchor = query.sequence[left_start:(left_start + left_end) // 2]
+            right_anchor = query.sequence[(right_start + right_end) // 2:right_end]
+            spans = [read_between_flanks(left_anchor, right_anchor, read, self.read_error_threshold) for read in reads]
+            span_results = [edlib_score(query.sequence, span, mode='NW') for span in spans if span]
+            if span_results:
+                best = min(span_results, key=lambda r: r.error)
+                lowest_error, best_cigar, best_matched_seq = best.error, best.cigar, best.matched_target_sequence
+                _, best_cigar_results = self.score_cigar(best.cigar, query)
+                status, reason = QueryValidationStatus.FAIL, QueryValidationReason.CIGAR_FAILED
+            else:  # the flanks are context, not the SV: not finding them says nothing about it
+                status, reason = QueryValidationStatus.INCONCLUSIVE, QueryValidationReason.OTHER
 
         return QueryValidation(source=ValidationSource.READS, passed=passed,
                                     status=status, reason=reason,
