@@ -29,18 +29,22 @@ def _round_ticks(length: int, offset: int, nbins: int = TICK_COUNT) -> list:
     return [int(v) for v in MaxNLocator(nbins=nbins, integer=True).tick_values(offset, top) if offset <= v <= top]
 
 
-def plot_dot_plot(s1: str, s2: str, title: str, output_path: str,
+def plot_dot_plot(s1: str, s2: str, title: Optional[str], output_path: Optional[str],
                   s1_name: str = 'reconstructed', s2_name: str = 'validating',
                   s1_boundaries: Optional[Sequence[int]] = None,
                   s2_boundaries: Optional[Sequence[int]] = None,
                   s1_offset: int = 0, s2_offset: int = 0, aspect: str = 'auto',
-                  axis_length: bool = False) -> None:
+                  axis_length: bool = False, ax: Optional['plt.Axes'] = None) -> None:
     """Renders a k-mer dot plot of s1 (x) vs s2 (y), with optional 0 indexed
-    boundary lines per axis and tick offsets"""
+    boundary lines per axis and tick offsets. With ax, draws into that Axes
+    and leaves saving to the caller; otherwise saves to output_path."""
     matrix = wp.DotPlotMatrix(s1.upper(), s2.upper(), K)
 
     num_rows, num_cols = matrix.mat.shape
-    fig, ax = wp.viz_spy(matrix, markersize=1.0, aspect=aspect, title=title, s1_name=s1_name, s2_name=s2_name)     # Ticks scale with sequence length instead of wotplot's default density.
+    fig = None
+    if ax is None:
+        fig, ax = plt.subplots()
+    wp.viz_spy(matrix, markersize=1.0, aspect=aspect, title=title, s1_name=s1_name, s2_name=s2_name, ax=ax)     # Ticks scale with sequence length instead of wotplot's default density.
     ax.set_xlabel(f'{s1_name} ({len(s1):,} nt)' if axis_length else s1_name, fontsize=AXIS_FONTSIZE)
     ax.set_ylabel(f'{s2_name} ({len(s2):,} nt)' if axis_length else s2_name, fontsize=AXIS_FONTSIZE)
     ax.xaxis.tick_bottom()  # spy() defaults to top-side ticks; move them to match the x-label below
@@ -58,8 +62,9 @@ def plot_dot_plot(s1: str, s2: str, title: str, output_path: str,
     for pos in s2_boundaries or ():
         ax.axhline(y=num_rows - 1 - pos, color='blue', linestyle='--', linewidth=0.6, alpha=0.6)
 
-    fig.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close(fig)
+    if fig is not None:
+        fig.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
 
 
 def plot_sv_validation(sv_validation: 'SVValidationResult', output_dir: str, aspect: str = 'auto',
