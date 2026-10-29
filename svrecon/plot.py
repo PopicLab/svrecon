@@ -6,7 +6,7 @@ from typing import Optional, Sequence, TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import wotplot as wp
-from matplotlib.ticker import FuncFormatter, MaxNLocator
+from matplotlib.ticker import MaxNLocator
 
 if TYPE_CHECKING:
     from svrecon.scoring import SVValidationResult
@@ -15,9 +15,18 @@ logger = logging.getLogger(__name__)
 
 K = 15  # wotplot k-mer size
 TICK_COUNT = 8  # target ticks per axis, regardless of sequence length
+X_LABEL_CHARS = 40  # x tick label characters that fit side by side; long labels get fewer ticks
 AXIS_FONTSIZE = 18 
 PLOTTABLE_BASES = 'ACGT'  
+# Axis label per validation source; edlib searches the assembly, like the assembly scorer.
+SOURCE_LABEL = {'reads': 'read', 'assembly': 'assembly', 'edlib': 'assembly'}
 UNPLOTTABLE_BASE = re.compile(f'[^{PLOTTABLE_BASES}]')
+
+
+def _round_ticks(length: int, offset: int, nbins: int = TICK_COUNT) -> list:
+    """Round tick values within [offset, offset + length - 1], in axis-label coordinates."""
+    top = offset + length - 1
+    return [int(v) for v in MaxNLocator(nbins=nbins, integer=True).tick_values(offset, top) if offset <= v <= top]
 
 
 def plot_dot_plot(s1: str, s2: str, title: str, output_path: str,
@@ -30,15 +39,18 @@ def plot_dot_plot(s1: str, s2: str, title: str, output_path: str,
     boundary lines per axis and tick offsets"""
     matrix = wp.DotPlotMatrix(s1.upper(), s2.upper(), K)
 
-    num_rows = matrix.mat.shape[0]
+    num_rows, num_cols = matrix.mat.shape
     fig, ax = wp.viz_spy(matrix, markersize=1.0, aspect=aspect, title=title, s1_name=s1_name, s2_name=s2_name)     # Ticks scale with sequence length instead of wotplot's default density.
     ax.set_xlabel(f'{s1_name} ({len(s1):,} nt)' if axis_length else s1_name, fontsize=AXIS_FONTSIZE)
     ax.set_ylabel(f'{s2_name} ({len(s2):,} nt)' if axis_length else s2_name, fontsize=AXIS_FONTSIZE)
     ax.xaxis.tick_bottom()  # spy() defaults to top-side ticks; move them to match the x-label below
-    ax.xaxis.set_major_locator(MaxNLocator(nbins=TICK_COUNT, integer=True))
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=TICK_COUNT, integer=True))
-    ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _pos: f'{int(x) + s1_offset:,}'))
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _pos: f'{num_rows - 1 - int(y) + s2_offset:,}'))
+    # Ticks sit at round labels: column c is s1 position c + s1_offset; row 0 is s2's last k-mer,
+    # so s2 position v + s2_offset is row num_rows - 1 - v.
+    x_label_len = len(f'{s1_offset + num_cols - 1:,}')
+    x_ticks = _round_ticks(num_cols, s1_offset, nbins=max(2, min(TICK_COUNT, X_LABEL_CHARS // x_label_len)))
+    ax.set_xticks([v - s1_offset for v in x_ticks], [f'{v:,}' for v in x_ticks])
+    y_ticks = _round_ticks(num_rows, s2_offset)
+    ax.set_yticks([num_rows - 1 - (v - s2_offset) for v in y_ticks], [f'{v:,}' for v in y_ticks])
 
     # s1_boundaries: s1/x-axis coords. s2_boundaries: s2/y-axis, row-indexed like the ticks.
     for pos in s1_boundaries or ():
@@ -53,8 +65,8 @@ def plot_dot_plot(s1: str, s2: str, title: str, output_path: str,
 def plot_sv_validation(sv_validation: 'SVValidationResult', output_dir: str, aspect: str = 'auto',
                        substitute_bases: bool = False, title_svid: bool = False,
                        title_location: bool = False, axis_length: bool = False) -> None:
-    """For each query of SVValidationResult, plot reconstructed vs reference. If a supplementary matched sequence is provided, 
-    also plot reconstructed vs matched and matched vs reconstructed"""
+    """For each query of SVValidationResult, plot reconstructed vs reference. If a supplementary matched sequence is provided,
+    also plot reconstructed vs matched and matched vs reference. The reference is on x, and the matched sequence on y."""
     out_dir = Path(output_dir)
     for part, query_validation in enumerate(sv_validation.query_validation_results):
         query = query_validation.query
@@ -88,22 +100,22 @@ def plot_sv_validation(sv_validation: 'SVValidationResult', output_dir: str, asp
         # reconstructed vs the unmodified reference
         ref_boundaries = sorted({pos - query.ref_start
                                  for start, end in query.ref_segments for pos in (start, end)})
-        plot_dot_plot(recon_seq, ref_seq, title, str(out_dir / f'{part}_recon_vs_reference.png'),
-                      s2_name='reference', s1_boundaries=alt_boundaries,
-                      s2_boundaries=ref_boundaries, s2_offset=query.ref_start, aspect=aspect,
+        plot_dot_plot(ref_seq, recon_seq, title, str(out_dir / f'{part}_recon_vs_reference.png'),
+                      s1_name='reference', s2_name='reconstructed', s1_boundaries=ref_boundaries,
+                      s2_boundaries=alt_boundaries, s1_offset=query.ref_start, aspect=aspect,
                       axis_length=axis_length)
 
         if matched_seq:
             source = query_validation.source.value
-            # reconstructed vs the matched sequence, when a scorer found one (a pass or a match)
+            label = SOURCE_LABEL.get(source, source)
+            # matched sequence vs the reconstructed, when a scorer found one (a pass or a match)
             plot_dot_plot(recon_seq, matched_seq, title,
                         str(out_dir / f'{part}_recon_vs_aligned_{source}.png'),
-                        s2_name=source, s1_boundaries=alt_boundaries, aspect=aspect,
-                        axis_length=axis_length)
+                        s1_name='reconstructed', s2_name=label, s1_boundaries=alt_boundaries,
+                        aspect=aspect, axis_length=axis_length)
 
-            # matched vs the reference:
-            plot_dot_plot(matched_seq, ref_seq, title,
+            # matched sequence vs the reference
+            plot_dot_plot(ref_seq, matched_seq, title,
                         str(out_dir / f'{part}_aligned_{source}_vs_reference.png'),
-                        s1_name=source, s2_name='reference',
-                        s2_boundaries=ref_boundaries, s2_offset=query.ref_start, aspect=aspect,
-                        axis_length=axis_length)
+                        s1_name='reference', s2_name=label, s1_boundaries=ref_boundaries,
+                        s1_offset=query.ref_start, aspect=aspect, axis_length=axis_length)
