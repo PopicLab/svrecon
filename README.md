@@ -125,7 +125,8 @@ own, keyed `simple_{n}` by its position in the callset.
 | --- | --- | --- |
 | `SVID` | every record of a multi-record SV | The key its records group under, shared by all of them. |
 | `SVTYPE` | every record | The type the SV is scored and reported under, read from its first record. On a single-record SV it also names the operation. |
-| `OP_TYPE` | every record of a multi-record SV | Named operation from [insilicoSV](https://github.com/PopicLab/insilicoSV). A single-record SV may omit it, or carry the `NA` insilicoSV writes there; either way it goes unused. |
+| `OP_TYPE` | every record of a multi-record SV | Named operation from [insilicoSV](https://github.com/PopicLab/insilicoSV), or `KEEP` for an interval left in place, reconstructed and checked whole like the other records. A single-record SV may omit it, or carry the `NA` insilicoSV writes there; either way it goes unused. |
+| `GRAMMAR_ID` | every record of an SV with alternative grammars, or none | Groups the SV's records into one complete set of operations per grammar. Each grammar is scored on its own; the SV is a hit if any grammar is, else inconclusive if any is, else a miss. The annotated VCF gives each record its grammar's outcome in `SVRECON_GRAMMAR`. |
 | `SVLEN` | — | When present, the span is `stop = start + abs(SVLEN)`. The absolute value is taken for VCF formats which report negative lengths for deleted segments. Using `SVLEN`, when provided, takes priority over `END` due to pysam autoshifting behavior|
 | `TARGET` | dispersed operations | Where the segment is inserted. Absent, an insert lands at its own `stop` — i.e. in tandem. |
 | `INSORD` | inserts sharing a `TARGET` | Orders them by insertion order at that position (see below). |
