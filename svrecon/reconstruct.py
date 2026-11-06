@@ -126,7 +126,9 @@ def get_operations_from_records(records: list[VariantRecord]) -> list[_Operation
         op = record.info['SVTYPE'] if len(records) == 1 else record.info['OP_TYPE']
         symbol = start_stops_to_sym[interval]
 
-        if op in ('CUT', 'DEL'):
+        if op == 'KEEP':
+            continue  # interval stays in place and is scored even though it's unchanged from reference
+        elif op in ('CUT', 'DEL'):
             operations.append(_Delete(start, start, stop))
         elif op == 'INV':
             operations.append(_Invert(start, start, stop))

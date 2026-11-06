@@ -62,6 +62,18 @@ def group_records_by_id(records) -> Dict[str, List[VariantRecord]]:
     return grouped_variants
 
 
+def group_records_by_grammar_id(records: List[VariantRecord]) -> Optional[Dict[int, List[VariantRecord]]]:
+    """Group one SV's records into its alternative grammars by GRAMMAR_ID, in GRAMMAR_ID order;
+    None when no record carries a GRAMMAR_ID"""
+    tagged = ['GRAMMAR_ID' in rec.info for rec in records]
+    if not any(tagged):
+        return None
+    grouped: Dict[int, List[VariantRecord]] = defaultdict(list)
+    for rec in sorted(records, key=lambda rec: rec.info['GRAMMAR_ID']):
+        grouped[rec.info['GRAMMAR_ID']].append(rec)
+    return dict(grouped)
+
+
 def load_grouped_variants_from_vcf(vcf_path: str, gap_file: Optional[str] = None) -> Dict[str, List[VariantRecord]]:
     """Group a callset VCF's records by SVID, optionally dropping any SV with a record
     (its own span, or its TARGET) overlapping an excluded region"""

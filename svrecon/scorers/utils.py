@@ -87,7 +87,11 @@ class Cigar:
 
         # traverse cigar: drop the window's trailing piece, refill from the remaining capacity from the right
         while cigar_idx < len(cigar_operations):
-            op, num_dropped_ops = window.popleft()
+            op = window[0][0]                       # drop one column from the left
+            num_dropped_ops = 1
+            window[0][1] -= 1
+            if window[0][1] == 0:
+                window.popleft()
             num_window_columns -= num_dropped_ops
             num_window_errors -= num_dropped_ops if op in self.COLUMN_ERROR_OPS else 0
             query_pos += num_dropped_ops if op in self.QUERY_CONSUMING_OPS else 0

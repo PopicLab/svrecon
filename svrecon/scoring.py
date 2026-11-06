@@ -18,7 +18,7 @@ from svrecon.scorers.assembly import AssemblyScorer
 from svrecon.scorers.base import Scorer, QueryValidation
 from svrecon.scorers.edlib import EdlibScorer
 from svrecon.scorers.reads import ReadScorer
-from svrecon.utils import get_start_stop, load_grouped_variants_from_vcf, load_fasta_to_bytes
+from svrecon.utils import get_start_stop, group_records_by_grammar_id, load_grouped_variants_from_vcf, load_fasta_to_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +112,8 @@ class SVValidationResult:
         self.svtype = svtype
         self.query_validation_results = query_validations_results
         self.records = records
+        self.grammar_id: Optional[int] = None  # GRAMMAR_ID of the grammar used for the result
+        self.grammars: Dict[int, 'SVValidationResult'] = {}  # GRAMMAR_ID -> result, for an SV with alternative grammars
 
         # SV-level roll-up:
         #   hit          -> every query passed
@@ -156,15 +158,39 @@ class SVValidationResult:
         else:
             self.tier = Tier.MISS
 
+    @classmethod
+    def from_grammars(cls, svid: str, records: List[VariantRecord],
+                      grammars: Dict[int, 'SVValidationResult']) -> 'SVValidationResult':
+        """Consolidates one call's alternative grammars. The SV takes the queries, outcome and
+        metadata of one grammar, the first of these that applies:
+          1. a hit: the highest SOURCE_RANK, ties broken by lowest GRAMMAR_ID
+          2. an inconclusive: the lowest GRAMMAR_ID
+          3. all misses: GRAMMAR_ID 0"""
+        hits = sorted((c for c in grammars.values() if c.outcome == Outcome.HIT),
+                      key=lambda c: -SOURCE_RANK[c.validation_source])
+        # the SV hits if any grammar hits, so a miss and an inconclusive roll up to inconclusive
+        inconclusive = [c for c in grammars.values() if c.outcome == Outcome.INCONCLUSIVE]
+        chosen = (hits or inconclusive or list(grammars.values()))[0]
+        result = cls(svid, chosen.svtype, chosen.query_validation_results, records)
+        result.grammar_id = chosen.grammar_id
+        result.grammars = grammars
+        return result
+
     def get_summary(self) -> Dict:
         """Report record for the --report json sidecar."""
-        return {
+        summary = {
             'svid': self.svid,
             'svtype': self.svtype,
             'outcome': self.outcome,
             'tier': self.tier,
             'query_validations': [qv.jsonify() for qv in self.query_validation_results],
         }
+        if self.grammars:
+            summary['grammar_id'] = self.grammar_id
+            summary['grammars'] = {grammar_id: {'outcome': c.outcome, 'tier': c.tier,
+                                                'query_validations': [qv.jsonify() for qv in c.query_validation_results]}
+                                   for grammar_id, c in self.grammars.items()}
+        return summary
 
     @property
     def chroms(self) -> List[str]:
@@ -340,6 +366,8 @@ class CallsetScorer(object):
                     line += f'\t{sv_validation.tier}\t{sv_validation.validation_source}'
                 else:  # miss or inconclusive -> show why
                     line += f'\t{sv_validation.query_diagnostics}'
+                if sv_validation.grammars:
+                    line += f'\tGRAMMAR_ID={sv_validation.grammar_id} of {list(sv_validation.grammars)}'
                 if self.verbose:
                     line += f'\t{json.dumps(sv_validation.get_summary(), default=str, indent=2)}'
                 logger.info(line)
@@ -356,12 +384,17 @@ class CallsetScorer(object):
                                     f'{len(sv_validation.query_validation_results)} part(s))')
                         outcome_dir = 'validated' if outcome == Outcome.HIT else 'unvalidated'
                         sv_plot_dir = Path(self.plot_out_dir) / outcome_dir / sv_type / svid
-                        sv_plot_dir.mkdir(parents=True, exist_ok=True)
-                        plot_sv_validation(sv_validation, str(sv_plot_dir), aspect=self.plot_aspect,
-                                           substitute_bases=self.plot_substitute_bases,
-                                           title_svid=self.plot_title_svid,
-                                           title_location=self.plot_title_location,
-                                           axis_length=self.plot_axis_length)
+                        # one subdirectory per alternative grammar
+                        plot_results = {f'grammar_{grammar_id}': grammar_result
+                                        for grammar_id, grammar_result in sv_validation.grammars.items()} \
+                            or {'': sv_validation}
+                        for subdir, plot_result in plot_results.items():
+                            (sv_plot_dir / subdir).mkdir(parents=True, exist_ok=True)
+                            plot_sv_validation(plot_result, str(sv_plot_dir / subdir), aspect=self.plot_aspect,
+                                               substitute_bases=self.plot_substitute_bases,
+                                               title_svid=self.plot_title_svid,
+                                               title_location=self.plot_title_location,
+                                               axis_length=self.plot_axis_length)
 
                 if outcome == Outcome.HIT:
                     correct_calls[sv_type] += 1
@@ -427,7 +460,19 @@ class CallsetScorer(object):
         return precision, correct_calls, total_calls, inconclusive_calls, assembly_hits, read_hits
 
     def score_sv(self, svid: str, records: List[VariantRecord]) -> SVValidationResult:
-        """Score one SV: reconstruct its alt allele(s), validate each query with the
+        """Score one SV. An SV whose records carry GRAMMAR_ID is scored once per grammar
+        and rolled up by SVValidationResult.from_grammars"""
+        by_grammar = group_records_by_grammar_id(records)
+        if by_grammar is None:
+            return self._score_grammar(svid, records)
+        grammars: Dict[int, SVValidationResult] = {}
+        for grammar_id, grammar_records in by_grammar.items():
+            grammars[grammar_id] = self._score_grammar(svid, grammar_records)
+            grammars[grammar_id].grammar_id = grammar_id
+        return SVValidationResult.from_grammars(svid, records, grammars)
+
+    def _score_grammar(self, svid: str, records: List[VariantRecord]) -> SVValidationResult:
+        """Score one grammar of an SV: reconstruct its alt allele(s), validate each query with the
         configured scorers, and return the SVValidation. ``svid`` is the grouping key"""
         sv_type = records[0].info.get('SVTYPE')  # asserted present below, before any use
 
