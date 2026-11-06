@@ -33,16 +33,24 @@ class Cigar:
 
     def __init__(self, cigartuples: List[Tuple[int, int]]):
         self.cigartuples = cigartuples
-        # attributes following mappy.Alignment
+        # attributes following mappy.Alignment, of the aligned block
         self.blen = sum(op_len for op, op_len in cigartuples  # aligned block: M/I/D/=/X, clips excluded
                         if op in self.COLUMN_CONSUMING_OPS and op != self.SOFT_CLIP)
         self.NM = sum(op_len for op, op_len in cigartuples    # edit distance: mismatches + ins + del
                       if op in {self.SEQ_MISMATCH, self.INS, self.DEL})
+        # attributes of the whole alignment, clips included
+        self.num_columns_total = sum(op_len for op, op_len in cigartuples if op in self.COLUMN_CONSUMING_OPS)
+        self.num_columns_error = sum(op_len for op, op_len in cigartuples if op in self.COLUMN_ERROR_OPS)
 
     @property
-    def error_rate(self) -> float:
+    def block_aligned_error_rate(self) -> float:
         """Divergence within the aligned block: NM / blen. Clips don't count."""
         return self.NM / self.blen
+
+    @property
+    def whole_query_error_rate(self) -> float:
+        """Full alignment divergence: every error column over every column, clips included."""
+        return self.num_columns_error / self.num_columns_total
 
     def get_left_clip(self) -> int:
         """Length of the leading soft clip"""
@@ -152,5 +160,5 @@ def edlib_score(query_seq: str, target_seq: str, k: int = -1) -> Union[EdlibScor
 
     matched_target_sequence = target_seq[match_start:match_end + 1]
     cigar = Cigar.from_edlib(result['cigar'])
-    return EdlibScoreResult(error=cigar.error_rate, cigar=cigar,
+    return EdlibScoreResult(error=cigar.whole_query_error_rate, cigar=cigar,
                             matched_target_sequence=matched_target_sequence)

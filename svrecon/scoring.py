@@ -71,8 +71,10 @@ class QueryValidationResult:
 
     @property
     def reason(self) -> QueryValidationReason:
-        if self.reference_matches or not self.decisive:
-            return QueryValidationReason.OTHER
+        if self.reference_matches:
+            return QueryValidationReason.REFERENCE_AMBIGUOUS
+        if not self.decisive:
+            return QueryValidationReason.NOT_ATTEMPTED
         return self.decisive.reason
 
     @property
