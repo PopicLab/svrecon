@@ -4,8 +4,10 @@ import re
 from pathlib import Path
 from typing import Optional, Sequence, TYPE_CHECKING
 
+import matplotlib
 import matplotlib.pyplot as plt
 import wotplot as wp
+from matplotlib.font_manager import FontProperties
 from matplotlib.ticker import MaxNLocator
 
 if TYPE_CHECKING:
@@ -16,6 +18,8 @@ logger = logging.getLogger(__name__)
 K = 15  # wotplot k-mer size
 TICK_COUNT = 8  # target ticks per axis, regardless of sequence length
 X_LABEL_CHARS = 40  # x tick label characters that fit side by side; long labels get fewer ticks
+# TICK_COUNT and X_LABEL_CHARS are for matplotlib's default figure size and tick font size, and scale with the axes
+# length and the tick font size of the plot.
 AXIS_FONTSIZE = 18 
 PLOTTABLE_BASES = 'ACGT'  
 # Axis label per validation source; edlib searches the assembly, like the assembly scorer.
@@ -27,6 +31,22 @@ def _round_ticks(length: int, offset: int, nbins: int = TICK_COUNT) -> list:
     """Round tick values within [offset, offset + length - 1], in axis-label coordinates."""
     top = offset + length - 1
     return [int(v) for v in MaxNLocator(nbins=nbins, integer=True).tick_values(offset, top) if offset <= v <= top]
+
+
+def _tick_scale(ax: 'plt.Axes', axis: str) -> float:
+    """Axes length over its length on matplotlib's default figure, times the default tick font size over the
+    current one; axis is 'x' or 'y'."""
+    default = matplotlib.rcParamsDefault
+    box = ax.get_position()
+    if axis == 'x':
+        length = box.width * ax.figure.get_figwidth()
+        default_length = default['figure.figsize'][0] * (default['figure.subplot.right'] - default['figure.subplot.left'])
+    else:
+        length = box.height * ax.figure.get_figheight()
+        default_length = default['figure.figsize'][1] * (default['figure.subplot.top'] - default['figure.subplot.bottom'])
+    size = FontProperties(size=plt.rcParams[f'{axis}tick.labelsize']).get_size_in_points()
+    default_size = FontProperties(size=default[f'{axis}tick.labelsize']).get_size_in_points()
+    return length / default_length * default_size / size
 
 
 def plot_dot_plot(s1: str, s2: str, title: Optional[str], output_path: Optional[str],
@@ -51,9 +71,11 @@ def plot_dot_plot(s1: str, s2: str, title: Optional[str], output_path: Optional[
     # Ticks sit at round labels: column c is s1 position c + s1_offset; row 0 is s2's last k-mer,
     # so s2 position v + s2_offset is row num_rows - 1 - v.
     x_label_len = len(f'{s1_offset + num_cols - 1:,}')
-    x_ticks = _round_ticks(num_cols, s1_offset, nbins=max(2, min(TICK_COUNT, X_LABEL_CHARS // x_label_len)))
+    x_scale, y_scale = _tick_scale(ax, 'x'), _tick_scale(ax, 'y')
+    x_ticks = _round_ticks(num_cols, s1_offset, nbins=max(2, min(round(TICK_COUNT * x_scale),
+                                                                 int(X_LABEL_CHARS * x_scale) // x_label_len)))
     ax.set_xticks([v - s1_offset for v in x_ticks], [f'{v:,}' for v in x_ticks])
-    y_ticks = _round_ticks(num_rows, s2_offset)
+    y_ticks = _round_ticks(num_rows, s2_offset, nbins=max(2, round(TICK_COUNT * y_scale)))
     ax.set_yticks([num_rows - 1 - (v - s2_offset) for v in y_ticks], [f'{v:,}' for v in y_ticks])
 
     # s1_boundaries: s1/x-axis coords. s2_boundaries: s2/y-axis, row-indexed like the ticks.
