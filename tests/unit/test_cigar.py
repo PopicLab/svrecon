@@ -106,6 +106,18 @@ def test_maximum_error_window(seed, errors, expected):
     assert ERROR_WINDOW_CHECK.validate(string_to_cigar(''.join(columns)), None).status is expected
 
 
+@pytest.mark.parametrize('seed', range(20))
+def test_error_windows_cover_every_column(seed):
+    """random runs of every column op: one window per starting column, each holding the error
+    columns counted directly"""
+    rng = random.Random(seed)
+    columns = ''.join(rng.choice('MXIDS') * rng.randint(1, 3 * WINDOW // 2) for _ in range(30))
+    windows = string_to_cigar(columns).get_error_windows(WINDOW, WINDOW_ERROR)
+    expected = [sum(op in COLUMN_ERROR_OPS + 'S' for op in columns[start:start + WINDOW])
+                for start in range(len(columns) - WINDOW + 1)]
+    assert [errors for _, errors in windows] == expected
+
+
 @pytest.mark.parametrize('run_length,expected', [
     (0, QueryValidationStatus.PASS),
     (MAX_UNMAPPABLE - 1, QueryValidationStatus.PASS),
